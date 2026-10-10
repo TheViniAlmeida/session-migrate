@@ -9,7 +9,8 @@ import json
 import os
 import re
 import stat
-from collections.abc import Mapping, Sequence
+import tempfile
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from hashlib import sha256
@@ -20,15 +21,17 @@ from typing import Any
 from session_migrate.catalog import Catalog, CatalogEntry, CatalogRoot, CatalogTransferSource
 from session_migrate.conversion import load_kilo_session, load_opencode_session, load_session
 from session_migrate.discovery import normalized_source_id
-from session_migrate.errors import SessionMigrateError
+from session_migrate.errors import SessionMigrateError, SourceReadLimitError
 from session_migrate.model import AgentFormat, Session, TargetFormat
 from session_migrate.operations import (
+    CancellationToken,
     OperationKind,
     OperationRequest,
     OperationResult,
     ProgressCallback,
     _catalog_virtual_source_environment,
     _load_shared_database_source,
+    _temporary_root,
     run_operation,
 )
 
@@ -354,26 +357,262 @@ def resolve_source(catalog: Catalog, profile: Profile, ref: SessionRef) -> Catal
     return source
 
 
+def source_read_paths(
+    source_format: AgentFormat | None,
+    path: Path,
+    root: Path,
+    *,
+    max_entries: int = 100_000,
+) -> tuple[Path, ...]:
+    """Enumerate only authoritative selected-session files, with bounded directory work.
+
+    Directory paths are membership/identity witnesses, never a byte estimate.
+    Native parsing and filename/sequence validation remain in the adapters.
+    """
+    root = root.resolve(strict=True)
+    boundary = root.parent if root.is_file() else root
+
+    def validate(candidate: Path) -> None:
+        if ".." in candidate.parts:
+            raise SessionMigrateError("Source component cannot contain parent traversal.")
+        try:
+            candidate.relative_to(boundary)
+            for ancestor in (candidate, *candidate.parents):
+                if ancestor.is_symlink():
+                    raise SessionMigrateError("Source files/directories cannot be symlinks.")
+                if ancestor == boundary:
+                    break
+            candidate.resolve(strict=False).relative_to(boundary)
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise SessionMigrateError(
+                "Source component is outside the selected profile root."
+            ) from exc
+
+    paths: list[Path]
+    validate(path)
+    if source_format == AgentFormat.KIMI:
+        from session_migrate.formats import kimi
+
+        directory, wire, state = kimi._source_paths(path)
+        paths = [directory, directory / "agents", directory / "agents/main", wire, state]
+    elif source_format == AgentFormat.VIBE:
+        from session_migrate.formats import vibe
+
+        directory, messages, meta = vibe._source_paths(path)
+        paths = [directory, messages, meta]
+    elif source_format == AgentFormat.GROK:
+        directory = path if path.is_dir() else path.parent
+        paths = [directory, directory / "summary.json", directory / "updates.jsonl"]
+    elif source_format == AgentFormat.OPENHANDS:
+        if path.name == "events" and path.is_dir():
+            conversation, events = path.parent, path
+        elif path.is_dir():
+            conversation, events = path, path / "events"
+        else:
+            events, conversation = path.parent, path.parent.parent
+        validate(conversation)
+        validate(events)
+        paths = [conversation, events, conversation / "base_state.json"]
+        try:
+            with os.scandir(events) as entries:
+                for count, entry in enumerate(entries, 1):
+                    if count > max_entries:
+                        raise SourceReadLimitError(
+                            "Source directory exceeds the file-count budget."
+                        )
+                    if entry.name.startswith("event-") and entry.name.endswith(".json"):
+                        paths.append(Path(entry.path))
+        except OSError as exc:
+            raise SessionMigrateError("Source event directory is unavailable.") from exc
+    else:
+        paths = [path, Path(str(path) + "-wal"), Path(str(path) + "-shm")]
+    for candidate in paths:
+        validate(candidate)
+        if candidate.exists() and not (candidate.is_file() or candidate.is_dir()):
+            raise SessionMigrateError("Source component is not a regular file/directory.")
+    return tuple(sorted(set(paths)))
+
+
+def _path_revision(paths: tuple[Path, ...]) -> tuple:
+    values = []
+    for path in paths:
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            values.append((path, None))
+            continue
+        values.append(
+            (
+                path,
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+                stat.S_IFMT(info.st_mode),
+            )
+        )
+    return tuple(values)
+
+
+def _open_source_file(path: Path) -> int:
+    """Open every path component without following symlinks, including parents."""
+    directory = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in path.parts[1:-1]:
+            next_directory = os.open(
+                component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory
+            )
+            os.close(directory)
+            directory = next_directory
+        return os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    finally:
+        os.close(directory)
+
+
+def load_bounded_source(
+    path: Path,
+    source_format: AgentFormat | None,
+    *,
+    root: Path,
+    max_source_bytes: int,
+    environ: Mapping[str, str] | None = None,
+) -> Session:
+    """Parse a bounded immutable private copy; retain original path/hash/provenance."""
+    if (
+        isinstance(max_source_bytes, bool)
+        or not isinstance(max_source_bytes, int)
+        or max_source_bytes < 1
+    ):
+        raise SessionMigrateError("Source byte budget must be a positive integer.")
+    root = root.resolve(strict=True)
+    if root.is_file():
+        root = root.parent
+    paths = source_read_paths(source_format, path, root)
+    before = _path_revision(paths)
+    temp_root = _temporary_root(os.environ if environ is None else environ)
+    with tempfile.TemporaryDirectory(prefix="session-migrate-bounded-", dir=temp_root) as folder:
+        snapshot_root = Path(folder)
+        snapshot_root.chmod(0o700)
+        total = 0
+        for original in paths:
+            if not original.exists():
+                continue
+            target = snapshot_root / original.relative_to(root)
+            try:
+                target.resolve(strict=False).relative_to(snapshot_root)
+            except (ValueError, RuntimeError, OSError) as exc:
+                raise SessionMigrateError(
+                    "Snapshot target is outside its private directory."
+                ) from exc
+            if original.is_dir():
+                target.mkdir(parents=True, exist_ok=True, mode=0o700)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            descriptor = _open_source_file(original)
+            with os.fdopen(descriptor, "rb") as reader:
+                info = os.fstat(reader.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > max_source_bytes - total:
+                    raise SourceReadLimitError("Source exceeds the interactive read budget.")
+                output = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(output, "wb") as writer:
+                    while chunk := reader.read(min(64 * 1024, max_source_bytes - total + 1)):
+                        total += len(chunk)
+                        if total > max_source_bytes:
+                            raise SourceReadLimitError(
+                                "Source grew beyond the interactive read budget."
+                            )
+                        writer.write(chunk)
+        after_paths = source_read_paths(source_format, path, root)
+        if paths != after_paths or before != _path_revision(after_paths):
+            raise SessionMigrateError("Source changed during bounded snapshot.")
+        selected = snapshot_root / path.relative_to(root)
+        try:
+            selected.resolve(strict=False).relative_to(snapshot_root)
+        except (ValueError, RuntimeError, OSError) as exc:
+            raise SessionMigrateError(
+                "Snapshot selection is outside its private directory."
+            ) from exc
+        if source_format == AgentFormat.KIMI:
+            from session_migrate.formats import kimi
+
+            session = kimi.parse_session(selected, original_session_dir=kimi._source_paths(path)[0])
+        else:
+            session = load_session(selected, source_format)
+        if before != _path_revision(source_read_paths(source_format, path, root)):
+            raise SessionMigrateError("Source changed during bounded parsing.")
+        try:
+            original_path = root / session.source_path.relative_to(snapshot_root)
+        except ValueError:
+            original_path = path
+        return replace(session, source_path=original_path)
+
+
 def read_session(
     catalog: Catalog,
     profile: Profile,
     ref: SessionRef,
     *,
     base_environ: Mapping[str, str] | None = None,
+    max_source_bytes: int | None = None,
 ) -> Session:
     """Load authoritative native content only for the selected identity."""
     source = resolve_source(catalog, profile, ref)
+    if max_source_bytes is not None:
+        if (
+            isinstance(max_source_bytes, bool)
+            or not isinstance(max_source_bytes, int)
+            or max_source_bytes < 1
+        ):
+            raise SessionMigrateError("Source byte budget must be a positive integer.")
+        if source.path is not None:
+            paths = source_read_paths(profile.format, source.path, profile.root)
+            total = sum(candidate.stat().st_size for candidate in paths if candidate.is_file())
+            if total > max_source_bytes:
+                raise SourceReadLimitError("Source exceeds the interactive read budget.")
+        elif profile.format not in _VIRTUAL_CLI:
+            # Shared databases lack a selected-export budget API. This conservative stat
+            # preflight is not an atomic cap; their existing adapter safety limits remain.
+            names = {
+                AgentFormat.HERMES: "state.db",
+                AgentFormat.MASTRACODE: "mastra.db",
+                AgentFormat.DEVIN: "sessions.db",
+            }
+            database = (
+                profile.root if profile.root.is_file() else profile.root / names[profile.format]
+            )
+            paths = source_read_paths(profile.format, database, profile.root)
+            if (
+                sum(candidate.stat().st_size for candidate in paths if candidate.is_file())
+                > max_source_bytes
+            ):
+                raise SourceReadLimitError(
+                    "Source exceeds the conservative shared-store preflight budget."
+                )
     values = _source_environment(profile, base_environ)
     if profile.format in _VIRTUAL_CLI:
         loader = (
             load_opencode_session if profile.format == AgentFormat.OPENCODE else load_kilo_session
         )
-        session = loader(ref.native_id, source_cli=_cli(profile, source=True), environ=values)
+        options = {"max_source_bytes": max_source_bytes} if max_source_bytes is not None else {}
+        session = loader(
+            ref.native_id, source_cli=_cli(profile, source=True), environ=values, **options
+        )
     elif profile.format in _SHARED:
         session = _load_shared_database_source(profile.format, ref.native_id, profile.root)
     else:
         assert source.path is not None
-        session = load_session(source.path, profile.format)
+        session = (
+            load_session(source.path, profile.format)
+            if max_source_bytes is None
+            else load_bounded_source(
+                source.path,
+                profile.format,
+                root=profile.root,
+                max_source_bytes=max_source_bytes,
+                environ=values,
+            )
+        )
     if (
         session.source_format != ref.format
         or not session.session_id
@@ -397,6 +636,9 @@ def run_profile_operation(
     *,
     base_environ: Mapping[str, str] | None = None,
     progress: ProgressCallback | None = None,
+    cancellation: CancellationToken | None = None,
+    prepublication_check: Callable[[], None] | None = None,
+    max_source_bytes: int | None = None,
 ) -> OperationResult:
     """Bind a transfer to two explicit profiles; adapters re-read native content."""
     if request.command != OperationKind.TRANSFER:
@@ -469,7 +711,13 @@ def run_profile_operation(
         home=home,
     )
     return run_operation(
-        bound, environ=target_values, source_environ=source_values, progress=progress
+        bound,
+        environ=target_values,
+        source_environ=source_values,
+        progress=progress,
+        cancellation=cancellation,
+        prepublication_check=prepublication_check,
+        max_source_bytes=max_source_bytes,
     )
 
 

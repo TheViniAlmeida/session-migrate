@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, fields, replace
@@ -14,6 +15,7 @@ from session_migrate.catalog import Catalog, default_catalog_path
 from session_migrate.conversion import (
     KILO_HOME_UNSUPPORTED,
     OPENCODE_HOME_UNSUPPORTED,
+    ConversionArtifact,
     ConversionOptions,
     content_free_result,
     convert_session,
@@ -48,7 +50,11 @@ from session_migrate.conversion import (
     write_artifact,
 )
 from session_migrate.discovery import locate_session, normalized_source_id
-from session_migrate.errors import NativeImportPartialError, SessionMigrateError
+from session_migrate.errors import (
+    NativeImportPartialError,
+    OperationCancelledError,
+    SessionMigrateError,
+)
 from session_migrate.model import AgentFormat, Session, TargetFormat
 
 _SHARED_DATABASE_SOURCES = {
@@ -77,6 +83,7 @@ class ProgressStage(StrEnum):
     COMPLETED = "completed"
     NEEDS_RECONCILE = "needs_reconcile"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +92,49 @@ class ProgressEvent:
 
 
 ProgressCallback = Callable[[ProgressEvent], None]
+
+
+class CancellationToken:
+    """One operation's atomic cancel/publication boundary; observers cannot cancel."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cancelled = self._publishing = self._claimed = self._closed = False
+
+    def request_cancel(self) -> bool:
+        with self._lock:
+            if self._publishing or self._closed:
+                return False
+            self._cancelled = True
+            return True
+
+    @property
+    def publishing(self) -> bool:
+        with self._lock:
+            return self._publishing
+
+    def claim(self) -> None:
+        with self._lock:
+            if self._claimed:
+                raise SessionMigrateError("cancellation token already belongs to an operation")
+            self._claimed = True
+
+    def check(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                raise OperationCancelledError("Operation cancelled before publication.")
+
+    def begin_publication(self) -> None:
+        with self._lock:
+            if self._cancelled:
+                raise OperationCancelledError("Operation cancelled before publication.")
+            if self._publishing or self._closed:
+                raise SessionMigrateError("operation publication already consumed")
+            self._publishing = True
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -210,12 +260,42 @@ def run_operation(
     environ: Mapping[str, str] | None = None,
     progress: ProgressCallback | None = None,
     source_environ: Mapping[str, str] | None = None,
+    cancellation: CancellationToken | None = None,
+    prepublication_check: Callable[[], None] | None = None,
+    max_source_bytes: int | None = None,
 ) -> OperationResult:
     """Snapshot target/source environments independently and use validated adapters.
 
     Omitted source_environ preserves the legacy single-environment contract.
     """
 
+    if cancellation is not None:
+        cancellation.claim()
+    try:
+        return _run_operation(
+            request,
+            environ=environ,
+            source_environ=source_environ,
+            progress=progress,
+            cancellation=cancellation,
+            prepublication_check=prepublication_check,
+            max_source_bytes=max_source_bytes,
+        )
+    finally:
+        if cancellation is not None:
+            cancellation.close()
+
+
+def _run_operation(
+    request: OperationRequest,
+    *,
+    environ: Mapping[str, str] | None,
+    source_environ: Mapping[str, str] | None,
+    progress: ProgressCallback | None,
+    cancellation: CancellationToken | None,
+    prepublication_check: Callable[[], None] | None,
+    max_source_bytes: int | None,
+) -> OperationResult:
     values = dict(os.environ if environ is None else environ)
     if environ is None and not values.get("HOME"):
         values["HOME"] = str(Path.home())
@@ -243,7 +323,20 @@ def run_operation(
         selected["TMPDIR"] = str(_temporary_root(selected))
     _notify(progress, ProgressStage.LOADING)
     try:
-        result = _execute(request, values, progress, source_values)
+        if cancellation is not None:
+            cancellation.check()
+        result = _execute(
+            request,
+            values,
+            progress,
+            source_values,
+            cancellation,
+            prepublication_check,
+            max_source_bytes,
+        )
+    except OperationCancelledError:
+        _notify(progress, ProgressStage.CANCELLED)
+        raise
     except NativeImportPartialError:
         _notify(progress, ProgressStage.NEEDS_RECONCILE)
         raise
@@ -259,6 +352,9 @@ def _execute(
     environ: Mapping[str, str],
     progress: ProgressCallback | None,
     source_environ: Mapping[str, str],
+    cancellation: CancellationToken | None,
+    prepublication_check: Callable[[], None] | None,
+    max_source_bytes: int | None,
 ) -> OperationResult:
     if request.command != OperationKind.TRANSFER and (
         request.path is None or request.target_format is None
@@ -266,6 +362,8 @@ def _execute(
         raise SessionMigrateError("convert/import require a source path and target format")
     if request.command == OperationKind.CONVERT and request.output is None:
         raise SessionMigrateError("convert requires an output path")
+    source_root = None
+    source_options = {"max_source_bytes": max_source_bytes} if max_source_bytes is not None else {}
     target_cli_version = request.target_cli_version
     if request.command == "transfer":
         session = None
@@ -314,6 +412,7 @@ def _execute(
                 source_reference = catalog.session_source_for_transfer(catalog_id)
             source_format = source_reference.format
             source_path = source_reference.path
+            source_root = source_reference.root
             if request.source_format and AgentFormat(request.source_format) != source_format:
                 raise SessionMigrateError("--from does not match the catalog session format")
             requested_source_id = entry.session_id
@@ -341,7 +440,10 @@ def _execute(
                     else load_kilo_session
                 )
                 session = loader(
-                    requested_source_id, source_cli=request.source_cli, environ=source_environ
+                    requested_source_id,
+                    source_cli=request.source_cli,
+                    environ=source_environ,
+                    **source_options,
                 )
             elif source_format in _SHARED_DATABASE_SOURCES:
                 source_home = request.source_home or default_target_home(
@@ -356,6 +458,7 @@ def _execute(
                 source_home = request.source_home or default_target_home(
                     source_format, environ=source_environ
                 )
+                source_root = source_home
                 source_path = locate_session(
                     source_format,
                     requested_source_id,
@@ -388,6 +491,7 @@ def _execute(
                     requested_source_id,
                     source_cli=request.source_cli,
                     environ=virtual_source_environ or source_environ,
+                    **source_options,
                 )
             elif source_format in _SHARED_DATABASE_SOURCES:
                 if not requested_source_id:
@@ -401,7 +505,9 @@ def _execute(
                 )
             else:
                 assert source_path is not None
-                session = load_session(source_path, source_format)
+                session = _load_path_source(
+                    source_path, source_format, source_root, source_environ, max_source_bytes
+                )
         if not session.session_id:
             raise SessionMigrateError("discovered transcript has no native session ID metadata")
         if requested_source_id and (
@@ -422,8 +528,12 @@ def _execute(
             )
     else:
         source_format = AgentFormat(request.source_format) if request.source_format else None
-        session = load_session(request.path, source_format)
+        session = _load_path_source(
+            request.path, source_format, None, source_environ, max_source_bytes
+        )
         target_format = TargetFormat(request.target_format)
+    if cancellation is not None:
+        cancellation.check()
     if target_format == TargetFormat.OPENCODE and request.home:
         raise SessionMigrateError(OPENCODE_HOME_UNSUPPORTED)
     if target_format == TargetFormat.KILO and request.home:
@@ -462,6 +572,7 @@ def _execute(
         ),
         environ=environ,
     )
+    home: Path | None = None
     if request.command == "convert":
         output_path = request.output
         manifest_path = output_path.with_name(f"{output_path.name}.session-migrate.json")
@@ -502,8 +613,55 @@ def _execute(
         manifest_path=manifest_path,
         dry_run=dry_run,
     )
+    if cancellation is not None:
+        cancellation.check()
+        _notify(progress, ProgressStage.PREFLIGHT)
+        if not dry_run:
+            _install(
+                request,
+                artifact,
+                target_format,
+                output_path,
+                manifest_path,
+                home,
+                environ,
+                True,
+            )
+        cancellation.check()
+        if not dry_run:
+            if prepublication_check is not None:
+                prepublication_check()
+            cancellation.check()
+            cancellation.begin_publication()
+    if cancellation is None and not dry_run and prepublication_check is not None:
+        prepublication_check()
     _notify(progress, ProgressStage.PREFLIGHT if dry_run else ProgressStage.INSTALLING)
-    if target_format == TargetFormat.OPENCODE and request.command != "convert":
+    _install(
+        request,
+        artifact,
+        target_format,
+        output_path,
+        manifest_path,
+        home,
+        environ,
+        dry_run,
+    )
+    return OperationResult(**result)
+
+
+def _install(
+    request: OperationRequest,
+    artifact: ConversionArtifact,
+    target_format: TargetFormat,
+    output_path: Path | str,
+    manifest_path: Path,
+    home: Path | None,
+    environ: Mapping[str, str],
+    dry_run: bool,
+) -> None:
+    if request.command == "convert" and dry_run:
+        ensure_target_paths_available(output_path, manifest_path)
+    elif target_format == TargetFormat.OPENCODE and request.command != "convert":
         install_opencode_artifact(
             artifact,
             manifest_path=manifest_path,
@@ -585,7 +743,26 @@ def _execute(
         )
     else:
         ensure_target_paths_available(output_path, manifest_path)
-    return OperationResult(**result)
+
+
+def _load_path_source(
+    path: Path,
+    source_format: AgentFormat | None,
+    root: Path | None,
+    environ: Mapping[str, str],
+    max_source_bytes: int | None,
+) -> Session:
+    if max_source_bytes is None:
+        return load_session(path, source_format)
+    from session_migrate.profiles import load_bounded_source
+
+    return load_bounded_source(
+        path,
+        source_format,
+        root=root or path.resolve().parent,
+        max_source_bytes=max_source_bytes,
+        environ=environ,
+    )
 
 
 def _load_shared_database_source(

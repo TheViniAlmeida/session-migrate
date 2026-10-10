@@ -1,7 +1,7 @@
 # Plano de implementação — evolução do SessionMigrate
 
 Status: implementação em andamento. Spec/plano revisão 1, 09/10/2026; progresso atualizado em 10/10/2026.
-F2A integrada em `next`; F2B é o marco atual. Os demais marcos seguem os gates abaixo.
+F2A e F2B integradas em `next`; F2C é o marco atual. Os demais marcos seguem os gates abaixo.
 
 Fonte normativa: [spec](../specs/interactive-migration.md), revisão 1.
 Base de código: commit `662976e`. A fase 1 não integra este plano.

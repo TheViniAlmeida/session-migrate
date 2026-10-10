@@ -1,6 +1,6 @@
 # Session migration specification
 
-This is the user-facing contract for `session-migrate` 0.11.0.
+This is the user-facing contract for `session-migrate` 0.12.0.dev1.
 
 ## Scope
 
@@ -130,7 +130,7 @@ Cursor additionally requires exact digests/sizes for four shipped artifacts.
 The shared operation API accepts typed source selectors/options, an ephemeral
 environment mapping, and content-free stage observers. CLI behavior remains the
 same. It never changes the process environment, exposes conversation bodies in
-its result/progress, or persists profiles. A confirmed native import followed
+its result/progress, or automatically persists profiles. A confirmed native import followed
 by failed verification/finalization has a typed `needs_reconcile` state so
 callers can avoid retrying an already imported identity.
 
@@ -207,3 +207,15 @@ Linux build and target writing is text-only. Exact public-client source capture
 now proves a real vendor-backed checkpoint, sanitized cold reload, and same-ID
 continuation; the existing native TUI/loader/backend-blob evidence separately
 proves generated text history is native-resolvable.
+
+## Optional terminal interface
+
+`smigrate tui` uses the explicitly installed `tui` extra and an interactive
+terminal. Root-qualified profiles select separate source/target environments;
+profiles are ephemeral unless saved explicitly to a new private JSON file.
+The interface lists metadata, previews the selected session, and prepares a
+new-session transfer for manual confirmation. Changes to source or options
+invalidate the prepared transfer. Cancellation stops before publication; after
+publication starts the interface continues observing verification. Target naming,
+in-place update and the web dashboard remain roadmap features. See
+[terminal interface](terminal-ui.md) for read limits and native validation scope.

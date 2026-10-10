@@ -23,6 +23,7 @@ from session_migrate.errors import (
     JsonlError,
     NativeImportPartialError,
     SessionMigrateError,
+    SourceReadLimitError,
 )
 from session_migrate.formats import (
     antigravity,
@@ -189,6 +190,7 @@ def load_opencode_session(
     *,
     source_cli: Path | None = None,
     environ: Mapping[str, str] | None = None,
+    max_source_bytes: int | None = None,
 ) -> Session:
     """Export and parse one native OpenCode session through its official CLI."""
 
@@ -212,6 +214,15 @@ def load_opencode_session(
         os.chmod(directory, 0o700)
         export_path = directory / "export.json"
         _invoke_opencode_export(cli, session_id, export_path, values)
+        if max_source_bytes is not None:
+            if (
+                isinstance(max_source_bytes, bool)
+                or not isinstance(max_source_bytes, int)
+                or max_source_bytes < 1
+            ):
+                raise SessionMigrateError("Source byte budget must be a positive integer.")
+            if export_path.stat().st_size > max_source_bytes:
+                raise SourceReadLimitError("Export exceeds the interactive source read budget.")
         session = load_session(export_path, AgentFormat.OPENCODE)
     if session.session_id != session_id:
         raise SessionMigrateError("OpenCode export metadata does not match the requested session")
@@ -225,6 +236,7 @@ def load_kilo_session(
     *,
     source_cli: Path | None = None,
     environ: Mapping[str, str] | None = None,
+    max_source_bytes: int | None = None,
 ) -> Session:
     """Export and parse one native Kilo session through its official CLI."""
 
@@ -248,6 +260,15 @@ def load_kilo_session(
         os.chmod(directory, 0o700)
         export_path = directory / "export.json"
         _invoke_kilo_export(cli, session_id, export_path, values)
+        if max_source_bytes is not None:
+            if (
+                isinstance(max_source_bytes, bool)
+                or not isinstance(max_source_bytes, int)
+                or max_source_bytes < 1
+            ):
+                raise SessionMigrateError("Source byte budget must be a positive integer.")
+            if export_path.stat().st_size > max_source_bytes:
+                raise SourceReadLimitError("Export exceeds the interactive source read budget.")
         session = load_session(export_path, AgentFormat.KILO)
     if session.session_id != session_id:
         raise SessionMigrateError("Kilo export metadata does not match the requested session")
