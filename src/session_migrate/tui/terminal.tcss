@@ -8,3 +8,11 @@ Button { margin-right: 1; }
 #session-list { height: 1fr; min-height: 6; }
 #preview-text { height: 1fr; min-height: 8; }
 #proposal, #receipt, #capability { height: auto; margin-bottom: 1; }
+#app-navigation { height: auto; padding: 0 1; }
+#operations-status, #operations-read-effects { height: auto; padding: 0 1; }
+#operations-navigation, #operations-actions { height: auto; padding: 0 1; }
+#operations-profiles { margin: 0 1 1 1; }
+#operation-id { width: 1fr; margin-right: 1; }
+#operations-content { height: 1fr; }
+#operations-list { height: 10; min-height: 4; margin-bottom: 1; }
+#operation-detail { height: auto; }

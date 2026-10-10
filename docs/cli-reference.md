@@ -20,6 +20,13 @@ session-migrate catalog roots list|add|remove ...
 session-migrate catalog list [FILTERS]
 session-migrate catalog search QUERY [FILTERS]
 session-migrate catalog show CATALOG_ID [--include-paths] [--json]
+session-migrate lineage list [--limit N] [--offset N] [--json]
+session-migrate lineage inspect --operation-id ID [--json]
+session-migrate assess [--operation-id ID | QUALIFIED PAIR] [--profiles PATH] [--json]
+session-migrate reconcile import|transfer [ORIGINAL OPTIONS] --operation-id ID --source-file PATH --input-file PATH [--confirm] [--json]
+session-migrate adopt [QUALIFIED CURRENT PROFILES] --source-client-version VERSION --target-client-version VERSION [--confirm] [--json]
+session-migrate lineage cancel-ready --operation-id ID [--confirm] [--json]
+session-migrate lineage baseline --baseline-id ID [--json]
 ```
 
 `FORMAT` and `TARGET` accept:
@@ -377,3 +384,10 @@ Saved proposal JSON is informational. There is no `--apply`, confirm or
 cross-process replay. Use the TUI or the core API in one process to publish the
 same prepared artifact. Direct `convert`/`import`/`transfer` commands continue to
 execute normally; they do not apply a previous proposal JSON.
+
+## Continuity
+
+`lineage list`, `lineage inspect` and `assess` consume existing private metadata
+and current root-qualified profiles. They do not import, update or resume a
+session. See [continuity and recovery](continuity.md) for selection, profile
+bindings, read effects, status meanings and explicit limits.

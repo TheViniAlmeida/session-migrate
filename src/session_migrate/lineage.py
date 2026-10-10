@@ -808,12 +808,13 @@ class _PinnedNamespace:
 class OperationGuard:
     """Private live handle for one store, operation, and target namespace."""
 
-    def __init__(self, store, operation_id, namespace, locks):
+    def __init__(self, store, operation_id, namespace, locks, namespaces=None):
         self._store = store
         self._operation_id = operation_id
         self._namespace = namespace
         self._store_uuid = store._store_uuid
         self._locks = locks
+        self._namespaces = (namespace,) if namespaces is None else namespaces
         self._active = True
         self._ready_claim = None
         self._publication_claim = False
@@ -843,10 +844,19 @@ class LineageStore:
         self._fault_hook = None
         self._store_uuid = ""
         self._installed = False
+        self._guarded_persist_renamed = False
 
     @classmethod
     def _open(
-        cls, path, *, create, readonly=False, missing_ok=False, max_image_bytes=MAX_IMAGE_BYTES
+        cls,
+        path,
+        *,
+        create,
+        readonly=False,
+        missing_ok=False,
+        max_image_bytes=MAX_IMAGE_BYTES,
+        creation_context=None,
+        creation_guard=None,
     ):
         _count(max_image_bytes, MAX_IMAGE_BYTES)
         _require(max_image_bytes >= 32768, "image_budget")
@@ -882,17 +892,15 @@ class LineageStore:
                     store._store_uuid = uuid.uuid4().hex
                     os.write(lock_fd, (store._store_uuid + "\n").encode("ascii"))
                     os.fsync(lock_fd)
-                    connection = _memory()
+                    connection = store._memory_image()
                     try:
-                        for statement in _SCHEMA:
-                            connection.execute(statement)
-                        connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                        connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
-                        connection.execute(
-                            "INSERT INTO metadata VALUES (1,1,?,?,?)",
-                            (store._store_uuid, *store._main_witness),
-                        )
-                        store._persist(connection.serialize(), None)
+                        store._create_database(connection, creation_context)
+                        if creation_guard is None:
+                            store._persist(connection.serialize(), None)
+                        else:
+                            store._persist(
+                                connection.serialize(), None, external_guard=creation_guard
+                            )
                     finally:
                         connection.close()
                 else:
@@ -901,17 +909,40 @@ class LineageStore:
                     connection.close()
             return store
         except (OSError, sqlite3.Error, ValueError, LineageError) as error:
-            if store is not None:
-                store.close()
-            else:
-                if locks_fd is not None:
-                    os.close(locks_fd)
-                if lock_fd is not None:
-                    os.close(lock_fd)
-                namespace.close()
+            uncertain_creation = (
+                create
+                and creation_guard is not None
+                and store is not None
+                and (store._installed or store._guarded_persist_renamed)
+            )
+            try:
+                if store is not None:
+                    store.close()
+                else:
+                    if locks_fd is not None:
+                        os.close(locks_fd)
+                    if lock_fd is not None:
+                        os.close(lock_fd)
+                    namespace.close()
+            finally:
+                if uncertain_creation:
+                    raise LineageError("persistence_uncertain") from None
             if isinstance(error, LineageError):
                 raise error from None
             raise LineageError("open_failed") from None
+
+    _memory_image = staticmethod(_memory)
+
+    def _create_database(self, connection, creation_context=None):
+        _require(creation_context is None)
+        for statement in _SCHEMA:
+            connection.execute(statement)
+        connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        connection.execute(f"PRAGMA application_id={APPLICATION_ID}")
+        connection.execute(
+            "INSERT INTO metadata VALUES (1,1,?,?,?)",
+            (self._store_uuid, *self._main_witness),
+        )
 
     @classmethod
     def create_new(cls, path, *, max_image_bytes=MAX_IMAGE_BYTES):
@@ -1001,15 +1032,25 @@ class LineageStore:
                     raise LineageError("lock_cleanup_failed") from None
 
     @contextmanager
-    def lock_operation(self, operation_id: str, target_namespace: NativeNamespace):
+    def lock_operation(
+        self,
+        operation_id: str,
+        target_namespace: NativeNamespace,
+        additional_namespaces: tuple[NativeNamespace, ...] = (),
+    ):
         _require(not self._readonly, "readonly_store")
         _identifier(operation_id)
         namespace = _validated(NativeNamespace, target_namespace)
+        _require(type(additional_namespaces) is tuple)
+        namespaces = (namespace,) + tuple(
+            _validated(NativeNamespace, item) for item in additional_namespaces
+        )
         operation_key = hashlib.sha256(
             b"session-migrate/operation/v1\0" + operation_id.encode("ascii")
         ).hexdigest()
-        names = sorted((operation_key + ".lock", namespace.lock_key + ".lock"))
-        _require(len(set(names)) == 2, "lock_collision")
+        namespace_keys = {item.lock_key for item in namespaces}
+        _require(operation_key not in namespace_keys, "lock_collision")
+        names = sorted(key + ".lock" for key in namespace_keys | {operation_key})
         locks = []
         owned = []
         guard = None
@@ -1036,7 +1077,7 @@ class LineageStore:
                     os.fsync(self._locks_fd)
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
                 self._check_file(name, descriptor, _identity(info), self._locks_fd)
-            guard = OperationGuard(self, operation_id, namespace, locks)
+            guard = OperationGuard(self, operation_id, namespace, locks, namespaces)
             guard.check()
             yield guard
         except OSError:
@@ -1111,7 +1152,7 @@ class LineageStore:
 
     def _load(self):
         image, witness = self._read_image()
-        connection = _memory(image)
+        connection = self._memory_image(image)
         try:
             self._validate_database(connection, len(image))
             return connection, witness
@@ -1122,31 +1163,32 @@ class LineageStore:
             connection.close()
             raise LineageError("invalid_image") from None
 
-    def _validate_database(self, connection, image_size):
+    def _validate_image_header(self, connection, *, application_id, schema_version, schema):
+        """Shared SQLite safety checks; each store supplies its exact own schema."""
         _require(connection.execute("PRAGMA page_size").fetchone() == (4096,), "unknown_schema")
         _require(
-            connection.execute("PRAGMA user_version").fetchone() == (SCHEMA_VERSION,),
+            connection.execute("PRAGMA user_version").fetchone() == (schema_version,),
             "unknown_schema",
         )
         _require(
-            connection.execute("PRAGMA application_id").fetchone() == (APPLICATION_ID,),
+            connection.execute("PRAGMA application_id").fetchone() == (application_id,),
             "unknown_schema",
         )
-        _require(_schema_rows(connection) == _expected_schema(), "unknown_schema")
+        _require(_schema_rows(connection) == schema, "unknown_schema")
         _require(connection.execute("PRAGMA quick_check").fetchall() == [("ok",)], "invalid_image")
         _require(not connection.execute("PRAGMA foreign_key_check").fetchall(), "invalid_image")
+
+    def _validate_database(self, connection, image_size):
+        self._validate_image_header(
+            connection,
+            application_id=APPLICATION_ID,
+            schema_version=SCHEMA_VERSION,
+            schema=_expected_schema(),
+        )
         metadata = connection.execute("SELECT * FROM metadata").fetchall()
         _require(len(metadata) == 1 and metadata[0][:2] == (1, 1), "unknown_schema")
         _, _, store_uuid, device, inode = metadata[0]
-        _require(type(store_uuid) is str and bool(_UUID.fullmatch(store_uuid)), "lock_binding")
-        _require((device, inode) == self._main_witness, "lock_binding")
-        _require(
-            os.pread(self._main_fd, 34, 0) == (store_uuid + "\n").encode("ascii")
-            and os.fstat(self._main_fd).st_size == 33,
-            "lock_binding",
-        )
-        _require(not self._store_uuid or self._store_uuid == store_uuid, "lock_binding")
-        self._store_uuid = store_uuid
+        self._bind_store_identity(store_uuid, device, inode)
         operations = connection.execute(
             "SELECT operation_id,target_key,state,native_state,reserved_bytes,"
             "record_json,reconcile_json FROM operations ORDER BY operation_id"
@@ -1230,6 +1272,18 @@ class LineageStore:
         _require(image_size + budget <= self._max_image_bytes, "image_budget")
         self._check()
 
+    def _bind_store_identity(self, store_uuid, device, inode):
+        """Common immutable FD/UUID binding for schema-specific memory images."""
+        _require(type(store_uuid) is str and bool(_UUID.fullmatch(store_uuid)), "lock_binding")
+        _require((device, inode) == self._main_witness, "lock_binding")
+        _require(
+            os.pread(self._main_fd, 34, 0) == (store_uuid + "\n").encode("ascii")
+            and os.fstat(self._main_fd).st_size == 33,
+            "lock_binding",
+        )
+        _require(not self._store_uuid or self._store_uuid == store_uuid, "lock_binding")
+        self._store_uuid = store_uuid
+
     def _event(self, event):
         if self._fault_hook is not None:
             self._fault_hook(event)
@@ -1258,15 +1312,27 @@ class LineageStore:
         except OSError:
             raise LineageError("image_changed") from None
 
-    def _persist(self, image, expected):
+    def _persist(self, image, expected, *, external_guard=None):
         _require(len(image) <= self._max_image_bytes, "image_budget")
+        _require(external_guard is None or callable(external_guard), "invalid_guard")
+        if external_guard is not None:
+            # Cleanup may itself fail after a caller closes a pinned FD. Retain
+            # the actual rename outcome independently of any replaced error.
+            self._guarded_persist_renamed = False
         name = ".ledger-" + uuid.uuid4().hex + ".tmp"
         descriptor = None
         renamed = False
+
+        def check_external():
+            if external_guard is not None:
+                external_guard()
+
         try:
             self._check()
             self._image_witness(expected)
+            check_external()
             self._event("before_temp_write")
+            check_external()
             descriptor = os.open(
                 name,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | _FILE_FLAGS,
@@ -1275,33 +1341,48 @@ class LineageStore:
             )
             witness = _identity(os.fstat(descriptor))
             self._check_file(name, descriptor, witness)
+            check_external()
             offset = 0
             while offset < len(image):
                 written = os.write(descriptor, image[offset : offset + 65536])
                 _require(written > 0, "image_write_failed")
                 offset += written
+                check_external()
             self._event("after_temp_write")
             self._check()
             self._check_file(name, descriptor, witness)
+            check_external()
             os.fsync(descriptor)
             self._event("after_temp_fsync")
             self._check()
             self._check_file(name, descriptor, witness)
             self._image_witness(expected)
+            check_external()
             self._event("before_rename")
             self._check()
             self._check_file(name, descriptor, witness)
             self._image_witness(expected)
+            check_external()
             os.replace(name, "ledger.sqlite3", src_dir_fd=self._root_fd, dst_dir_fd=self._root_fd)
             renamed = True
+            if external_guard is not None:
+                self._guarded_persist_renamed = True
+            check_external()
             self._event("after_rename")
             self._check()
             self._check_file("ledger.sqlite3", descriptor, witness)
             self._installed = True
+            check_external()
             os.fsync(self._root_fd)
+            check_external()
             self._event("after_directory_fsync")
             self._check()
             self._check_file("ledger.sqlite3", descriptor, witness)
+            check_external()
+        except LineageError:
+            if external_guard is not None and renamed:
+                raise LineageError("persistence_uncertain") from None
+            raise
         except (OSError, sqlite3.Error):
             raise LineageError(
                 "persistence_uncertain" if renamed else "image_write_failed"
@@ -1315,7 +1396,14 @@ class LineageStore:
                         os.fsync(self._root_fd)
                     except (OSError, LineageError):
                         pass
-                os.close(descriptor)
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    if external_guard is None:
+                        raise
+                    raise LineageError(
+                        "persistence_uncertain" if renamed else "image_write_failed"
+                    ) from None
 
     def _row(self, connection, operation_id):
         row = connection.execute(
@@ -1326,17 +1414,43 @@ class LineageStore:
         _require(row is not None, "operation_missing")
         return OperationState(row[0]), NativeState(row[1]), row[2], _decode(OperationRecord, row[3])
 
-    def _mutate(self, operation_id, guard, mutate, *, inserting=False, finalizing=False):
+    def _mutate(
+        self,
+        operation_id,
+        guard,
+        mutate,
+        *,
+        inserting=False,
+        finalizing=False,
+        skip_unchanged=False,
+        external_guard=None,
+    ):
         _require(not self._readonly, "readonly_store")
+        _require(external_guard is None or callable(external_guard), "invalid_guard")
         self._guard(operation_id, guard)
+        persisted = False
+
+        def check_external():
+            self._guard(operation_id, guard)
+            self._bind_store_identity(guard._store_uuid, *self._main_witness)
+            external_guard()
+            self._guard(operation_id, guard)
+            self._bind_store_identity(guard._store_uuid, *self._main_witness)
+
         with self._locked(exclusive=True):
             connection, witness = self._load()
             try:
                 if not inserting:
                     self._guard(operation_id, guard, self._row(connection, operation_id)[3])
                 connection.execute("BEGIN IMMEDIATE")
+                changes = connection.total_changes
                 result = mutate(connection)
                 connection.execute("COMMIT")
+                if skip_unchanged and connection.total_changes == changes:
+                    self._guard(operation_id, guard)
+                    if external_guard is not None:
+                        check_external()
+                    return result
                 image = connection.serialize()
                 if not inserting and not finalizing:
                     _, _, reserved, _ = self._row(connection, operation_id)
@@ -1349,9 +1463,19 @@ class LineageStore:
                     image = connection.serialize()
                 self._validate_database(connection, len(image))
                 self._guard(operation_id, guard)
-                self._persist(image, witness)
+                if external_guard is None:
+                    self._persist(image, witness)
+                else:
+                    self._persist(image, witness, external_guard=check_external)
+                persisted = True
                 self._guard(operation_id, guard)
+                if external_guard is not None:
+                    check_external()
                 return result
+            except LineageError:
+                if persisted and external_guard is not None:
+                    raise LineageError("persistence_uncertain") from None
+                raise
             except sqlite3.IntegrityError:
                 raise LineageError("reservation_conflict") from None
             except sqlite3.Error:
@@ -1659,6 +1783,109 @@ class LineageStore:
             return receipt
 
         return self._mutate(operation_id, guard, transition, finalizing=True)
+
+    def complete_reconciled(
+        self,
+        operation_id: str,
+        expected_record_sha: str,
+        expected_state: OperationState,
+        completion: CompletionRecord,
+        guard: OperationGuard,
+        *,
+        external_guard=None,
+    ) -> CompletionReceipt:
+        """Finalize an already acknowledged row with ledger-only compare-and-swap.
+
+        The caller owns reconstructed native evidence and local finalization.
+        This transition never manufactures acknowledgement or publication rights.
+        An identical completed image is the sole state-CAS retry exception.
+        """
+        _hash(expected_record_sha)
+        _require(
+            type(expected_state) is OperationState
+            and expected_state
+            in (
+                OperationState.VERIFYING,
+                OperationState.NEEDS_RECONCILE,
+                OperationState.COMPLETED,
+            )
+        )
+        done = _validated(CompletionRecord, completion, 2 * MAX_METADATA_BYTES + MAX_RECEIPT_BYTES)
+        _require(done.target_checkpoint is not None)
+        for checkpoint in (done.source_checkpoint, done.target_checkpoint):
+            if checkpoint is not None:
+                _encode(checkpoint)
+
+        def transition(connection):
+            state, native, _, record = self._row(connection, operation_id)
+            _require(
+                hashlib.sha256(_encode(record)).hexdigest() == expected_record_sha,
+                "proof_mismatch",
+            )
+            _require(native is NativeState.ACKNOWLEDGED, "invalid_transition")
+            _require(record.source.identity is None or done.source_checkpoint is not None)
+            receipt, edge = self._completion(record, done)
+            if state is OperationState.COMPLETED:
+                existing = _decode(
+                    CompletionReceipt,
+                    connection.execute(
+                        "SELECT record_json FROM receipts WHERE operation_id=?", (operation_id,)
+                    ).fetchone()[0],
+                    MAX_RECEIPT_BYTES,
+                )
+                checkpoints = {
+                    side: _decode(CheckpointRecord, payload)
+                    for side, payload in connection.execute(
+                        "SELECT side,record_json FROM checkpoints WHERE operation_id=?",
+                        (operation_id,),
+                    )
+                }
+                stored = CompletionRecord(
+                    existing.target_identity,
+                    existing.input_artifact_sha256,
+                    checkpoints.get("source"),
+                    checkpoints.get("target"),
+                    existing.references,
+                )
+                _require(stored == done and existing == receipt, "proof_mismatch")
+                return existing
+            _require(
+                state is expected_state
+                and state in (OperationState.VERIFYING, OperationState.NEEDS_RECONCILE),
+                "invalid_transition",
+            )
+            for side, checkpoint in (
+                ("source", done.source_checkpoint),
+                ("target", done.target_checkpoint),
+            ):
+                if checkpoint is not None:
+                    connection.execute(
+                        "INSERT INTO checkpoints VALUES (?,?,?)",
+                        (operation_id, side, _encode(checkpoint)),
+                    )
+            if edge is not None:
+                connection.execute("INSERT INTO edges VALUES (?,?)", (operation_id, _encode(edge)))
+            connection.execute(
+                "INSERT INTO receipts VALUES (?,?)",
+                (operation_id, _encode(receipt, MAX_RECEIPT_BYTES)),
+            )
+            changed = connection.execute(
+                "UPDATE operations SET state='completed',native_state='acknowledged',"
+                "reserved_bytes=0,reconcile_json=NULL WHERE operation_id=? AND state=? "
+                "AND native_state='acknowledged'",
+                (operation_id, expected_state.value),
+            ).rowcount
+            _require(changed == 1, "invalid_transition")
+            return receipt
+
+        return self._mutate(
+            operation_id,
+            guard,
+            transition,
+            finalizing=True,
+            skip_unchanged=True,
+            external_guard=external_guard,
+        )
 
     def recovery_view(self) -> RecoveryView:
         """Historical data only; publishing/verifying need conservative recovery."""

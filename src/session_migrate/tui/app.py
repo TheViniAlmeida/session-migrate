@@ -27,6 +27,7 @@ from session_migrate.operations import CancellationToken, OperationRequest
 from session_migrate.preview import PreviewRequest, PreviewSnapshot, PreviewStatus, literal_text
 from session_migrate.profiles import ENVIRONMENT_KEYS, Profile, ProfileSession, ProfileStore
 from session_migrate.titles import TitlePolicy, validate_title
+from session_migrate.tui.continuity_screen import ContinuityScreen
 from session_migrate.tui.controller import Controller, Draft, Worker
 from session_migrate.tui.widgets import Literal, plain
 
@@ -36,7 +37,11 @@ class MigrationApp(App):
 
     TITLE = "Session Migrate"
     CSS_PATH = "terminal.tcss"
-    BINDINGS = [("escape", "back", "Back / cancel"), ("ctrl+q", "quit_safe", "Quit")]
+    BINDINGS = [
+        ("escape", "back", "Back / cancel"),
+        ("ctrl+q", "quit_safe", "Quit"),
+        ("ctrl+o", "operations", "Operations"),
+    ]
 
     def __init__(self, controller: Controller, *, profiles_file: Path | None = None):
         super().__init__()
@@ -63,6 +68,8 @@ class MigrationApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
+        with Horizontal(id="app-navigation"):
+            yield Button("Operations", id="operations")
         yield Literal("Loading profiles…", id="status")
         with ContentSwitcher(initial="source", id="steps"):
             with VerticalScroll(id="source"):
@@ -399,6 +406,9 @@ class MigrationApp(App):
 
     def on_button_pressed(self, event: Button.Pressed):
         id = event.button.id
+        if id == "operations":
+            self.action_operations()
+            return
         if self.pending:
             self.status("A task is running. Wait or use Escape before installation starts.")
             return
@@ -650,6 +660,14 @@ class MigrationApp(App):
             "result": "sessions",
         }
         self.show(previous.get(self.stage, "source"))
+
+    def action_operations(self):
+        if isinstance(self.screen, ContinuityScreen):
+            return
+        if self.pending or self.preview_request:
+            self.status("Wait for the current task before opening durable operations.")
+            return
+        self.push_screen(ContinuityScreen(self.controller, profiles_file=self.profiles_file))
 
     def action_quit(self):
         # Also route inherited framework quit bindings through the publication guard.

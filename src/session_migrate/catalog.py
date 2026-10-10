@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -516,6 +517,302 @@ class Catalog:
                 "cannot open the private session catalog; move the disposable "
                 "database aside and run `session-migrate catalog refresh`"
             ) from exc
+
+    @classmethod
+    def open_readonly_existing(cls, path: Path, *, max_query_steps: int = 10_000_000) -> Catalog:
+        """Capture an existing DELETE-journal catalog in a query-only memory DB.
+
+        Never initialize, migrate, chmod, or let SQLite open the disk namespace.
+        WAL/journal state is rejected rather than ignored. The snapshot is an
+        index for selected native reads, not current native-session authority.
+        Ancestor ctime guards conservatively reject observable namespace changes;
+        they do not lock foreign writers. Return type is exactly Catalog, with
+        a private query-only SQLite Connection/Cursor factory and a work budget
+        sampled every 100 VM instructions for the snapshot's entire lifetime.
+        """
+        from contextlib import suppress
+
+        connection = None
+        catalog = None
+        descriptors = []
+        chain = []
+        file_descriptor = None
+        file_witness = None
+        try:
+            if (
+                cls is not Catalog
+                or not isinstance(path, Path)
+                or type(max_query_steps) is not int
+                or not 100 <= max_query_steps <= 10_000_000
+            ):
+                raise ValueError
+            path = path.expanduser().absolute()
+            if ".." in path.parts:
+                raise ValueError
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+            def witness(info):
+                return (
+                    info.st_dev,
+                    info.st_ino,
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_ctime_ns,
+                    info.st_mode,
+                    info.st_nlink,
+                    info.st_uid,
+                )
+
+            def directory_witness(info):
+                return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_ctime_ns)
+
+            def physical_guard() -> None:
+                # Keep every opened ancestor bound to its original parent/name.
+                # ctime catches observable rename/restore ABA; this is not an
+                # atomic lock against a foreign process or a Native CAS claim.
+                for fd, parent_fd, name, expected in chain:
+                    opened = os.fstat(fd)
+                    named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    if (
+                        not stat.S_ISDIR(opened.st_mode)
+                        or directory_witness(opened) != expected
+                        or directory_witness(named) != expected
+                    ):
+                        raise ValueError
+                if file_descriptor is not None:
+                    opened = os.fstat(file_descriptor)
+                    named = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+                    if witness(opened) != file_witness or witness(named) != file_witness:
+                        raise ValueError
+                    for suffix in ("-wal", "-shm", "-journal"):
+                        try:
+                            os.stat(path.name + suffix, dir_fd=directory, follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        raise ValueError
+
+            parent = None
+            for component in (path.anchor, *path.parent.parts[1:]):
+                physical_guard()
+                named = os.stat(component, dir_fd=parent, follow_symlinks=False)
+                physical_guard()
+                expected = directory_witness(named)
+                directory = os.open(component, flags | os.O_DIRECTORY, dir_fd=parent)
+                descriptors.append(directory)
+                chain.append((directory, parent, component, expected))
+                physical_guard()
+                parent = directory
+            physical_guard()
+            before = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            physical_guard()
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_uid != os.getuid()
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or not 100 <= before.st_size <= 64 * 1024 * 1024
+            ):
+                raise ValueError
+            file_witness = witness(before)
+            file_descriptor = os.open(path.name, flags, dir_fd=directory)
+            descriptors.append(file_descriptor)
+            physical_guard()
+            chunks = []
+            remaining = before.st_size
+            while remaining:
+                physical_guard()
+                chunk = os.read(file_descriptor, min(remaining, 1024 * 1024))
+                physical_guard()
+                if not chunk:
+                    raise ValueError
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            physical_guard()
+            trailing = os.read(file_descriptor, 1)
+            physical_guard()
+            if trailing:
+                raise ValueError
+            image = b"".join(chunks)
+            physical_guard()
+            if image[:16] != b"SQLite format 3\0" or image[18:20] != b"\x01\x01":
+                raise ValueError
+            remaining_steps = max_query_steps
+
+            def progress() -> int:
+                nonlocal remaining_steps
+                remaining_steps -= 100
+                return int(remaining_steps <= 0)
+
+            def budgeted(call, *args, **kwargs):
+                try:
+                    return call(*args, **kwargs)
+                except sqlite3.Error:
+                    if remaining_steps <= 0:
+                        raise SessionMigrateError("readonly_catalog_unavailable") from None
+                    raise
+
+            class ReadonlyCursor(sqlite3.Cursor):
+                def execute(self, *args, **kwargs):
+                    return budgeted(super().execute, *args, **kwargs)
+
+                def fetchall(self):
+                    return budgeted(super().fetchall)
+
+                def fetchone(self):
+                    return budgeted(super().fetchone)
+
+                def fetchmany(self, *args):
+                    return budgeted(super().fetchmany, *args)
+
+                def __next__(self):
+                    return budgeted(super().__next__)
+
+            class ReadonlyConnection(sqlite3.Connection):
+                def cursor(self, factory=ReadonlyCursor):
+                    return super().cursor(factory)
+
+                def execute(self, *args, **kwargs):
+                    return self.cursor().execute(*args, **kwargs)
+
+            physical_guard()
+            connection = sqlite3.connect(":memory:", factory=ReadonlyConnection)
+            physical_guard()
+            connection.enable_load_extension(False)
+            physical_guard()
+            connection.set_progress_handler(progress, 100)
+            physical_guard()
+
+            def query(sql, parameters=()):
+                physical_guard()
+                cursor = connection.execute(sql, parameters)
+                physical_guard()
+                rows = cursor.fetchall()
+                physical_guard()
+                return rows
+
+            query("PRAGMA trusted_schema = OFF")
+            query("PRAGMA query_only = ON")
+            physical_guard()
+            connection.deserialize(image)
+            physical_guard()
+            connection.row_factory = sqlite3.Row
+            physical_guard()
+            # Assert the defensive connection settings survived deserialization.
+            if query("PRAGMA trusted_schema")[0][0] != 0 or query("PRAGMA query_only")[0][0] != 1:
+                raise ValueError
+            connection.create_function(
+                "session_casefold",
+                1,
+                lambda value: value.casefold() if isinstance(value, str) else "",
+                deterministic=True,
+            )
+            physical_guard()
+            required = {
+                "catalog_meta": {"key", "value"},
+                "roots": {
+                    "id",
+                    "format",
+                    "path",
+                    "source",
+                    "enabled",
+                    "created_at",
+                    "updated_at",
+                    "last_scan_at",
+                    "last_scan_status",
+                    "last_error",
+                },
+                "sessions": {
+                    "id",
+                    "catalog_id",
+                    "root_id",
+                    "relative_path",
+                    "canonical_path",
+                    "format",
+                    "session_id",
+                    "filename_session_id",
+                    "display_title",
+                    "display_title_kind",
+                    "cwd",
+                    "started_at",
+                    "started_at_epoch",
+                    "cli_version",
+                    "history_mode",
+                    "kind",
+                    "lifecycle",
+                    "parent_session_id",
+                    "status",
+                    "reason",
+                    "records",
+                    "device",
+                    "inode",
+                    "bytes",
+                    "modified_ns",
+                    "source_fingerprint",
+                    "indexed_at",
+                    "validated_at",
+                    "missing_since",
+                },
+                "session_labels": {"id", "session_row_id", "kind", "value", "ordinal", "priority"},
+                "scan_runs": {
+                    "id",
+                    "started_at",
+                    "finished_at",
+                    "validate",
+                    "files_seen",
+                    "scanned",
+                    "unchanged",
+                    "missing",
+                    "root_errors",
+                },
+            }
+            for table, columns in required.items():
+                definition = query("SELECT type, sql FROM sqlite_master WHERE name=?", (table,))
+                if (
+                    len(definition) != 1
+                    or definition[0][0] != "table"
+                    or not isinstance(definition[0][1], str)
+                    or re.match(r"\s*CREATE\s+VIRTUAL\s+TABLE\b", definition[0][1], re.I)
+                ):
+                    raise ValueError
+                info = query(f"PRAGMA table_xinfo({table})")
+                if any(row[6] != 0 for row in info):
+                    raise ValueError
+                actual = {row[1] for row in info}
+                if not columns <= actual:
+                    raise ValueError
+            if query("PRAGMA user_version")[0][0] != SCHEMA_VERSION:
+                raise ValueError
+            version = query("SELECT value FROM catalog_meta WHERE key='schema_version'")
+            if len(version) != 1 or version[0][0] != str(SCHEMA_VERSION):
+                raise ValueError
+            if [row[0] for row in query("PRAGMA quick_check")] != ["ok"]:
+                raise ValueError
+            physical_guard()
+
+            catalog = cls.__new__(cls)
+            catalog.path = path
+            catalog._connection = connection
+            connection = None
+            return catalog
+        except (OSError, sqlite3.Error, ValueError, TypeError, AttributeError):
+            raise SessionMigrateError("readonly_catalog_unavailable") from None
+        finally:
+            close_failed = False
+            if connection is not None:
+                try:
+                    connection.close()
+                except sqlite3.Error:
+                    close_failed = True
+            for descriptor in reversed(descriptors):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    close_failed = True
+            if close_failed:
+                if catalog is not None:
+                    with suppress(sqlite3.Error):
+                        catalog.close()
+                raise SessionMigrateError("readonly_catalog_unavailable") from None
 
     def __enter__(self) -> Catalog:
         return self
