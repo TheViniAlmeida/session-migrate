@@ -25,3 +25,11 @@ class NativeImportPartialError(SessionMigrateError):
         self.target_format = target_format
         self.session_id = session_id
         super().__init__(message)
+
+
+class OperationCancelledError(SessionMigrateError):
+    """An operation stopped before publication began."""
+
+
+class SourceReadLimitError(SessionMigrateError):
+    """A source cannot be read within the requested interactive byte budget."""

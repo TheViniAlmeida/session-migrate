@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    tui_parser = subparsers.add_parser("tui", help="interactive migration (optional tui extra)")
+    tui_parser.add_argument(
+        "--profiles", type=_expanded_path, help="read a private profiles JSON file"
+    )
+
     inspect_parser = subparsers.add_parser(
         "inspect", help="print a content-free structural session summary"
     )
@@ -339,6 +344,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "tui":
+            return _run_tui(args)
         if args.command == "catalog":
             return _run_catalog(args)
         if args.command == "inspect":
@@ -601,3 +608,26 @@ def _print_catalog_entries(
 
 def _single_line(value: str) -> str:
     return " ".join(value.splitlines()).replace("\t", " ")
+
+
+def _run_tui(args: argparse.Namespace) -> int:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print(
+            "tui requires an interactive terminal; use the CLI commands for automation.",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        from session_migrate.tui.app import MigrationApp
+    except ImportError:
+        print(
+            "tui requires the optional extra: install session-migrate[tui] explicitly.",
+            file=sys.stderr,
+        )
+        return 2
+    from session_migrate.tui.controller import Controller
+
+    MigrationApp(
+        Controller(args.catalog or default_catalog_path()), profiles_file=args.profiles
+    ).run()
+    return 0

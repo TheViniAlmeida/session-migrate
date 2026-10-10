@@ -27,6 +27,9 @@ independent conversation.
 | `catalog.py` | Private multi-root metadata index and title/ID search |
 | `conversion.py` | Portable rewrite, validation, manifests, installation |
 | `operations.py` | Typed convert/import/transfer orchestration and observational progress |
+| `profiles.py` / `capabilities.py` | Root-qualified profiles, private snapshots, conservative adapter capabilities |
+| `preview.py` | Bounded literal preview projection and cancellable authoritative readers |
+| `tui/` | Optional Textual workflow calling profiles and shared operations |
 | `cli.py` | User-facing commands and JSON/error contracts |
 
 The neutral event kinds are message, tool call, tool result, thinking,
@@ -71,8 +74,20 @@ parsing messages; they must reconcile the target before retrying.
 Hermes refusal errors retain their stable prefix but omit free-form importer
 errors/stderr because those diagnostics can contain imported private content.
 
-This core extraction adds no interactive UI, persisted profiles, or catalog
-schema changes. Profile selection can supply an ephemeral environment mapping.
+The optional terminal interface imports Textual lazily through `smigrate tui`.
+It resolves profiles, reads metadata and prepares conversion in worker threads;
+publication calls the same `run_operation` core with an atomic cancellation
+token. Progress remains observational. A separate prepublication check rejects
+source drift immediately before installation, without claiming an external
+native-client lock. Profiles provide distinct environment mappings and can be
+saved only through the explicit private-file contract.
+
+Preview requests cover authoritative export/parsing with a deadline and one
+bounded reader slot. Physical inputs use immutable private bounded copies;
+OpenCode/Kilo cap the selected export before parsing. Shared database adapters
+retain their documented conservative preflight and existing adapter limits.
+The cache stores visual projections in memory; it neither indexes bodies nor
+changes the transferred events. See [terminal UI](terminal-ui.md).
 
 ## Read paths
 

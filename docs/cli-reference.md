@@ -300,3 +300,12 @@ There is no overwrite/force mode. Source files are always left untouched. If
 manifest finalization fails after an external/native install, the error states
 that the target session may already exist so the operator can inspect it before
 retrying.
+
+## Optional terminal interface
+
+`session-migrate tui` opens the keyboard interface only when explicitly selected.
+Use the existing global `--catalog PATH` and optional `tui --profiles PATH` to
+select private state. It requires an interactive terminal and the explicitly
+installed `session-migrate[tui]` extra; missing prerequisites return exit code 2
+without automatic installation. See [Terminal interface](terminal-ui.md) for
+profile selection, bounded previews, confirmation and cancellation behavior.

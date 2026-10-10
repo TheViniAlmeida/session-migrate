@@ -1,0 +1,10 @@
+Screen { layout: vertical; }
+#status { height: auto; min-height: 2; padding: 0 1; background: $surface; }
+ContentSwitcher { height: 1fr; }
+VerticalScroll { padding: 1 2; }
+Input, Select { margin-bottom: 1; }
+Horizontal { height: auto; }
+Button { margin-right: 1; }
+#session-list { height: 1fr; min-height: 6; }
+#preview-text { height: 1fr; min-height: 8; }
+#proposal, #receipt, #capability { height: auto; margin-bottom: 1; }

@@ -27,6 +27,48 @@ jobs:
       - run: uv run pytest -q
       - run: uv build
 
+  tui:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --locked --extra tui
+      - name: Headless TUI tests (skips fail)
+        run: |
+          uv run --locked --extra tui pytest tests/test_tui.py tests/test_operation_cancellation.py -q --junitxml=tui-results.xml
+          uv run --locked --extra tui python -c "import xml.etree.ElementTree as E; assert not E.parse('tui-results.xml').findall('.//skipped'), 'TUI tests must not skip'"
+
+  tui-native:
+    name: Native keyboard migration (OpenCode 2.0.23)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.13.0
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+      - run: uv sync --locked --extra tui
+      - name: Install designated stock OpenCode
+        run: ./scripts/install-native-test-clis.sh /tmp/session-migrate-tui-native opencode-v2
+      - name: Real keyboard/core migration gates (skips fail)
+        run: |
+          set -a
+          source /tmp/session-migrate-tui-native/session-migrate-native.env
+          set +a
+          uv run --locked --extra tui pytest tests/test_tui_native.py -q --junitxml=tui-native-results.xml
+          uv run --locked --extra tui python scripts/assert_junit_no_skips.py tui-native-results.xml
+
   native-clients:
     name: Native client (${{ matrix.client }})
     runs-on: ubuntu-latest

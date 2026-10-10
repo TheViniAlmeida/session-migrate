@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "session-migrate"
-version = "0.11.0"
+version = "0.12.0.dev1"
 description = "Migrate native coding-agent sessions across eighteen terminal harnesses"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -55,6 +55,9 @@ Issues = "https://github.com/xhluca/session-migrate/issues"
 [project.scripts]
 session-migrate = "session_migrate.cli:main"
 smigrate = "session_migrate.cli:main"
+
+[project.optional-dependencies]
+tui = ["textual==8.2.8"]
 
 [dependency-groups]
 dev = [

@@ -222,7 +222,7 @@ def serialize(
     return data, dict(sorted(dropped.items()))
 
 
-def parse_session(path: Path) -> Session:
+def parse_session(path: Path, *, original_session_dir: Path | None = None) -> Session:
     session_dir, wire_path, state_path = _source_paths(path)
     wire_before = file_snapshot(wire_path)
     state_before = file_snapshot(state_path)
@@ -234,7 +234,11 @@ def parse_session(path: Path) -> Session:
         raise JsonlError("Kimi state.json is unreadable or invalid") from exc
     if not isinstance(state, dict):
         raise JsonlError("Kimi state.json is not an object")
-    _validate_state(state, session_dir)
+    # A bounded private snapshot retains original metadata, including absolute homedir.
+    # Only this identity check uses the original directory; all data reads use the snapshot.
+    _validate_state(
+        state, original_session_dir if original_session_dir is not None else session_dir
+    )
     _validate_wire(records)
     events: list[Event] = []
     model = None
