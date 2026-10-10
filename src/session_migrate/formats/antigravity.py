@@ -470,7 +470,9 @@ def verify_pinned_cli(
     """Resolve and authenticate the exact tested Antigravity executable."""
 
     values = dict(os.environ if environ is None else environ)
-    candidate = str(executable) if executable else shutil.which("agy", path=values.get("PATH"))
+    candidate = (
+        str(executable) if executable else shutil.which("agy", path=values.get("PATH", os.defpath))
+    )
     if not candidate:
         raise SessionMigrateError("Antigravity CLI executable 'agy' was not found")
     path = Path(candidate).expanduser().resolve()

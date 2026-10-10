@@ -29,10 +29,18 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-from session_migrate.errors import JsonlError, SessionMigrateError
+from session_migrate.errors import JsonlError, NativeImportPartialError, SessionMigrateError
 from session_migrate.formats.common import content_text, portable_data_image, string, valid_rfc3339
 from session_migrate.jsonl import DEFAULT_MAX_RECORDS, DEFAULT_MAX_TOTAL_BYTES
-from session_migrate.model import AgentFormat, Event, EventKind, Provenance, Role, Session
+from session_migrate.model import (
+    AgentFormat,
+    Event,
+    EventKind,
+    Provenance,
+    Role,
+    Session,
+    TargetFormat,
+)
 
 PINNED_HERMES_VERSION = "0.20.6"
 PINNED_HERMES_RELEASE_TAG = "v2026.8.27"
@@ -677,7 +685,11 @@ def verify_pinned_cli(
     executable: Path | None = None, *, environ: Mapping[str, str] | None = None
 ) -> Path:
     values = dict(os.environ if environ is None else environ)
-    candidate = str(executable) if executable else shutil.which("hermes", path=values.get("PATH"))
+    candidate = (
+        str(executable)
+        if executable
+        else shutil.which("hermes", path=values.get("PATH", os.defpath))
+    )
     if not candidate:
         raise SessionMigrateError("Hermes executable 'hermes' was not found")
     path = Path(candidate).expanduser().resolve()
@@ -774,14 +786,19 @@ def install_bundle(
         or result.get("imported_ids") != [parsed.session_id]
         or result.get("skipped") != 0
     ):
-        detail = result.get("errors")
-        if not detail and imported.stderr:
-            detail = imported.stderr.splitlines()[-1][:500]
-        suffix = f": {detail}" if detail else ""
-        raise SessionMigrateError(f"Hermes refused the imported session bundle{suffix}")
-    loaded = parse_session(database, parsed.session_id)
-    if loaded.session_id != parsed.session_id:
-        raise SessionMigrateError("installed Hermes session failed identity validation")
+        # Native diagnostics can echo imported conversation text or credentials.
+        raise SessionMigrateError("Hermes refused the imported session bundle")
+    try:
+        loaded = parse_session(database, parsed.session_id)
+        if loaded.session_id != parsed.session_id:
+            raise SessionMigrateError("installed Hermes session failed identity validation")
+    except BaseException as exc:
+        raise NativeImportPartialError(
+            "Hermes import succeeded but installed session verification failed; "
+            f"the native session may already exist as {parsed.session_id}",
+            target_format=TargetFormat.HERMES,
+            session_id=parsed.session_id,
+        ) from exc
     return InstalledHermesSession(database, parsed.session_id)
 
 

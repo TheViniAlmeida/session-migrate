@@ -25,7 +25,8 @@ independent conversation.
 | `inspection.py` | Content-free format detection and structural inventory |
 | `discovery.py` | Exact native-ID lookup without trusting mutable indexes |
 | `catalog.py` | Private multi-root metadata index and title/ID search |
-| `conversion.py` | Dispatch, portable rewrite, validation, manifests, installation |
+| `conversion.py` | Portable rewrite, validation, manifests, installation |
+| `operations.py` | Typed convert/import/transfer orchestration and observational progress |
 | `cli.py` | User-facing commands and JSON/error contracts |
 
 The neutral event kinds are message, tool call, tool result, thinking,
@@ -33,6 +34,45 @@ compaction, context, and opaque. Roles are user, assistant, system, and tool.
 Each event retains source record ordinal/type and, where available, source IDs
 and block ordinals. The model is intentionally small: it represents portable
 conversation history, not an agent's entire runtime.
+
+`OperationRequest` describes source selectors and conversion/install options;
+`run_operation` returns an `OperationResult` with the existing content-free CLI
+JSON fields. It takes no argparse namespace and writes no console output. The
+CLI continues to own argument parsing, inspection/catalog commands, JSON
+rendering, and exit codes. Existing loaders, converters, collision checks, and
+installers remain the authoritative implementation.
+
+Each operation snapshots either the process environment or an explicit mapping.
+An explicit mapping is the source of truth: defaults, `~/` expansion, native CLI
+lookup, subprocesses, native import/export temporary roots, and OMP home/temp buckets use that
+snapshot. Missing HOME fails when a requested default or home expansion needs
+it. Supported explicit source/target homes take precedence. Catalog-selected
+OpenCode/Kilo sources receive a copy with the selected XDG data root; the target
+keeps the base snapshot. No operation changes `os.environ`.
+Before native export, catalog selections must map to the same existing directory
+store reached by `XDG_DATA_HOME/opencode` or `XDG_DATA_HOME/kilo`. Directory and
+database identities are checked; safe directory aliases are accepted. An
+arbitrary catalog root with a different sibling native store is rejected before
+export, even if both stores contain the same session ID. Hardlinked database
+files alone do not establish store identity because WAL/SHM files can differ.
+Other adapter scratch files retain their existing private process temporary-file
+policy. This API does not replace every adapter's scratch-directory policy.
+MastraCode's selected `MASTRA_DB_PATH` must use the canonical `mastra.db`
+filename; custom filenames fail before opening a different sibling database.
+
+Progress events contain only a stage: loading, converting, preflight (dry-run),
+installing, completed, failed, or needs_reconcile. They describe coarse operation
+boundaries; installers perform their own validation and verification. Ordinary
+observer exceptions are ignored so they cannot turn success into a blind retry.
+`NativeImportPartialError` identifies confirmed native import followed by local
+verification/finalization failure, including Hermes verification after its
+official importer confirms the ID. Consumers use its typed status rather than
+parsing messages; they must reconcile the target before retrying.
+Hermes refusal errors retain their stable prefix but omit free-form importer
+errors/stderr because those diagnostics can contain imported private content.
+
+This core extraction adds no interactive UI, persisted profiles, or catalog
+schema changes. Profile selection can supply an ephemeral environment mapping.
 
 ## Read paths
 
@@ -76,7 +116,8 @@ replaced, or truncated file fails with a retryable error.
 ### OpenCode and Kilo virtual sources
 
 The catalog reads only native session metadata from `opencode.db` or `kilo.db`.
-A selected source is exported through the exact pinned official CLI, parsed as
+A selected source is exported through a supported OpenCode or pinned Kilo
+official CLI, parsed as
 an official bundle, and represented by the virtual path `<format>:<id>`. The
 migrator never queries message/part tables or writes either SQLite database.
 

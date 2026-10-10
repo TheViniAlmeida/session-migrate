@@ -4,61 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
 from session_migrate import __version__
 from session_migrate.catalog import Catalog, CatalogEntry, default_catalog_path
-from session_migrate.conversion import (
-    KILO_HOME_UNSUPPORTED,
-    OPENCODE_HOME_UNSUPPORTED,
-    ConversionOptions,
-    content_free_result,
-    convert_session,
-    default_target_home,
-    detect_opencode_version,
-    ensure_target_paths_available,
-    install_antigravity_artifact,
-    install_copilot_artifact,
-    install_cursor_artifact,
-    install_devin_artifact,
-    install_grok_artifact,
-    install_hermes_artifact,
-    install_kilo_artifact,
-    install_kimi_artifact,
-    install_mastracode_artifact,
-    install_opencode_artifact,
-    install_openhands_artifact,
-    install_vibe_artifact,
-    kilo_manifest_path,
-    load_devin_session,
-    load_hermes_session,
-    load_kilo_session,
-    load_mastracode_session,
-    load_opencode_session,
-    load_session,
-    opencode_manifest_path,
-    shared_database_manifest_path,
-    target_import_paths,
-    write_artifact,
-)
-from session_migrate.discovery import locate_session, normalized_source_id
 from session_migrate.errors import SessionMigrateError
 from session_migrate.inspection import inspect_session
 from session_migrate.model import AgentFormat, TargetFormat
-
-_SHARED_DATABASE_SOURCES = {
-    AgentFormat.HERMES,
-    AgentFormat.MASTRACODE,
-    AgentFormat.DEVIN,
-}
-_SHARED_DATABASE_TARGETS = {
-    TargetFormat.HERMES,
-    TargetFormat.MASTRACODE,
-    TargetFormat.DEVIN,
-}
+from session_migrate.operations import OperationKind, OperationRequest, run_operation
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -395,300 +350,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_inspection(result.to_dict())
             return 0
         if args.command in {"convert", "import", "transfer"}:
-            if args.command == "transfer":
-                session = None
-                virtual_source_environ = None
-                if args.catalog_id or args.title:
-                    if args.source_id:
-                        raise SessionMigrateError(
-                            "pass only one of SOURCE_ID, --catalog-id, or --title"
-                        )
-                    if args.catalog_id and args.title:
-                        raise SessionMigrateError("pass either --catalog-id or --title, not both")
-                    if args.source_home or args.source_cwd:
-                        raise SessionMigrateError(
-                            "--source-home/--source-cwd do not apply with catalog selection"
-                        )
-                    with Catalog(_catalog_path(args)) as catalog:
-                        catalog_id = args.catalog_id
-                        if args.title:
-                            title = args.title.strip()
-                            if not title:
-                                raise SessionMigrateError("--title cannot be empty")
-                            source_filter = (
-                                AgentFormat(args.source_agent) if args.source_agent else None
-                            )
-                            matches = catalog.list_sessions(
-                                query=title,
-                                include_paths=True,
-                                agent_format=source_filter,
-                                limit=10_000,
-                            )
-                            exact = [
-                                match
-                                for match in matches
-                                if match.title and match.title.casefold() == title.casefold()
-                            ]
-                            candidates = exact or matches
-                            if not candidates:
-                                raise SessionMigrateError(
-                                    "catalog title was not found; refresh the catalog "
-                                    "or search first"
-                                )
-                            if len(candidates) != 1:
-                                raise SessionMigrateError(
-                                    "catalog title is ambiguous; use catalog search "
-                                    "and --catalog-id"
-                                )
-                            catalog_id = candidates[0].catalog_id
-                        assert catalog_id is not None
-                        entry = catalog.get_session(catalog_id, include_paths=True)
-                        source_reference = catalog.session_source_for_transfer(catalog_id)
-                    source_format = source_reference.format
-                    source_path = source_reference.path
-                    if args.source_agent and AgentFormat(args.source_agent) != source_format:
-                        raise SessionMigrateError(
-                            "--from does not match the catalog session format"
-                        )
-                    requested_source_id = entry.session_id
-                    if source_format in {AgentFormat.OPENCODE, AgentFormat.KILO}:
-                        virtual_source_environ = dict(os.environ)
-                        virtual_source_environ["XDG_DATA_HOME"] = str(source_reference.root.parent)
-                else:
-                    if not args.source_id or not args.source_agent:
-                        raise SessionMigrateError(
-                            "transfer requires SOURCE_ID with --from, --catalog-id, or --title"
-                        )
-                    source_format = AgentFormat(args.source_agent)
-                    requested_source_id = normalized_source_id(source_format, args.source_id)
-                    if source_format in {AgentFormat.OPENCODE, AgentFormat.KILO}:
-                        if args.source_home or args.source_cwd:
-                            raise SessionMigrateError(
-                                f"{source_format.value} source transfer uses its normal "
-                                "HOME/XDG environment; "
-                                "--source-home/--source-cwd do not apply"
-                            )
-                        loader = (
-                            load_opencode_session
-                            if source_format == AgentFormat.OPENCODE
-                            else load_kilo_session
-                        )
-                        session = loader(requested_source_id, source_cli=args.source_cli)
-                    elif source_format in _SHARED_DATABASE_SOURCES:
-                        source_home = args.source_home or default_target_home(source_format)
-                        session = _load_shared_database_source(
-                            source_format,
-                            requested_source_id,
-                            source_home,
-                        )
-                    else:
-                        source_home = args.source_home or default_target_home(source_format)
-                        source_path = locate_session(
-                            source_format,
-                            requested_source_id,
-                            source_home,
-                            cwd=args.source_cwd,
-                        )
-                if args.source_cli and source_format not in {
-                    AgentFormat.OPENCODE,
-                    AgentFormat.KILO,
-                }:
-                    raise SessionMigrateError("--source-cli applies only to OpenCode/Kilo transfer")
-                if session is None:
-                    if source_format in {AgentFormat.OPENCODE, AgentFormat.KILO}:
-                        if not requested_source_id:
-                            raise SessionMigrateError(
-                                f"cataloged {source_format.value} session is missing its "
-                                "native session ID"
-                            )
-                        loader = (
-                            load_opencode_session
-                            if source_format == AgentFormat.OPENCODE
-                            else load_kilo_session
-                        )
-                        session = loader(
-                            requested_source_id,
-                            source_cli=args.source_cli,
-                            environ=virtual_source_environ,
-                        )
-                    elif source_format in _SHARED_DATABASE_SOURCES:
-                        if not requested_source_id:
-                            raise SessionMigrateError(
-                                f"cataloged {source_format.value} session is missing its "
-                                "native session ID"
-                            )
-                        session = _load_shared_database_source(
-                            source_format,
-                            requested_source_id,
-                            source_reference.root,
-                        )
-                    else:
-                        assert source_path is not None
-                        session = load_session(source_path, source_format)
-                if not session.session_id:
-                    raise SessionMigrateError(
-                        "discovered transcript has no native session ID metadata"
-                    )
-                if requested_source_id and (
-                    normalized_source_id(source_format, session.session_id) != requested_source_id
-                ):
-                    raise SessionMigrateError(
-                        "discovered transcript metadata does not match the source UUID"
-                    )
-                if args.to:
-                    target_format = TargetFormat(args.to)
-                elif source_format == AgentFormat.CLAUDE:
-                    target_format = TargetFormat.CODEX
-                elif source_format == AgentFormat.CODEX:
-                    target_format = TargetFormat.CLAUDE
-                else:
-                    raise SessionMigrateError(
-                        f"{source_format.value} source transfer requires an explicit --to target"
-                    )
-            else:
-                source_format = AgentFormat(args.format) if args.format else None
-                session = load_session(args.path, source_format)
-                target_format = TargetFormat(args.to)
-            if target_format == TargetFormat.OPENCODE and getattr(args, "home", None):
-                raise SessionMigrateError(OPENCODE_HOME_UNSUPPORTED)
-            if target_format == TargetFormat.KILO and getattr(args, "home", None):
-                raise SessionMigrateError(KILO_HOME_UNSUPPORTED)
-            if args.target_cli and (
-                target_format
-                not in {
-                    TargetFormat.OPENCODE,
-                    TargetFormat.KILO,
-                    TargetFormat.ANTIGRAVITY,
-                    TargetFormat.CURSOR,
-                    TargetFormat.HERMES,
-                }
-                or args.command == "convert"
-            ):
-                raise SessionMigrateError(
-                    "--target-cli only applies to OpenCode/Kilo/Antigravity/Cursor import "
-                    "and transfer, or Hermes import and transfer"
-                )
-            if (
-                target_format == TargetFormat.OPENCODE
-                and args.command != "convert"
-                and not args.target_cli_version
-            ):
-                args.target_cli_version = detect_opencode_version(args.target_cli)
-            artifact = convert_session(
-                session,
-                ConversionOptions(
-                    target_format=target_format,
+            source_name = getattr(args, "source_agent", None) or getattr(args, "format", None)
+            result = run_operation(
+                OperationRequest(
+                    command=OperationKind(args.command),
+                    path=getattr(args, "path", None),
+                    source_format=AgentFormat(source_name) if source_name else None,
+                    target_format=TargetFormat(args.to) if args.to else None,
+                    output=getattr(args, "output", None),
+                    home=getattr(args, "home", None),
+                    source_home=getattr(args, "source_home", None),
+                    source_cwd=getattr(args, "source_cwd", None),
+                    source_cli=getattr(args, "source_cli", None),
+                    source_id=getattr(args, "source_id", None),
+                    catalog=args.catalog,
+                    catalog_id=getattr(args, "catalog_id", None),
+                    title=getattr(args, "title", None),
                     session_id=args.session_id,
                     cwd=args.cwd,
+                    target_cli=args.target_cli,
                     target_cli_version=args.target_cli_version,
                     model_provider=args.model_provider,
                     model=args.model,
-                ),
-            )
-            if args.command == "convert":
-                output_path = args.output
-                manifest_path = output_path.with_name(f"{output_path.name}.session-migrate.json")
-                dry_run = False
-            elif target_format == TargetFormat.OPENCODE:
-                output_path = f"opencode:{artifact.session_id}"
-                manifest_path = opencode_manifest_path(artifact)
-                dry_run = args.dry_run
-            elif target_format == TargetFormat.KILO:
-                output_path = f"kilo:{artifact.session_id}"
-                manifest_path = kilo_manifest_path(artifact)
-                dry_run = args.dry_run
-            elif target_format in _SHARED_DATABASE_TARGETS:
-                home = args.home or default_target_home(target_format)
-                output_path = f"{target_format.value}:{artifact.session_id}"
-                manifest_path = shared_database_manifest_path(artifact, target_home=home)
-                dry_run = args.dry_run
-            else:
-                home = args.home or default_target_home(target_format)
-                output_path, manifest_path = target_import_paths(artifact, home)
-                dry_run = args.dry_run
-            result = content_free_result(
-                artifact,
-                output_path=output_path,
-                manifest_path=manifest_path,
-                dry_run=dry_run,
-            )
-            if target_format == TargetFormat.OPENCODE and args.command != "convert":
-                install_opencode_artifact(
-                    artifact,
-                    manifest_path=manifest_path,
-                    target_cli=args.target_cli,
-                    dry_run=dry_run,
+                    dry_run=getattr(args, "dry_run", False),
                 )
-            elif target_format == TargetFormat.KILO and args.command != "convert":
-                install_kilo_artifact(
-                    artifact,
-                    manifest_path=manifest_path,
-                    target_cli=args.target_cli,
-                    dry_run=dry_run,
-                )
-            elif target_format == TargetFormat.COPILOT and args.command != "convert":
-                install_copilot_artifact(
-                    artifact,
-                    target_home=home,
-                    dry_run=dry_run,
-                )
-            elif target_format == TargetFormat.ANTIGRAVITY and args.command != "convert":
-                install_antigravity_artifact(
-                    artifact,
-                    target_home=home,
-                    target_cli=args.target_cli,
-                    dry_run=dry_run,
-                )
-            elif target_format == TargetFormat.CURSOR and args.command != "convert":
-                install_cursor_artifact(
-                    artifact,
-                    target_home=home,
-                    target_cli=args.target_cli,
-                    dry_run=dry_run,
-                )
-            elif target_format == TargetFormat.VIBE and args.command != "convert":
-                install_vibe_artifact(
-                    artifact,
-                    target_home=home,
-                    dry_run=dry_run,
-                )
-            elif target_format == TargetFormat.KIMI and args.command != "convert":
-                install_kimi_artifact(
-                    artifact,
-                    target_home=home,
-                    dry_run=dry_run,
-                )
-            elif target_format == TargetFormat.GROK and args.command != "convert":
-                install_grok_artifact(artifact, target_home=home, dry_run=dry_run)
-            elif target_format == TargetFormat.OPENHANDS and args.command != "convert":
-                install_openhands_artifact(artifact, target_home=home, dry_run=dry_run)
-            elif target_format == TargetFormat.HERMES and args.command != "convert":
-                install_hermes_artifact(
-                    artifact,
-                    target_home=home,
-                    target_cli=args.target_cli,
-                    dry_run=dry_run,
-                )
-            elif target_format == TargetFormat.MASTRACODE and args.command != "convert":
-                install_mastracode_artifact(
-                    artifact,
-                    target_home=home,
-                    dry_run=dry_run,
-                )
-            elif target_format == TargetFormat.DEVIN and args.command != "convert":
-                install_devin_artifact(
-                    artifact,
-                    target_home=home,
-                    dry_run=dry_run,
-                )
-            elif not dry_run:
-                write_artifact(
-                    artifact,
-                    output_path=output_path,
-                    manifest_path=manifest_path,
-                )
-            else:
-                ensure_target_paths_available(output_path, manifest_path)
+            ).to_dict()
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
         parser.error(f"{args.command!r} is specified but not implemented yet")
@@ -717,20 +403,6 @@ def _print_inspection(summary: dict[str, object]) -> None:
         print(f"{key}: {value if value is not None else '-'}")
     for key in ("record_types", "roles", "content_blocks", "event_types"):
         print(f"{key}: {json.dumps(summary[key], sort_keys=True)}")
-
-
-def _load_shared_database_source(
-    source_format: AgentFormat,
-    session_id: str,
-    source_home: Path,
-):
-    if source_format == AgentFormat.HERMES:
-        return load_hermes_session(session_id, source_home=source_home)
-    if source_format == AgentFormat.MASTRACODE:
-        return load_mastracode_session(session_id, source_home=source_home)
-    if source_format == AgentFormat.DEVIN:
-        return load_devin_session(session_id, source_home=source_home)
-    raise SessionMigrateError("source is not a supported shared-database format")
 
 
 def _add_conversion_arguments(

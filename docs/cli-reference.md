@@ -187,6 +187,22 @@ Antigravity, Cursor, and Hermes installation requires the exact pinned version.
 Explicit `--home` or `--source-home` wins where supported. All CLI path options
 expand `~` consistently.
 
+`convert`, `import`, and `transfer` delegate to the same typed operation core.
+Their options, JSON fields, collision behavior, and exit codes remain unchanged.
+The Python API accepts an ephemeral environment mapping per operation; the CLI
+uses a snapshot of its normal process environment and adds no profile flag.
+Stage callbacks emit no transcript data and do not change CLI output. Confirmed
+native import followed by verification or manifest failure raises a typed
+reconciliation error; the CLI still prints a content-safe error and exits 2.
+MastraCode's `MASTRA_DB_PATH` must end in the canonical `mastra.db` filename;
+custom filenames fail before the migrator opens or creates a sibling store.
+Hermes refusal errors omit free-form native diagnostics to keep imported
+conversation text and credentials out of CLI errors.
+Catalog-selected OpenCode/Kilo roots must map to the same directory store the
+official CLI reaches through `XDG_DATA_HOME/opencode` or `XDG_DATA_HOME/kilo`.
+Safe directory aliases work; unmappable roots fail before native export. A
+matching session ID or hardlinked database in another directory is insufficient.
+
 ## Catalog
 
 The private SQLite catalog is at

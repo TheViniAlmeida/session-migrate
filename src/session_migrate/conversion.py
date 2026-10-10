@@ -18,7 +18,12 @@ from pathlib import Path
 from typing import Any
 
 from session_migrate import __version__
-from session_migrate.errors import FormatDetectionError, JsonlError, SessionMigrateError
+from session_migrate.errors import (
+    FormatDetectionError,
+    JsonlError,
+    NativeImportPartialError,
+    SessionMigrateError,
+)
 from session_migrate.formats import (
     antigravity,
     claude,
@@ -275,7 +280,9 @@ def load_devin_session(session_id: str, *, source_home: Path) -> Session:
     return replace(session, source_path=Path(f"devin:{native_id}"))
 
 
-def convert_session(session: Session, options: ConversionOptions) -> ConversionArtifact:
+def convert_session(
+    session: Session, options: ConversionOptions, *, environ: Mapping[str, str] | None = None
+) -> ConversionArtifact:
     target_format = TargetFormat(options.target_format.value)
     same_format_rewrite = session.source_format.value == target_format.value
     portable_id = _validated_uuid(options.session_id) if options.session_id else str(uuid.uuid4())
@@ -489,6 +496,7 @@ def convert_session(session: Session, options: ConversionOptions) -> ConversionA
             model=options.model,
             timestamp=timestamp,
             title=session.title,
+            environ=environ,
         )
     elif target_format == TargetFormat.DEVIN:
         target_version = options.target_cli_version or devin.PINNED_DEVIN_VERSION
@@ -634,7 +642,13 @@ def convert_session(session: Session, options: ConversionOptions) -> ConversionA
     )
 
 
-def target_import_paths(artifact: ConversionArtifact, target_home: Path) -> tuple[Path, Path]:
+def target_import_paths(
+    artifact: ConversionArtifact,
+    target_home: Path,
+    *,
+    user_home: Path | None = None,
+    temp_root: Path | None = None,
+) -> tuple[Path, Path]:
     target_home = target_home.expanduser().resolve()
     if artifact.target_format == TargetFormat.CLAUDE:
         native_path = (
@@ -653,7 +667,11 @@ def target_import_paths(artifact: ConversionArtifact, target_home: Path) -> tupl
         )
     elif artifact.target_format == TargetFormat.OMP:
         native_path = target_home / omp.session_relative_path(
-            artifact.cwd, artifact.session_id, artifact.timestamp
+            artifact.cwd,
+            artifact.session_id,
+            artifact.timestamp,
+            home=user_home,
+            temp_root=temp_root,
         )
     elif artifact.target_format == TargetFormat.COPILOT:
         native_path = target_home / copilot.session_relative_path(artifact.session_id)
@@ -685,49 +703,114 @@ def target_import_paths(artifact: ConversionArtifact, target_home: Path) -> tupl
     return native_path, manifest_path
 
 
-def default_target_home(target_format: TargetFormat | AgentFormat) -> Path:
-    if target_format.value == TargetFormat.CLAUDE.value:
-        configured = os.environ.get("CLAUDE_CONFIG_DIR")
-        return Path(configured).expanduser() if configured else Path.home() / ".claude"
-    if target_format.value == TargetFormat.CODEX.value:
-        configured = os.environ.get("CODEX_HOME")
-        return Path(configured).expanduser() if configured else Path.home() / ".codex"
-    if target_format.value == TargetFormat.PI.value:
-        configured = os.environ.get("PI_CODING_AGENT_DIR")
-        return Path(configured).expanduser() if configured else Path.home() / ".pi" / "agent"
-    if target_format.value == TargetFormat.OMP.value:
-        configured = os.environ.get("PI_CODING_AGENT_DIR")
-        return Path(configured).expanduser() if configured else Path.home() / ".omp" / "agent"
-    if target_format.value == TargetFormat.COPILOT.value:
-        configured = os.environ.get("COPILOT_HOME")
-        return Path(configured).expanduser() if configured else Path.home() / ".copilot"
-    if target_format.value == TargetFormat.ANTIGRAVITY.value:
-        return antigravity.app_data_home()
-    if target_format.value == TargetFormat.CURSOR.value:
-        return cursor.config_home()
-    if target_format.value == TargetFormat.VIBE.value:
-        return vibe.vibe_home()
-    if target_format.value == TargetFormat.MUSE.value:
-        xdg_data = os.environ.get("XDG_DATA_HOME")
-        data_home = Path(xdg_data).expanduser() if xdg_data else Path.home() / ".local/share"
-        return data_home / "muse"
-    if target_format.value == TargetFormat.QWEN.value:
-        configured = os.environ.get("QWEN_HOME")
-        return Path(configured).expanduser() if configured else Path.home() / ".qwen"
-    if target_format.value == TargetFormat.KIMI.value:
-        configured = os.environ.get("KIMI_CODE_HOME")
-        return Path(configured).expanduser() if configured else Path.home() / ".kimi-code"
-    if target_format.value == TargetFormat.GROK.value:
-        return grok.grok_home()
-    if target_format.value == TargetFormat.OPENHANDS.value:
-        return openhands.conversations_home()
-    if target_format.value == TargetFormat.HERMES.value:
-        return hermes.hermes_home()
-    if target_format.value == TargetFormat.MASTRACODE.value:
-        return mastracode.database_path(Path.home()).parent
-    if target_format.value == TargetFormat.DEVIN.value:
-        return devin.data_root()
-    raise SessionMigrateError(f"{target_format.value} does not expose a filesystem target home")
+def environment_home(environ: Mapping[str, str]) -> Path:
+    """Resolve HOME from a selected environment, never from process globals."""
+
+    configured = environ.get("HOME")
+    if not configured or str(configured).startswith("~"):
+        raise SessionMigrateError("selected environment requires an explicit HOME")
+    return Path(configured).absolute()
+
+
+def expand_environment_path(path: Path, environ: Mapping[str, str]) -> Path:
+    """Expand ~/ against the selected HOME without consulting passwd/os.environ."""
+
+    value = str(path)
+    if value == "~":
+        return environment_home(environ)
+    if value.startswith("~/"):
+        return environment_home(environ) / value[2:]
+    if value.startswith("~"):
+        raise SessionMigrateError("selected environment supports only ~/ home expansion")
+    return path
+
+
+def default_target_home(
+    target_format: TargetFormat | AgentFormat, *, environ: Mapping[str, str] | None = None
+) -> Path:
+    values = dict(os.environ if environ is None else environ)
+    if environ is None and not values.get("HOME"):
+        values["HOME"] = str(Path.home())
+    name = target_format.value
+    configured_defaults = {
+        "claude": ("CLAUDE_CONFIG_DIR", ".claude"),
+        "codex": ("CODEX_HOME", ".codex"),
+        "pi": ("PI_CODING_AGENT_DIR", ".pi/agent"),
+        "omp": ("PI_CODING_AGENT_DIR", ".omp/agent"),
+        "copilot": ("COPILOT_HOME", ".copilot"),
+        "vibe": ("VIBE_HOME", ".vibe"),
+        "qwen": ("QWEN_HOME", ".qwen"),
+        "kimi": ("KIMI_CODE_HOME", ".kimi-code"),
+        "grok": ("GROK_HOME", ".grok"),
+        "openhands": ("OPENHANDS_CONVERSATIONS_DIR", ".openhands/conversations"),
+        "hermes": ("HERMES_HOME", ".hermes"),
+    }
+    if name in configured_defaults:
+        key, relative = configured_defaults[name]
+        configured = values.get(key)
+        return (
+            expand_environment_path(Path(configured), values)
+            if configured
+            else environment_home(values) / relative
+        )
+    if name == "antigravity":
+        return antigravity.app_data_home(environment_home(values))
+    if name == "cursor":
+        if explicit := values.get("CURSOR_CONFIG_DIR", "").strip():
+            return expand_environment_path(Path(explicit), values)
+        if xdg := values.get("XDG_CONFIG_HOME", "").strip():
+            return expand_environment_path(Path(xdg), values) / "cursor"
+        return environment_home(values) / ".cursor"
+    if name == "muse":
+        xdg = values.get("XDG_DATA_HOME")
+        root = (
+            expand_environment_path(Path(xdg), values)
+            if xdg
+            else environment_home(values) / ".local/share"
+        )
+        return root / "muse"
+    if name == "mastracode":
+        if configured := values.get("MASTRA_DB_PATH"):
+            database = expand_environment_path(Path(configured), values)
+            if database.name != "mastra.db":
+                raise SessionMigrateError(
+                    "MASTRA_DB_PATH requires the canonical mastra.db filename for migration"
+                )
+            return database.parent
+        if configured := values.get("MASTRA_APP_DATA_DIR"):
+            return expand_environment_path(Path(configured), values)
+        system = os.sys.platform
+        if system == "darwin":
+            root = environment_home(values) / "Library/Application Support"
+        elif system.startswith("win"):
+            appdata = values.get("APPDATA")
+            root = (
+                expand_environment_path(Path(appdata), values)
+                if appdata
+                else environment_home(values) / "AppData/Roaming"
+            )
+        else:
+            xdg = values.get("XDG_DATA_HOME")
+            root = (
+                expand_environment_path(Path(xdg), values)
+                if xdg
+                else environment_home(values) / ".local/share"
+            )
+        return root / "mastracode"
+    if name == "devin":
+        normalized = {
+            key: str(expand_environment_path(Path(value), values))
+            if key in {"APPDATA", "XDG_DATA_HOME"}
+            else value
+            for key, value in values.items()
+        }
+        home = environment_home(values) if values.get("HOME") else None
+        if home is None and not (
+            values.get("APPDATA") if os.sys.platform == "win32" else values.get("XDG_DATA_HOME")
+        ):
+            home = environment_home(values)
+        return devin.data_root(home, environ=normalized)
+    raise SessionMigrateError(f"{name} does not expose a filesystem target home")
 
 
 def _mastracode_database_for_home(home: Path) -> Path:
@@ -744,7 +827,12 @@ def default_migration_state_home(
 
     values = os.environ if environ is None else environ
     configured = values.get("XDG_STATE_HOME")
-    base = Path(configured).expanduser() if configured else (home or Path.home()) / ".local/state"
+    user_home = home or (Path.home() if environ is None else None)
+    base = (
+        expand_environment_path(Path(configured), values)
+        if configured
+        else (user_home or environment_home(values)) / ".local/state"
+    )
     return _absolute_no_follow(base / "session-migrate")
 
 
@@ -949,9 +1037,11 @@ def install_antigravity_artifact(
         if reservation_identity is not None:
             _unlink_if_identity_matches(manifest_path, reservation_identity)
         if install_succeeded:
-            raise SessionMigrateError(
+            raise NativeImportPartialError(
                 "Antigravity import succeeded but migrator manifest finalization failed; "
-                f"the native session may already exist as {artifact.session_id}"
+                f"the native session may already exist as {artifact.session_id}",
+                target_format=artifact.target_format,
+                session_id=artifact.session_id,
             ) from exc
         raise
     finally:
@@ -1024,9 +1114,11 @@ def install_cursor_artifact(
         if reservation_identity is not None:
             _unlink_if_identity_matches(manifest_path, reservation_identity)
         if install_succeeded:
-            raise SessionMigrateError(
+            raise NativeImportPartialError(
                 "Cursor import succeeded but migrator manifest finalization failed; "
-                f"the native session may already exist as {artifact.session_id}"
+                f"the native session may already exist as {artifact.session_id}",
+                target_format=artifact.target_format,
+                session_id=artifact.session_id,
             ) from exc
         raise
     finally:
@@ -1399,9 +1491,11 @@ def _install_shared_database_artifact(
         if reservation_identity is not None:
             _unlink_if_identity_matches(manifest_path, reservation_identity)
         if import_succeeded:
-            raise SessionMigrateError(
+            raise NativeImportPartialError(
                 "native database import succeeded but manifest finalization failed; "
-                f"the session may already exist as {artifact.session_id}"
+                f"the session may already exist as {artifact.session_id}",
+                target_format=artifact.target_format,
+                session_id=artifact.session_id,
             ) from exc
         raise
     finally:
@@ -1510,9 +1604,11 @@ def install_opencode_artifact(
         if reservation_identity is not None:
             _unlink_if_identity_matches(manifest_path, reservation_identity)
         if import_succeeded:
-            raise SessionMigrateError(
+            raise NativeImportPartialError(
                 "OpenCode import succeeded but migrator manifest finalization failed; "
-                f"the native session may already exist as {artifact.session_id}"
+                f"the native session may already exist as {artifact.session_id}",
+                target_format=artifact.target_format,
+                session_id=artifact.session_id,
             ) from exc
         raise
     finally:
@@ -1602,9 +1698,11 @@ def install_kilo_artifact(
         if reservation_identity is not None:
             _unlink_if_identity_matches(manifest_path, reservation_identity)
         if import_succeeded:
-            raise SessionMigrateError(
+            raise NativeImportPartialError(
                 "Kilo import succeeded but migrator manifest finalization failed; "
-                f"the native session may already exist as {artifact.session_id}"
+                f"the native session may already exist as {artifact.session_id}",
+                target_format=artifact.target_format,
+                session_id=artifact.session_id,
             ) from exc
         raise
     finally:
@@ -1817,11 +1915,13 @@ def _resolve_opencode_cli(target_cli: Path | None, environ: Mapping[str, str]) -
     elif environ.get("OPENCODE_BIN"):
         candidates.append(_absolute_no_follow(Path(environ["OPENCODE_BIN"])))
     else:
-        discovered = shutil.which("opencode", path=environ.get("PATH"))
+        discovered = shutil.which("opencode", path=environ.get("PATH", os.defpath))
         if discovered:
             candidates.append(_absolute_no_follow(Path(discovered)))
-        home = Path(environ.get("HOME", str(Path.home()))).expanduser()
-        candidates.append(_absolute_no_follow(home / ".opencode/bin/opencode"))
+        if environ.get("HOME"):
+            candidates.append(
+                _absolute_no_follow(environment_home(environ) / ".opencode/bin/opencode")
+            )
     for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return candidate
@@ -1841,8 +1941,10 @@ def _opencode_version(cli: Path, environ: Mapping[str, str]) -> str:
     return version
 
 
-def detect_opencode_version(target_cli: Path | None = None) -> str:
-    values = dict(os.environ)
+def detect_opencode_version(
+    target_cli: Path | None = None, *, environ: Mapping[str, str] | None = None
+) -> str:
+    values = dict(os.environ if environ is None else environ)
     values.setdefault("OPENCODE_DISABLE_AUTOUPDATE", "true")
     values.setdefault("OPENCODE_DISABLE_PRUNE", "true")
     observed = _opencode_version(_resolve_opencode_cli(target_cli, values), values)
@@ -1980,7 +2082,7 @@ def _resolve_kilo_cli(target_cli: Path | None, environ: Mapping[str, str]) -> Pa
     elif environ.get("KILO_BIN"):
         candidates.append(_absolute_no_follow(Path(environ["KILO_BIN"])))
     else:
-        discovered = shutil.which("kilo", path=environ.get("PATH"))
+        discovered = shutil.which("kilo", path=environ.get("PATH", os.defpath))
         if discovered:
             candidates.append(_absolute_no_follow(Path(discovered)))
     for candidate in candidates:

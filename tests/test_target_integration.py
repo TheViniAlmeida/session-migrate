@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from session_migrate import cli as cli_module
 from session_migrate import conversion
+from session_migrate import operations as operations_module
 from session_migrate.cli import build_parser, main
 from session_migrate.conversion import (
     ConversionOptions,
@@ -898,7 +898,9 @@ def test_opencode_cli_dry_run_delegates_to_official_preflight_without_manifest(
         manifest_path: Path,
         target_cli: Path | None,
         dry_run: bool,
+        environ: dict[str, str],
     ) -> Path:
+        assert environ["XDG_STATE_HOME"] == str(state)
         observed.update(
             artifact=artifact,
             manifest_path=manifest_path,
@@ -907,8 +909,10 @@ def test_opencode_cli_dry_run_delegates_to_official_preflight_without_manifest(
         )
         return target_cli or Path("opencode")
 
-    monkeypatch.setattr(cli_module, "install_opencode_artifact", install)
-    monkeypatch.setattr(cli_module, "detect_opencode_version", lambda cli: "1.17.20")
+    monkeypatch.setattr(operations_module, "install_opencode_artifact", install)
+    monkeypatch.setattr(
+        operations_module, "detect_opencode_version", lambda cli, *, environ=None: "1.17.20"
+    )
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
 
     status = main(

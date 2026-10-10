@@ -251,21 +251,34 @@ def native_record_count(data: bytes) -> int:
     return len(records) + (1 if title_slot else 0)
 
 
-def session_relative_path(cwd: Path, session_id: str, timestamp: str) -> Path:
+def session_relative_path(
+    cwd: Path,
+    session_id: str,
+    timestamp: str,
+    *,
+    home: Path | None = None,
+    temp_root: Path | None = None,
+) -> Path:
     """Return OMP's current path below its active agent directory."""
 
     date = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(UTC)
     stamp = date.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     stamp = stamp.replace(":", "-").replace(".", "-")
-    return Path("sessions") / session_directory_name(cwd) / f"{stamp}_{session_id}.jsonl"
+    return (
+        Path("sessions")
+        / session_directory_name(cwd, home=home, temp_root=temp_root)
+        / f"{stamp}_{session_id}.jsonl"
+    )
 
 
-def session_directory_name(cwd: Path) -> str:
+def session_directory_name(
+    cwd: Path, *, home: Path | None = None, temp_root: Path | None = None
+) -> str:
     """Encode a cwd using OMP 18.0.5's home/tmp/absolute bucket rules."""
 
     resolved = cwd.resolve()
-    home = Path.home().resolve()
-    temp_root = Path(tempfile.gettempdir()).resolve()
+    home = (home or Path.home()).resolve()
+    temp_root = (temp_root or Path(tempfile.gettempdir())).resolve()
     try:
         relative = resolved.relative_to(home)
         return _relative_bucket("-", relative)

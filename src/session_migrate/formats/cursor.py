@@ -375,7 +375,9 @@ def verify_pinned_cli(
 
     values = dict(os.environ if environ is None else environ)
     candidate = (
-        str(executable) if executable else shutil.which("cursor-agent", path=values.get("PATH"))
+        str(executable)
+        if executable
+        else shutil.which("cursor-agent", path=values.get("PATH", os.defpath))
     )
     if not candidate:
         raise SessionMigrateError("Cursor Agent executable 'cursor-agent' was not found")

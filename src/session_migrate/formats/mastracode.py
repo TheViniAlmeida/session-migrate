@@ -151,7 +151,7 @@ def database_path(home: Path, **kwargs: Any) -> Path:
     return database_candidates(home, **kwargs)[0]
 
 
-def resource_id_for_cwd(cwd: Path) -> str:
+def resource_id_for_cwd(cwd: Path, *, environ: Mapping[str, str] | None = None) -> str:
     """Reproduce MastraCode's project resource ID calculation."""
 
     root = cwd.resolve()
@@ -161,6 +161,7 @@ def resource_id_for_cwd(cwd: Path) -> str:
             completed = subprocess.run(
                 ["git", *args],
                 cwd=root,
+                env=None if environ is None else dict(environ),
                 check=False,
                 capture_output=True,
                 text=True,
@@ -209,6 +210,7 @@ def serialize(
     timestamp: str | None = None,
     title: str | None = None,
     resource_id: str | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> tuple[bytes, dict[str, int]]:
     """Serialize portable history as a one-thread native LibSQL artifact."""
 
@@ -218,7 +220,7 @@ def serialize(
             f"MastraCode target schema is pinned to {PINNED_MASTRACODE_VERSION}"
         )
     destination = cwd.resolve()
-    native_resource = resource_id or resource_id_for_cwd(destination)
+    native_resource = resource_id or resource_id_for_cwd(destination, environ=environ)
     _validate_text(native_resource, "MastraCode resource ID", maximum=1024)
     started = valid_rfc3339(timestamp) or valid_rfc3339(session.started_at) or _utc_now()
     clock = datetime.fromisoformat(started.replace("Z", "+00:00")).astimezone(UTC)
