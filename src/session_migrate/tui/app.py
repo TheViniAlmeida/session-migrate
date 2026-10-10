@@ -203,12 +203,19 @@ class MigrationApp(App):
         self.query_one("#confirm", Button).disabled = True
         return True
 
-    def invalidate(self):
+    def invalidate(self) -> bool:
+        cancelled = self.token.request_cancel() if self.token else True
+        if self.pending == "commit" and not cancelled:
+            self.status(
+                "Installation started. Waiting for verification; it cannot be interrupted."
+                if self.token.publishing
+                else "Operation finishing. Waiting for its result."
+            )
+            return False
         self.generation += 1
         self.draft = None
         self.query_one("#confirm", Button).disabled = True
-        if self.token:
-            self.token.request_cancel()
+        return True
 
     def profile_form(self, direction: str) -> dict:
         choice = self.query_one(f"#{direction}-profile", Select).value
@@ -266,8 +273,6 @@ class MigrationApp(App):
             self.on_edit()
 
     def on_edit(self):
-        if self.pending == "commit" and self.token and self.token.publishing:
-            return
         # Only option edits invalidate a draft; typing filters has no publication side effects.
         if self.draft is not None or self.pending in {
             "bind",
@@ -276,7 +281,7 @@ class MigrationApp(App):
             "prepare",
             "commit",
         }:
-            self.invalidate()
+            return self.invalidate()
 
     def show_capabilities(self):
         format = self.query_one("#target-format", Select).value
@@ -581,15 +586,8 @@ class MigrationApp(App):
                 "do not repeat the import."
             )
             return
-        if self.pending:
-            if self.token and not self.token.request_cancel():
-                self.status(
-                    "Installation started. Waiting for verification; it cannot be interrupted."
-                    if self.token.publishing
-                    else "Operation finishing. Waiting for its result."
-                )
-                return
-            self.invalidate()
+        if self.pending and not self.invalidate():
+            return
         if self.preview_request:
             self.preview_request.cancel()
             self.preview_request = None
