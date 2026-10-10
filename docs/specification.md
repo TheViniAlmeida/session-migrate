@@ -1,6 +1,6 @@
 # Session migration specification
 
-This is the user-facing contract for `session-migrate` 0.12.0.dev2.
+This is the user-facing contract for `session-migrate` 0.12.0.dev3.
 
 ## Scope
 
@@ -216,6 +216,14 @@ profiles are ephemeral unless saved explicitly to a new private JSON file.
 The interface lists metadata, previews the selected session, and prepares a
 new-session transfer for manual confirmation. Changes to source or options
 invalidate the prepared transfer. Cancellation stops before publication; after
-publication starts the interface continues observing verification. Target naming,
-in-place update and the web dashboard remain roadmap features. See
+publication starts the interface continues observing verification. Destination
+titles preserve valid Unicode/spaces exactly. Native naming is verified for
+exact stock OpenCode 2.0.22/2.0.23 on Linux x64; other destinations require an
+explicit app-only alias or reject native naming. Source title/identity remain
+unchanged. Review and confirmation share one private single-use prepared handle.
+`smigrate proposal <convert|import|transfer>` prints schema 1 metadata and
+discards that handle; it never publishes a session, output, manifest, alias or
+title receipt. Declared native read probes may affect runtime cache/WAL state.
+Proposals are informational and cannot be applied or replayed across processes.
+In-place update and the web dashboard remain roadmap features. See
 [terminal interface](terminal-ui.md) for read limits and native validation scope.

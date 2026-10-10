@@ -10,10 +10,21 @@ from pathlib import Path
 
 from session_migrate import __version__
 from session_migrate.catalog import Catalog, CatalogEntry, default_catalog_path
-from session_migrate.errors import SessionMigrateError
+from session_migrate.errors import (
+    NativeImportPartialError,
+    PublishedArtifactPartialError,
+    SessionMigrateError,
+)
 from session_migrate.inspection import inspect_session
 from session_migrate.model import AgentFormat, TargetFormat
-from session_migrate.operations import OperationKind, OperationRequest, run_operation
+from session_migrate.operations import (
+    OperationKind,
+    OperationRequest,
+    prepare_operation,
+    proposal_metadata,
+    run_operation,
+)
+from session_migrate.titles import TitlePolicy
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,98 +61,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="print the structural summary as JSON"
     )
 
-    convert_parser = subparsers.add_parser("convert", help="convert a session file")
-    convert_parser.add_argument(
-        "path",
-        type=_expanded_path,
-        help="source transcript, native session directory, or supported export bundle",
-    )
-    convert_parser.add_argument(
-        "--to",
-        choices=tuple(TargetFormat),
-        required=True,
-        help="target format; Cursor support is pinned, text-only, and experimental",
-    )
-    convert_parser.add_argument(
-        "--output",
-        type=_expanded_path,
-        required=True,
-        help="new target transcript or import-bundle path",
-    )
-    _add_conversion_arguments(convert_parser)
+    for command, help_text in (
+        ("convert", "convert a session file"),
+        ("import", "convert and install into a target agent home"),
+        ("transfer", "find a native session by ID or catalog title and import it"),
+    ):
+        _add_operation_arguments(subparsers.add_parser(command, help=help_text), command)
 
-    import_parser = subparsers.add_parser(
-        "import", help="convert and install into a target agent home"
+    proposal_parser = subparsers.add_parser(
+        "proposal", help="prepare read-only review metadata; never apply or replay JSON"
     )
-    import_parser.add_argument(
-        "path",
-        type=_expanded_path,
-        help="source transcript, native session directory, or supported export bundle",
-    )
-    import_parser.add_argument(
-        "--to",
-        choices=tuple(TargetFormat),
-        required=True,
-        help="target format; Cursor support is pinned, text-only, and experimental",
-    )
-    import_parser.add_argument("--home", type=_expanded_path, help="target agent home")
-    import_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "validate/collision-check without installing (OpenCode's official list "
-            "probe may initialize normal XDG state)"
-        ),
-    )
-    _add_conversion_arguments(import_parser)
-
-    transfer_parser = subparsers.add_parser(
-        "transfer", help="find a native session by ID or catalog title and import it"
-    )
-    transfer_parser.add_argument("source_id", nargs="?", help="native source session ID")
-    transfer_parser.add_argument(
-        "--from",
-        dest="source_agent",
-        choices=tuple(AgentFormat),
-        help="source agent format",
-    )
-    transfer_parser.add_argument(
-        "--to",
-        choices=tuple(TargetFormat),
-        help=(
-            "target format; Cursor support is pinned, text-only, and experimental "
-            "(default: opposite Claude/Codex source)"
-        ),
-    )
-    transfer_parser.add_argument(
-        "--catalog-id",
-        help="select an exact source returned by catalog list/search",
-    )
-    transfer_parser.add_argument(
-        "--title",
-        help="select one unique session title/name from the existing catalog",
-    )
-    transfer_parser.add_argument("--source-home", type=_expanded_path, help="source agent home")
-    transfer_parser.add_argument(
-        "--source-cli",
-        type=_expanded_path,
-        help="OpenCode or Kilo source executable used for the official export",
-    )
-    transfer_parser.add_argument(
-        "--source-cwd",
-        type=_expanded_path,
-        help="Claude/Pi/OMP/Cursor/Vibe/Qwen/Kimi project cwd used to disambiguate lookup",
-    )
-    transfer_parser.add_argument("--home", type=_expanded_path, help="target agent home")
-    transfer_parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help=(
-            "validate/collision-check without installing (OpenCode's official list "
-            "probe may initialize normal XDG state)"
-        ),
-    )
-    _add_conversion_arguments(transfer_parser, include_source_format=False)
+    proposal_commands = proposal_parser.add_subparsers(dest="proposal_command", required=True)
+    for command in ("convert", "import", "transfer"):
+        _add_operation_arguments(proposal_commands.add_parser(command), command)
 
     catalog_parser = subparsers.add_parser(
         "catalog", help="index, list, and search native sessions across agent homes"
@@ -356,35 +288,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 _print_inspection(result.to_dict())
             return 0
+        if args.command == "proposal":
+            prepared = prepare_operation(_operation_request(args, args.proposal_command))
+            try:
+                print(json.dumps(proposal_metadata(prepared).to_dict(), indent=2, sort_keys=True))
+            finally:
+                prepared.discard()
+            return 0
         if args.command in {"convert", "import", "transfer"}:
-            source_name = getattr(args, "source_agent", None) or getattr(args, "format", None)
-            result = run_operation(
-                OperationRequest(
-                    command=OperationKind(args.command),
-                    path=getattr(args, "path", None),
-                    source_format=AgentFormat(source_name) if source_name else None,
-                    target_format=TargetFormat(args.to) if args.to else None,
-                    output=getattr(args, "output", None),
-                    home=getattr(args, "home", None),
-                    source_home=getattr(args, "source_home", None),
-                    source_cwd=getattr(args, "source_cwd", None),
-                    source_cli=getattr(args, "source_cli", None),
-                    source_id=getattr(args, "source_id", None),
-                    catalog=args.catalog,
-                    catalog_id=getattr(args, "catalog_id", None),
-                    title=getattr(args, "title", None),
-                    session_id=args.session_id,
-                    cwd=args.cwd,
-                    target_cli=args.target_cli,
-                    target_cli_version=args.target_cli_version,
-                    model_provider=args.model_provider,
-                    model=args.model,
-                    dry_run=getattr(args, "dry_run", False),
-                )
-            ).to_dict()
+            result = run_operation(_operation_request(args, args.command)).to_dict()
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
         parser.error(f"{args.command!r} is specified but not implemented yet")
+    except (NativeImportPartialError, PublishedArtifactPartialError) as exc:
+        if getattr(args, "target_title", None) is not None:
+            print(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "needs_reconcile",
+                        "publication_kind": "native_import"
+                        if exc.import_succeeded
+                        else "converted_file",
+                        "target_format": exc.target_format.value,
+                        "target_id": exc.session_id,
+                        "manifest": exc.manifest,
+                        "root": getattr(exc, "root", None),
+                        "output": getattr(exc, "output", None),
+                        "stage": exc.stage,
+                        "action": (
+                            "Inspect the published target manually; do not repeat publication."
+                        ),
+                    },
+                    indent=2,
+                    sort_keys=True,
+                ),
+                file=sys.stderr,
+            )
+        else:
+            print(f"session-migrate: error: {exc}", file=sys.stderr)
+        return 2
     except SessionMigrateError as exc:
         print(f"session-migrate: error: {exc}", file=sys.stderr)
         return 2
@@ -412,9 +355,104 @@ def _print_inspection(summary: dict[str, object]) -> None:
         print(f"{key}: {json.dumps(summary[key], sort_keys=True)}")
 
 
+def _operation_request(args: argparse.Namespace, command: str) -> OperationRequest:
+    source_name = getattr(args, "source_agent", None) or getattr(args, "format", None)
+    return OperationRequest(
+        command=OperationKind(command),
+        path=getattr(args, "path", None),
+        source_format=AgentFormat(source_name) if source_name else None,
+        target_format=TargetFormat(args.to) if args.to else None,
+        output=getattr(args, "output", None),
+        home=getattr(args, "home", None),
+        source_home=getattr(args, "source_home", None),
+        source_cwd=getattr(args, "source_cwd", None),
+        source_cli=getattr(args, "source_cli", None),
+        source_id=getattr(args, "source_id", None),
+        catalog=args.catalog,
+        catalog_id=getattr(args, "catalog_id", None),
+        title=getattr(args, "title", None),
+        session_id=args.session_id,
+        cwd=args.cwd,
+        target_cli=args.target_cli,
+        target_cli_version=args.target_cli_version,
+        model_provider=args.model_provider,
+        model=args.model,
+        dry_run=getattr(args, "dry_run", False),
+        target_title=args.target_title,
+        title_policy=TitlePolicy.LOCAL_ALIAS if args.local_title_alias else None,
+        require_native_title=args.require_native_title,
+    )
+
+
+def _add_operation_arguments(parser: argparse.ArgumentParser, command: str) -> None:
+    if command in {"convert", "import"}:
+        parser.add_argument(
+            "path",
+            type=_expanded_path,
+            help="source transcript, native session directory, or supported export bundle",
+        )
+    else:
+        parser.add_argument("source_id", nargs="?", help="native source session ID")
+        parser.add_argument(
+            "--from", dest="source_agent", choices=tuple(AgentFormat), help="source agent format"
+        )
+        parser.add_argument(
+            "--catalog-id", help="select an exact source returned by catalog list/search"
+        )
+        parser.add_argument(
+            "--title", help="select one unique SOURCE title/name from the existing catalog"
+        )
+        parser.add_argument("--source-home", type=_expanded_path, help="source agent home")
+        parser.add_argument(
+            "--source-cli",
+            type=_expanded_path,
+            help="OpenCode or Kilo source executable used for the official export",
+        )
+        parser.add_argument(
+            "--source-cwd",
+            type=_expanded_path,
+            help="project cwd used to disambiguate native source lookup",
+        )
+    parser.add_argument(
+        "--to",
+        choices=tuple(TargetFormat),
+        required=command != "transfer",
+        help="target format (transfer defaults only between Claude/Codex)",
+    )
+    if command == "convert":
+        parser.add_argument(
+            "--output",
+            type=_expanded_path,
+            required=True,
+            help="new target transcript or import-bundle path",
+        )
+    else:
+        parser.add_argument("--home", type=_expanded_path, help="target agent home")
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="validate without installing; native probes may initialize cache/store",
+        )
+    _add_conversion_arguments(parser, include_source_format=command != "transfer")
+
+
 def _add_conversion_arguments(
     parser: argparse.ArgumentParser, *, include_source_format: bool = True
 ) -> None:
+    parser.add_argument(
+        "--target-title", help="requested DESTINATION title; source title is unchanged"
+    )
+    title_policy = parser.add_mutually_exclusive_group()
+    title_policy.add_argument(
+        "--local-title-alias",
+        action="store_true",
+        help="explicit private local alias; does not rename the native picker",
+    )
+    title_policy.add_argument(
+        "--require-native-title",
+        action="store_true",
+        help="require verified installed native title (import/transfer only)",
+    )
     if include_source_format:
         parser.add_argument(
             "--format", choices=tuple(AgentFormat), help="override source detection"

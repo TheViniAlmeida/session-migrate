@@ -33,6 +33,75 @@ class AdapterCapabilities:
     media_scope: str = "Unknown; the native adapter validates and reports omissions."
 
 
+@dataclass(frozen=True, slots=True)
+class TitleCapability:
+    format: AgentFormat
+    schema: str
+    status: str
+    reason: str
+    proof_version: str | None = None
+    proof_id: str | None = None
+
+
+# Schema compatibility does not prove picker title persistence for other releases.
+# Each release has an independent public-list/cold-export title oracle.
+_NATIVE_TITLE_PROOFS = {
+    (AgentFormat.OPENCODE, "v2", "2.0.22"): "opencode-2.0.22-public-list-cold-export",
+    (AgentFormat.OPENCODE, "v2", "2.0.23"): "opencode-2.0.23-public-list-cold-export",
+}
+
+
+def title_capability_for(
+    agent_format: AgentFormat | str,
+    *,
+    schema: str | None = None,
+    cli_version: str | None = None,
+    policy: str = "native",
+) -> TitleCapability:
+    """Resolve title policy for an exact proved client without any native I/O."""
+    if cli_version is not None and not isinstance(cli_version, str):
+        raise SessionMigrateError("title client version must be a string")
+    if not isinstance(policy, str) or policy not in {"native", "local_alias"}:
+        raise SessionMigrateError("title policy is unsupported")
+    selected = capabilities_for(agent_format)
+    observed = (
+        opencode_v2.version(cli_version)
+        if selected.format == AgentFormat.OPENCODE and cli_version is not None
+        else cli_version
+    )
+    if schema is None and selected.format == AgentFormat.OPENCODE and observed:
+        schema = "v2"
+    capability = capabilities_for(selected.format, schema=schema)
+    if not capability.target_supported:
+        return TitleCapability(
+            selected.format, capability.schema, "unsupported", "This schema has no target writer."
+        )
+    if policy == "local_alias":
+        return TitleCapability(
+            selected.format,
+            capability.schema,
+            "local_alias",
+            "Explicit private local alias; the native picker title is unchanged.",
+        )
+    proof = _NATIVE_TITLE_PROOFS.get((selected.format, capability.schema, observed))
+    if proof is None:
+        return TitleCapability(
+            selected.format,
+            capability.schema,
+            "unsupported",
+            "Native title persistence has no proof for this exact schema/client; "
+            "local_alias requires an explicit choice.",
+        )
+    return TitleCapability(
+        selected.format,
+        capability.schema,
+        "native_verified",
+        "Exact-client public native list and cold export verified the requested title.",
+        observed,
+        proof,
+    )
+
+
 def _registry() -> dict[tuple[AgentFormat, str], AdapterCapabilities]:
     result = {}
     for agent_format in AgentFormat:

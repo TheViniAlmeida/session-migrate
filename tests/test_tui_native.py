@@ -307,3 +307,199 @@ def test_keyboard_native_route_source_drift_blocks_confirm(tmp_path, stock, sour
                     load_opencode_session(reserved, source_cli=stock.cli, environ=case.target_env)
 
     asyncio.run(flow())
+
+
+@pytest.fixture
+def title_stock(tmp_path):
+    """Keep new title-route native commands inside a private, offline namespace."""
+    import hashlib
+    import shlex
+    import shutil
+
+    configured = os.environ.get(BIN_VARIABLE)
+    if not configured:
+        pytest.skip(f"explicit title gate requires ${BIN_VARIABLE}")
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        pytest.skip("native title keyboard gate requires bubblewrap")
+    binary = Path(configured).resolve()
+    accepted = {
+        "32cf5aa0a69a650e36277e3315d189835ddc79fb9aa1d0aef5025be5af5ad122",
+        "a233de331f4438336e604d8e006fdab18e5911c4ece16de8e502eb61394c3586",
+    }
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    if digest not in accepted:
+        raise pytest.UsageError("native title keyboard gate requires an exact stock ELF")
+    wrapper = tmp_path / "offline-stock-opencode"
+    # Only a runtime scratch wrapper, never a source account/store or package script.
+    args = [
+        bwrap,
+        "--die-with-parent",
+        "--unshare-net",
+        "--unshare-pid",
+        "--ro-bind",
+        "/",
+        "/",
+        "--tmpfs",
+        "/home",
+        "--tmpfs",
+        "/storage",
+        "--tmpfs",
+        "/root",
+        "--tmpfs",
+        "/run",
+        "--tmpfs",
+        "/tmp",
+        "--bind",
+        str(tmp_path),
+        str(tmp_path),
+        "--ro-bind",
+        str(binary),
+        "/tmp/opencode-title-elf",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+    ]
+    # The launcher begins outside the project. Honor an explicit subprocess cwd
+    # inside the private fixture, but keep default probes in the fixture root.
+    root_literal = shlex.quote(str(tmp_path))
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        + f"title_root={root_literal}\n"
+        + 'case "$PWD" in "$title_root"|"$title_root"/*) title_cwd="$PWD" ;; '
+        + '*) title_cwd="$title_root" ;; esac\n'
+        + "exec "
+        + shlex.join(args)
+        + ' --chdir "$title_cwd" -- /tmp/opencode-title-elf "$@"\n'
+    )
+    wrapper.chmod(0o700)
+    release = detect_opencode_version(wrapper, environ=environment(tmp_path / "private-version"))
+    assert release in {"2.0.22", "2.0.23"}
+    return StockClient(wrapper, release)
+
+
+@pytest.mark.parametrize("target,policy", [("opencode", "native"), ("codex", "local_alias")])
+def test_keyboard_native_title_and_explicit_alias_exact_artifact_two_homes(
+    tmp_path,
+    title_stock,
+    target,
+    policy,
+):
+    import hashlib
+
+    from textual.widgets import Checkbox
+
+    from session_migrate.profiles import Profile, local_alias_for_session
+
+    case = setup_case(tmp_path, title_stock, "claude", target)
+    scratch = tmp_path / "native-scratch"
+    scratch.mkdir(mode=0o700)
+    case.source_env["TMPDIR"] = case.target_env["TMPDIR"] = str(scratch)
+    case.controller.environ["TMPDIR"] = str(scratch)
+    before = case.source_path.read_bytes()
+    title = "  Native or alias · Ação 🧪 日本語 [bold]literal[/bold]  "
+
+    async def flow():
+        app = MigrationApp(case.controller)
+        async with app.run_test(size=(120, 60)) as pilot:
+            # Assemble the same exact source/target profile route, then name it explicitly.
+            await idle(app, pilot)
+            app.query_one("#source-profile", Select).value = case.source_id
+            await pilot.pause()
+            for field, key in (
+                ("home", "HOME"),
+                ("config", "XDG_CONFIG_HOME"),
+                ("data", "XDG_DATA_HOME"),
+            ):
+                fill(app, f"source-{field}", case.source_env[key])
+            await activate(app, pilot, "list")
+            app.query_one("#session-list", OptionList).highlighted = 0
+            await activate(app, pilot, "preview")
+            await activate(app, pilot, "target")
+            app.query_one("#target-format", Select).value = target
+            fill(app, "target-root", case.target_root)
+            for field, key in (
+                ("home", "HOME"),
+                ("config", "XDG_CONFIG_HOME"),
+                ("data", "XDG_DATA_HOME"),
+            ):
+                fill(app, f"target-{field}", case.target_env[key])
+            fill(app, "cwd", case.project)
+            fill(app, "target-title", title)
+            if policy == "native":
+                fill(app, "target-cli", title_stock.cli)
+                fill(app, "schema", title_stock.release)
+                fill(app, "provider", "synthetic")
+                fill(app, "model", "unused")
+                app.query_one("#require-native-title", Checkbox).value = True
+            else:
+                app.query_one("#local-title-alias", Checkbox).value = True
+            await pilot.pause()
+            await activate(app, pilot, "prepare")
+            draft = app.draft
+            proposal = draft.proposal.to_dict()
+            assert proposal["title"]["requested"] == title
+            assert draft.source.environ["HOME"] != draft.target.environ["HOME"]
+            await pilot.resize_terminal(76, 25)
+            await pilot.pause()
+            await activate(app, pilot, "confirm")
+            assert app.completed and not app.needs_reconcile
+            rendered = str(app.query_one("#receipt", Literal).render())
+            assert title in rendered and "Resume manually" in rendered
+            assert draft.result.session_id in rendered
+            metadata = json.loads(Path(draft.result.manifest).read_text())
+            assert metadata["schema_version"] == 2
+            assert metadata["target"]["sha256"] == proposal["target"]["sha256"]
+            if policy == "native":
+                observed = load_opencode_session(
+                    draft.result.session_id, source_cli=title_stock.cli, environ=case.target_env
+                )
+                assert observed.title == title
+                assert "native_verified" in rendered and "verified" in rendered
+                assert not (Path(case.source_env["XDG_DATA_HOME"]) / "opencode").exists()
+            else:
+                assert (
+                    hashlib.sha256(Path(draft.result.output).read_bytes()).hexdigest()
+                    == proposal["target"]["sha256"]
+                )
+                assert "local_alias" in rendered and "published" in rendered
+                profile = Profile(
+                    "renamed",
+                    "Renamed target profile",
+                    target,
+                    case.target_root,
+                    environ={
+                        key: value
+                        for key, value in case.target_env.items()
+                        if key
+                        in {
+                            "HOME",
+                            "XDG_CONFIG_HOME",
+                            "XDG_DATA_HOME",
+                            "XDG_CACHE_HOME",
+                            "XDG_STATE_HOME",
+                        }
+                    },
+                )
+                with Catalog(case.controller.catalog) as catalog:
+                    catalog.add_root(AgentFormat(target), case.target_root)
+                    catalog.refresh(include_auto=False)
+                rows = case.controller.list(profile, "", 0)
+                assert len(rows) == 1 and rows[0].local_alias == title
+                assert rows[0].entry.title != title
+                with Catalog(case.controller.catalog) as catalog:
+                    assert (
+                        local_alias_for_session(
+                            catalog, profile, rows[0].ref, base_environ=case.source_env
+                        )
+                        == title
+                    )
+            title_receipt = Path(proposal["title_receipt"])
+            assert title_receipt.is_file()
+            assert not (
+                Path(case.source_env["XDG_STATE_HOME"]) / "session-migrate/title-aliases"
+            ).exists()
+
+    asyncio.run(flow())
+    assert case.source_path.read_bytes() == before

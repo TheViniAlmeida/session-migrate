@@ -1,6 +1,7 @@
 """Optional headless keyboard flows; synthetic stores, no external services."""
 
 import asyncio
+import hashlib
 import json
 import sqlite3
 import threading
@@ -12,7 +13,7 @@ import pytest
 
 pytest.importorskip("textual", reason="optional tui extra is not installed")
 
-from textual.widgets import Button, Input, OptionList, Select
+from textual.widgets import Button, Checkbox, Input, OptionList, Select
 
 from session_migrate import conversion, operations, profiles
 from session_migrate.catalog import Catalog
@@ -143,6 +144,70 @@ def test_keyboard_claude_to_codex_preview_review_confirm_resize(tmp_path):
     assert load_session(paths[0], AgentFormat.CODEX).cwd == tmp_path / "project"
 
 
+def test_escape_after_completion_allows_second_transfer_once_per_confirmation(
+    tmp_path, monkeypatch
+):
+    controller, source, first_path = setup(tmp_path)
+    first_id = load_session(first_path, AgentFormat.CLAUDE).session_id
+    second_id = "20000000-0000-4000-8000-000000000000"
+    second_path = first_path.with_name(f"{second_id}.jsonl")
+    second_path.write_bytes(first_path.read_bytes().replace(first_id.encode(), second_id.encode()))
+    originals = {path: path.read_bytes() for path in (first_path, second_path)}
+    with Catalog(controller.catalog) as catalog:
+        catalog.refresh(include_auto=False)
+
+    installs = []
+    original_install = operations._install
+
+    def install(*args, **kwargs):
+        if not args[-1]:
+            installs.append(args[1].session_id)
+        return original_install(*args, **kwargs)
+
+    monkeypatch.setattr(operations, "_install", install)
+    target_root = tmp_path / "target"
+    reserved_ids = []
+
+    async def flow():
+        app = MigrationApp(controller)
+        async with app.run_test(size=(120, 60)) as pilot:
+            await idle(app, pilot)
+            app.query_one("#source-profile", Select).value = source.id
+            await pilot.pause()
+            await activate(app, pilot, "list")
+            assert len(app.entries) == 2
+            for index, source_id in enumerate((first_id, second_id)):
+                app.query_one("#session-list", OptionList).highlighted = next(
+                    i for i, row in enumerate(app.entries) if row.entry.session_id == source_id
+                )
+                await activate(app, pilot, "preview")
+                await activate(app, pilot, "target")
+                fill(app, "target-root", target_root)
+                fill(app, "cwd", tmp_path / "project")
+                await pilot.pause()
+                await activate(app, pilot, "prepare")
+                assert app.stage == "review" and not app.completed
+                assert not app.query_one("#confirm", Button).disabled
+                reserved_ids.append(app.draft.result.session_id)
+                await activate(app, pilot, "confirm")
+                assert app.stage == "result" and app.completed and not app.needs_reconcile
+                assert reserved_ids[-1] in str(app.query_one("#receipt", Literal).render())
+                assert installs == reserved_ids
+                assert len(list(target_root.glob("sessions/**/*.jsonl"))) == index + 1
+                # A repeated confirmation event cannot install the completed handle again.
+                app.on_button_pressed(Button.Pressed(app.query_one("#confirm", Button)))
+                await idle(app, pilot)
+                assert installs == reserved_ids and app.stage == "result"
+                if index == 0:
+                    await pilot.press("escape")
+                    await idle(app, pilot)
+                    assert app.stage == "sessions" and not app.completed
+
+    asyncio.run(flow())
+    assert len(set(reserved_ids)) == 2
+    assert {path: path.read_bytes() for path in originals} == originals
+
+
 def test_literal_unicode_markup_osc_and_tools_folded(tmp_path):
     controller, source, path = setup(tmp_path)
     rows = [json.loads(line) for line in path.read_text().splitlines()]
@@ -242,14 +307,14 @@ def test_draft_reserved_identity_changed_source_and_double_commit_no_retry(tmp_p
         source, ref, target, OperationRequest("transfer", cwd=tmp_path), CancellationToken()
     )
     result = controller.commit(draft, CancellationToken(), lambda event: None)
-    assert result.session_id == draft.result.session_id
+    assert result.legacy_result["session_id"] == draft.result.session_id
     with pytest.raises(Exception, match="already consumed"):
         controller.commit(draft, CancellationToken(), lambda event: None)
     draft = controller.prepare(
         source, ref, target, OperationRequest("transfer", cwd=tmp_path), CancellationToken()
     )
     path.write_bytes(path.read_bytes() + b"\n")
-    with pytest.raises(Exception, match="Source changed"):
+    with pytest.raises(Exception, match="(?i)source changed"):
         controller.commit(draft, CancellationToken(), lambda event: None)
 
 
@@ -367,7 +432,8 @@ def test_keyboard_opencode_routes_use_profile_environment_and_reserved_id(
                 assert all(id == reserved for id, dry_run in calls)
                 assert sum(not dry_run for id, dry_run in calls) == 1
             else:
-                assert len(calls) == 7  # selected export witnesses plus core prepare/commit
+                assert len(calls) >= 3  # selected authoritative exports, no unrelated session
+                assert all(call == "export" for call in calls)
 
     asyncio.run(flow())
 
@@ -674,7 +740,7 @@ def test_native_authority_witness_rejects_changed_export_before_publication(
 
         monkeypatch.setattr(operations, "ensure_target_paths_available", preflight)
     token = CancellationToken()
-    with pytest.raises(Exception, match="Source changed"):
+    with pytest.raises(Exception, match="(?i)source changed"):
         controller.commit(draft, token, lambda event: None)
     assert not token.publishing
     assert not target.root.exists()
@@ -1280,5 +1346,232 @@ def test_closed_nonpublishing_token_does_not_block_edit_or_back(tmp_path, pendin
                 assert app.draft is None
             app.pending = None
             app.token = None
+
+    asyncio.run(flow())
+
+
+@pytest.mark.parametrize("source_format,target_format", [("claude", "codex"), ("codex", "claude")])
+def test_keyboard_explicit_alias_raw_title_exact_artifact_and_separate_page_label(
+    tmp_path,
+    monkeypatch,
+    source_format,
+    target_format,
+):
+    controller, source, source_path = setup(tmp_path, AgentFormat(source_format))
+    before = source_path.read_bytes()
+    title = "  Local · Ação 👩‍💻 日本語 [bold]literal[/bold]  "
+    converted, committed = [], []
+    original_convert = operations.convert_session
+    from session_migrate.tui import controller as controller_module
+
+    original_commit = controller_module.commit_operation
+
+    def convert(*args, **kwargs):
+        result = original_convert(*args, **kwargs)
+        converted.append(result.target_sha256)
+        return result
+
+    def commit(handle, **kwargs):
+        committed.append(handle)
+        return original_commit(handle, **kwargs)
+
+    monkeypatch.setattr(operations, "convert_session", convert)
+    monkeypatch.setattr(controller_module, "commit_operation", commit)
+    target_root = tmp_path / "alias-target"
+
+    async def flow():
+        app = MigrationApp(controller)
+        async with app.run_test(size=(120, 60)) as pilot:
+            await idle(app, pilot)
+            app.query_one("#source-profile", Select).value = source.id
+            await pilot.pause()
+            await activate(app, pilot, "list")
+            app.query_one("#session-list", OptionList).highlighted = 0
+            await activate(app, pilot, "preview")
+            await activate(app, pilot, "target")
+            app.query_one("#target-format", Select).value = target_format
+            fill(app, "target-root", target_root)
+            fill(app, "cwd", tmp_path / "project")
+            fill(app, "target-title", title)
+            await pilot.pause()
+            assert app.query_one("#prepare", Button).disabled  # No silent native fallback.
+            app.query_one("#local-title-alias", Checkbox).value = True
+            await pilot.pause()
+            assert app.target_title() == title
+            await activate(app, pilot, "prepare")
+            draft = app.draft
+            assert draft.proposal.to_dict()["title"]["local_alias"] == title
+            review = str(app.query_one("#proposal", Literal).render())
+            assert title in review and "[bold]literal[/bold]" in review
+            assert "alias_pending" in review and "Artifact SHA256" in review
+            await pilot.resize_terminal(76, 25)
+            await pilot.pause()
+            assert app.target_title() == title and app.draft is draft
+            await activate(app, pilot, "confirm")
+            assert app.completed and not app.needs_reconcile
+            rendered = str(app.query_one("#receipt", Literal).render())
+            assert title in rendered and "local_alias" in rendered
+            assert "published" in rendered and "not verified" in rendered
+            assert "Resume manually" in rendered
+            assert committed == [draft.prepared] and len(converted) == 1
+            actual = hashlib.sha256(Path(draft.result.output).read_bytes()).hexdigest()
+            assert actual == converted[0] == draft.proposal.to_dict()["target"]["sha256"]
+            assert json.loads(Path(draft.result.manifest).read_text())["schema_version"] == 2
+            assert app.draft is None
+
+    asyncio.run(flow())
+    assert source_path.read_bytes() == before
+    with Catalog(controller.catalog) as catalog:
+        catalog.add_root(AgentFormat(target_format), target_root)
+        catalog.refresh(include_auto=False)
+    target = Profile(
+        "named-target",
+        "Renamed profile",
+        target_format,
+        target_root,
+        environ={"HOME": controller.environ["HOME"]},
+    )
+    page = controller.list(target, "", 0)
+    assert len(page) == 1 and page[0].local_alias == title
+    assert page[0].entry.title != title
+    assert "local_alias" not in page[0].entry.to_dict()
+    assert controller.list(target, "literal", 0) == []  # Alias never changes native title search.
+
+
+@pytest.mark.parametrize("bad_title", ["   ", "bad\u202e", "bad\x1b[31m", "bad\nline"])
+def test_destination_title_raw_empty_invalid_and_policy_controls(tmp_path, bad_title):
+    controller, _, _ = setup(tmp_path)
+
+    async def flow():
+        app = MigrationApp(controller)
+        async with app.run_test(size=(120, 60)) as pilot:
+            await idle(app, pilot)
+            assert app.target_title() is None
+            fill(app, "target-title", bad_title)
+            await pilot.pause()
+            with pytest.raises(Exception, match="title"):
+                app.target_title()
+            assert app.query_one("#prepare", Button).disabled
+            fill(app, "target-title", "valid title")
+            app.query_one("#local-title-alias", Checkbox).value = True
+            app.query_one("#require-native-title", Checkbox).value = True
+            await pilot.pause()
+            assert app.query_one("#prepare", Button).disabled
+            assert "incompatible" in str(app.query_one("#capability", Literal).render())
+            app.query_one("#require-native-title", Checkbox).value = False
+            await pilot.pause()
+            assert not app.query_one("#prepare", Button).disabled
+
+    asyncio.run(flow())
+
+
+def test_edit_title_policy_and_back_discard_prepared_handle_and_keep_raw_inputs(tmp_path):
+    controller, source, _ = setup(tmp_path)
+    title = "  Alias original 🧪  "
+
+    async def flow():
+        app = MigrationApp(controller)
+        async with app.run_test(size=(120, 60)) as pilot:
+            await idle(app, pilot)
+            app.query_one("#source-profile", Select).value = source.id
+            await pilot.pause()
+            await activate(app, pilot, "list")
+            app.query_one("#session-list", OptionList).highlighted = 0
+            await activate(app, pilot, "preview")
+            await activate(app, pilot, "target")
+            fill(app, "target-root", tmp_path / "target")
+            fill(app, "cwd", tmp_path / "project")
+            fill(app, "target-title", title)
+            app.query_one("#local-title-alias", Checkbox).value = True
+            await pilot.pause()
+            await activate(app, pilot, "prepare")
+            first = app.draft
+            await pilot.press("escape")
+            assert app.stage == "target-step" and app.draft is None
+            assert app.target_title() == title
+            assert app.query_one("#local-title-alias", Checkbox).value
+            with pytest.raises(Exception, match="already consumed"):
+                first.prepared._consume()
+            await activate(app, pilot, "prepare")
+            second = app.draft
+            fill(app, "target-title", "new alias")
+            await pilot.pause()
+            assert app.draft is None and app.query_one("#confirm", Button).disabled
+            with pytest.raises(Exception, match="already consumed"):
+                second.prepared._consume()
+            assert not list((tmp_path / "target").glob("sessions/**/*.jsonl"))
+
+    asyncio.run(flow())
+
+
+def test_confirmation_rejects_handle_substitution_and_keeps_original_prepared_bytes(tmp_path):
+    controller, source, _ = setup(tmp_path)
+    target = Profile("target", "Target", "codex", tmp_path / "target")
+    with Catalog(controller.catalog) as catalog:
+        ref = list_profile_sessions(catalog, source)[0].ref
+    draft = controller.prepare(
+        source, ref, target, OperationRequest("transfer", cwd=tmp_path), CancellationToken()
+    )
+    unrelated = operations.prepare_operation(
+        OperationRequest(
+            "convert",
+            path=FIXTURE,
+            target_format="codex",
+            cwd=tmp_path,
+            output=tmp_path / "different.jsonl",
+        ),
+        environ=controller.environ,
+    )
+    try:
+        with pytest.raises(Exception, match="handle changed"):
+            controller.commit(
+                replace(draft, prepared=unrelated), CancellationToken(), lambda e: None
+            )
+        result = controller.commit(draft, CancellationToken(), lambda e: None)
+        assert result.legacy_result["sha256"] == draft.proposal.to_dict()["target"]["sha256"]
+        assert not (tmp_path / "different.jsonl").exists()
+    finally:
+        unrelated.discard()
+
+
+def test_file_publication_partial_ui_reports_output_without_native_import_claim(
+    tmp_path, monkeypatch
+):
+    from session_migrate.errors import PublishedArtifactPartialError
+
+    controller, source, _ = setup(tmp_path)
+
+    def partial(draft, token, progress):
+        raise PublishedArtifactPartialError(
+            target_format=TargetFormat.CODEX,
+            session_id=draft.result.session_id,
+            output="synthetic-converted-file",
+            manifest=draft.result.manifest,
+            stage="title_receipt_publication",
+        )
+
+    monkeypatch.setattr(controller, "commit", partial)
+
+    async def flow():
+        app = MigrationApp(controller)
+        async with app.run_test(size=(120, 60)) as pilot:
+            await idle(app, pilot)
+            app.query_one("#source-profile", Select).value = source.id
+            await pilot.pause()
+            await activate(app, pilot, "list")
+            app.query_one("#session-list", OptionList).highlighted = 0
+            await activate(app, pilot, "preview")
+            await activate(app, pilot, "target")
+            fill(app, "target-root", tmp_path / "target")
+            fill(app, "cwd", tmp_path / "project")
+            await pilot.pause()
+            await activate(app, pilot, "prepare")
+            await activate(app, pilot, "confirm")
+            assert app.completed and app.needs_reconcile
+            rendered = str(app.query_one("#receipt", Literal).render())
+            assert "converted file" in rendered and "synthetic-converted-file" in rendered
+            assert "title_receipt_publication" in rendered and "native import" not in rendered
+            assert "Do not repeat publication" in rendered
+            assert app.query_one("#another", Button).disabled
 
     asyncio.run(flow())

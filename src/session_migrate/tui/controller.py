@@ -6,9 +6,8 @@ import json
 import os
 import queue
 import threading
-import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -17,6 +16,7 @@ from session_migrate.catalog import Catalog
 from session_migrate.errors import (
     NativeImportPartialError,
     OperationCancelledError,
+    PublishedArtifactPartialError,
     SessionMigrateError,
     SourceReadLimitError,
 )
@@ -25,7 +25,12 @@ from session_migrate.operations import (
     CancellationToken,
     OperationRequest,
     OperationResult,
+    PreparedOperation,
     ProgressEvent,
+    TransferProposal,
+    TransferReceipt,
+    commit_operation,
+    proposal_metadata,
 )
 from session_migrate.preview import PreviewKey, PreviewRequest, PreviewService
 from session_migrate.profiles import (
@@ -34,10 +39,11 @@ from session_migrate.profiles import (
     ProfileStore,
     SessionRef,
     list_profile_sessions,
+    local_alias_for_session,
+    prepare_profile_operation,
     profile_from_catalog_root,
     read_session,
     resolve_source,
-    run_profile_operation,
     source_read_paths,
 )
 
@@ -53,6 +59,11 @@ class JobResult:
     value: Any = None
     error: str | None = None
     reconcile_id: str | None = None
+    reconcile_manifest: str | None = None
+    reconcile_root: str | None = None
+    reconcile_output: str | None = None
+    reconcile_stage: str | None = None
+    publication_kind: str | None = None
 
 
 class Worker:
@@ -69,14 +80,20 @@ class Worker:
         def run():
             try:
                 result = JobResult(generation, kind, work())
-            except NativeImportPartialError as exc:
+            except (NativeImportPartialError, PublishedArtifactPartialError) as exc:
                 result = JobResult(
                     generation,
                     kind,
                     error=(
-                        "Import completed; verification needs attention. Do not repeat the import."
+                        "Publication completed; verification needs attention. "
+                        "Do not repeat the action."
                     ),
                     reconcile_id=exc.session_id,
+                    reconcile_manifest=exc.manifest,
+                    reconcile_root=getattr(exc, "root", None),
+                    reconcile_output=getattr(exc, "output", None),
+                    reconcile_stage=exc.stage,
+                    publication_kind="native import" if exc.import_succeeded else "converted file",
                 )
             except SourceChangedError:
                 result = JobResult(
@@ -119,6 +136,12 @@ class Worker:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionRow(ProfileSession):
+    local_alias: str | None = None
+    alias_status: str | None = None
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class Draft:
     nonce: str
     source: Profile
@@ -128,6 +151,8 @@ class Draft:
     revision: str
     result: OperationResult
     options: str
+    prepared: PreparedOperation = field(repr=False)
+    proposal: TransferProposal = field(repr=False)
 
 
 def fingerprint(
@@ -144,6 +169,9 @@ def fingerprint(
                 request.model_provider,
                 request.model,
                 request.session_id,
+                request.target_title,
+                request.title_policy,
+                request.require_native_title,
             )
         ).encode()
     ).hexdigest()
@@ -165,6 +193,7 @@ class Controller:
         self.preview = PreviewService(max_workers=1)
         self._draft_lock = threading.Lock()
         self._active_draft: tuple[str, str] | None = None
+        self._active_prepared: PreparedOperation | None = None
 
     def profiles(self, storage: Path | None = None) -> list[Profile]:
         if storage is not None:
@@ -211,7 +240,7 @@ class Controller:
         until: str = "",
     ) -> list[ProfileSession]:
         with Catalog(self.catalog) as catalog:
-            return list_profile_sessions(
+            page = list_profile_sessions(
                 catalog,
                 selected,
                 query=query or None,
@@ -222,6 +251,31 @@ class Controller:
                 since=since or None,
                 until=until or None,
             )
+            rows = []
+            for item in page:
+                alias, alias_status = None, None
+                if item.ref and item.entry.status in {"candidate", "validated"}:
+                    try:
+                        alias = local_alias_for_session(
+                            catalog,
+                            selected,
+                            item.ref,
+                            base_environ=self.environ,
+                        )
+                    except (OSError, SessionMigrateError):
+                        alias_status = "Local alias unavailable."
+                rows.append(
+                    SessionRow(
+                        item.profile_id,
+                        item.entry,
+                        item.ref,
+                        item.ordering_source,
+                        item.started_at_source,
+                        alias,
+                        alias_status,
+                    )
+                )
+            return rows
 
     def _metadata_revision(self, selected: Profile, ref: SessionRef) -> str:
         with Catalog(self.catalog) as catalog:
@@ -321,6 +375,16 @@ class Controller:
             expand_tools=expand_tools,
         )
 
+    def discard(self, draft: Draft | None = None) -> None:
+        with self._draft_lock:
+            if draft is not None and self._active_draft != (draft.nonce, draft.options):
+                draft.prepared.discard()
+                return
+            prepared = self._active_prepared
+            self._active_draft = self._active_prepared = None
+        if prepared is not None:
+            prepared.discard()
+
     def prepare(
         self,
         source: Profile,
@@ -329,15 +393,11 @@ class Controller:
         request: OperationRequest,
         cancellation: CancellationToken,
     ) -> Draft:
+        self.discard()
         revision = self.revision(source, ref)
-        reserved = replace(
-            request,
-            session_id=request.session_id or str(uuid.uuid4()),
-            dry_run=True,
-            cwd=request.cwd.resolve() if request.cwd is not None else None,
-        )
+        reserved = replace(request, cwd=request.cwd.resolve() if request.cwd is not None else None)
         with Catalog(self.catalog) as catalog:
-            result = run_profile_operation(
+            prepared = prepare_profile_operation(
                 catalog,
                 source,
                 ref,
@@ -347,51 +407,48 @@ class Controller:
                 cancellation=cancellation,
                 max_source_bytes=self.source_bytes,
             )
-        if revision != self.revision(source, ref):
-            raise SourceChangedError("Source changed during preparation.")
-        nonce = uuid.uuid4().hex
-        options = fingerprint(source, ref, target, reserved)
-        with self._draft_lock:
-            self._active_draft = (nonce, options)
-        return Draft(
-            nonce,
-            source,
-            ref,
-            target,
-            reserved,
-            revision,
-            result,
-            options,
-        )
+        try:
+            if revision != self.revision(source, ref):
+                raise SourceChangedError("Source changed during preparation.")
+            proposal = proposal_metadata(prepared)
+            metadata = proposal.to_dict()
+            result = OperationResult(**metadata["legacy_result"])
+            reserved = replace(
+                reserved,
+                session_id=metadata["target"]["reserved_uuid"],
+                dry_run=True,
+                cwd=Path(result.cwd),
+            )
+            nonce = proposal.proposal_id
+            options = fingerprint(source, ref, target, reserved)
+            with self._draft_lock:
+                self._active_draft, self._active_prepared = (nonce, options), prepared
+            return Draft(
+                nonce, source, ref, target, reserved, revision, result, options, prepared, proposal
+            )
+        except Exception:
+            prepared.discard()
+            raise
 
     def commit(
         self,
         draft: Draft,
         cancellation: CancellationToken,
         progress: Callable[[ProgressEvent], None],
-    ) -> OperationResult:
+    ) -> TransferReceipt:
         with self._draft_lock:
-            if (draft.nonce, draft.options) != self._active_draft:
-                raise SessionMigrateError("Confirmation already consumed.")
-            self._active_draft = None
-        if fingerprint(draft.source, draft.ref, draft.target, draft.request) != draft.options:
-            raise SessionMigrateError("Prepared options changed; prepare again.")
-        if self.revision(draft.source, draft.ref) != draft.revision:
-            raise SourceChangedError("Source changed; prepare again.")
-        with Catalog(self.catalog) as catalog:
-            return run_profile_operation(
-                catalog,
-                draft.source,
-                draft.ref,
-                draft.target,
-                replace(draft.request, dry_run=False),
-                base_environ=self.environ,
-                cancellation=cancellation,
-                progress=progress,
-                prepublication_check=lambda: self._validate_revision(draft),
-                max_source_bytes=self.source_bytes,
-            )
-
-    def _validate_revision(self, draft: Draft) -> None:
-        if self.revision(draft.source, draft.ref) != draft.revision:
-            raise SourceChangedError("Source changed; prepare again.")
+            if (
+                draft.nonce,
+                draft.options,
+            ) != self._active_draft or draft.prepared is not self._active_prepared:
+                raise SessionMigrateError("Confirmation already consumed or handle changed.")
+            self._active_draft = self._active_prepared = None
+        try:
+            if fingerprint(draft.source, draft.ref, draft.target, draft.request) != draft.options:
+                raise SessionMigrateError("Prepared options changed; prepare again.")
+            if self.revision(draft.source, draft.ref) != draft.revision:
+                raise SourceChangedError("Source changed; prepare again.")
+            return commit_operation(draft.prepared, cancellation=cancellation, progress=progress)
+        except Exception:
+            draft.prepared.discard()
+            raise

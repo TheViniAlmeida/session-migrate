@@ -31,8 +31,9 @@ the interface does not recursively discover or automatically refresh stores.
 4. Choose a destination profile/root, HOME, CLI and absolute project CWD.
    When required, supply provider, model and target CLI version. Capabilities
    describe supported output and media restrictions. Every transfer creates a
-   new session; native title override and in-place update are unavailable.
-5. Prepare the basic dry-run review: exact profiles, reserved target ID, record
+   new session. Optional native titles require exact-client support; app-only
+   aliases require an explicit choice. In-place update remains unavailable.
+5. Prepare the metadata review: exact profiles, reserved target ID, record
    count, reported losses/warning codes and effects. Native OpenCode/Kilo probes
    can initialize normal cache/store state. Confirm once to install. Changing
    any option invalidates preparation and requires preparing again.
@@ -104,9 +105,10 @@ exclusive profile storage and no duplicate import. The optional-extra CI job
 runs on Python 3.11–3.13 and rejects skips. The core job remains without the extra.
 
 A separate `tui-native` job runs Python 3.13 with the extra and the explicitly
-designated stock OpenCode 2.0.23 executable. Its five permanent tests cover
-three keyboard/core routes and two changed-source confirmation failures, with
-isolated HOME/XDG, reserved identity, manifest, source witness and resize checks.
+designated stock OpenCode 2.0.23 executable. Its seven permanent tests cover
+three keyboard/core routes, two changed-source confirmation failures and two
+title-policy routes, with isolated HOME/XDG, reserved identity, manifest, source
+witness and resize checks.
 OpenCode endpoints use real official import/export in fresh processes without
 warming or provider calls. Claude/Codex outputs are parsed in this module; their
 native cold-resume/append evidence comes from the existing exact-client CI gates.
@@ -119,3 +121,49 @@ recorded with the validation result; wall-clock timing is not a test threshold.
 On 10 October 2026, the local Python 3.14.4 validation environment measured
 **0.051342 seconds** for the two pages. This is a local measurement, not an
 estimate of another machine's performance.
+
+
+## Destination titles and exact proposals
+
+The destination form has an optional title, **Use an explicit local alias** and
+**Require verified installed native title**. An exactly empty input means no
+override; whitespace-only input is an error. Valid spaces and Unicode remain
+exact. Native and alias requirements are incompatible. Unsupported native
+naming never checks the alias box automatically: choose the app-only alias
+explicitly or leave the title absent. The capability panel describes exact
+client/version naming support; preparation checks the effective client.
+
+Review displays source native title/counts/read scope, the effective source and
+target HOME/XDG selectors, root/CLI/schema/version, CWD/model/provider, reserved
+ID, exact artifact SHA256, title intent, losses/warnings and actual probe effects.
+The controller serializes once and retains one private prepared handle. Confirm
+consumes that handle and publishes the same bytes/ID. Back or an accepted option
+edit discards the handle and disables confirmation while preserving inputs;
+prepare a new proposal explicitly. Resize never regenerates the proposal.
+
+Requested, planned native, observed native and local alias labels are separate.
+`pending_native_import` and `alias_pending` are intent, not saved/verified names.
+`native_verified` requires native observation; `local_alias`/`published` means a
+private app label, never a picker rename. Results show the separate title receipt
+and the existing manifest. Native manifests remain schema 2. Session lists show
+native title and local alias in separate fields; aliases are looked up only for
+that page's exact profile/root/ref, do not replace catalog titles and do not
+change native-title search.
+
+Cancellation is decided atomically before invalidating generation/draft. A
+commit that has entered publication keeps observing its original receipt even
+if an input event already changed the form. Closed preparation tokens still
+allow option changes. Escape/Ctrl+Q after publication keeps waiting for
+verification; neither action kills the importer or claims cancellation. A
+partial native/file publication reports identity, phase, manifest/output and
+manual inspection, blocks retry navigation and does not autoimport again.
+Resume instructions remain literal, quoted, profile-qualified text, never an
+executed action. All new labels use the existing literal widgets; no history or
+media URI is interpreted or fetched.
+
+Two additional exact-client keyboard cases cover stock OpenCode title
+verification and an explicit Codex alias with separate source/target homes.
+Their commands use bubblewrap with network and host homes/storage hidden;
+missing prerequisites fail the designated no-skips gate. No model or provider
+continuation is asserted by those cases. Existing keyboard/native routes and
+source-drift checks remain part of the same job.

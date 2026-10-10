@@ -1,14 +1,15 @@
 # Spec — migração interativa, continuidade e dashboard
 
 Status: revisado e autorizado para publicação. Revisão 1, 09/10/2026.
-Implementação ainda não iniciada.
+Progresso em 10/10/2026: F2 integrada, hotfix de publicação concluído;
+F3 em implementação. Esta spec continua descrevendo também fases futuras.
 
 Base: fork no commit `662976e`, com OpenCode 2.0 e contrato legado preservado.
 Escopo: fases 2–6 do pedido. A instalação da versão corrigida é uma entrega
 operacional separada e não faz parte desta spec nem do plano abaixo.
 
 Plano derivado: [implementação](../plans/interactive-migration-implementation.md).
-Progresso: `/storage/Agents/AgentZero/.ai-data/todos/2026-10/todo-session-migrate-evolution-spec-plan-091026.md`.
+Progresso: `/storage/Agents/AgentZero/.ai-data/todos/2026-10/todo-session-migrate-evolution-101026.md`.
 
 ## 1. Objetivo e alcance
 
@@ -137,6 +138,20 @@ Uma proposta imutável registra origem/fingerprint, perfil e CWD de destino,
 schema/modelo, identidade reservada, título, modo, contagens e perdas.
 Editar qualquer opção invalida a proposta. Confirmar relê/preflighta o estado;
 origem modificada ou destino em conflito exige preparar novamente.
+
+No marco F3, `smigrate proposal <convert|import|transfer>` emite metadados
+JSON schema1 sem publicar sessão, manifest ou alias e sem pedir confirmação
+no stdin. Probes/exportações nativas podem atualizar seu estado de runtime;
+esses efeitos devem ser declarados. O handle preparado pertence ao processo,
+é consumido uma vez e não pode ser aplicado a partir do JSON emitido.
+Persistência/recovery de propostas pertence à fase4.
+
+`--local-title-alias` exige escolha explícita; `--require-native-title`
+recusa alias e operações convert-only que não verificam persistência nativa.
+O limite do app é 1024 bytes UTF-8, sem normalizar ou truncar Unicode válido.
+Provas de título nativo são específicas para cada versão exata do cliente;
+OpenCode 2.0.22/2.0.23 não habilitam versões futuras automaticamente.
+
 
 A prévia mostra efeito concreto: nova sessão ou update, local e ID de destino,
 conteúdo/compactações que serão preservados, classes omitidas, avisos de versão

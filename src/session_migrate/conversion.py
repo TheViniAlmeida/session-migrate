@@ -54,6 +54,7 @@ from session_migrate.jsonl import (
     write_private_atomic,
 )
 from session_migrate.model import AgentFormat, Session, TargetFormat
+from session_migrate.titles import TitlePlan, TitlePolicy, plan_target_title, validate_title
 
 OPENCODE_HOME_UNSUPPORTED = (
     "--home is not supported for OpenCode imports; control OpenCode's normal HOME/XDG "
@@ -74,6 +75,8 @@ class ConversionOptions:
     target_cli_version: str | None = None
     model_provider: str | None = None
     model: str | None = None
+    target_title: str | None = None
+    title_policy: TitlePolicy | None = None
 
     def __post_init__(self) -> None:
         value = (
@@ -82,6 +85,15 @@ class ConversionOptions:
             else self.target_format
         )
         object.__setattr__(self, "target_format", TargetFormat(value))
+        if self.target_title is not None:
+            validate_title(self.target_title)
+        if self.title_policy is not None:
+            try:
+                object.__setattr__(self, "title_policy", TitlePolicy(self.title_policy))
+            except (TypeError, ValueError) as exc:
+                raise SessionMigrateError("title policy is unsupported") from exc
+            if self.target_title is None:
+                raise SessionMigrateError("title policy requires an explicit target title")
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +108,13 @@ class ConversionArtifact:
     native_record_count: int
     dropped: dict[str, int]
     warnings: tuple[dict[str, Any], ...]
+    title_plan: TitlePlan | None = None
+
+    @property
+    def effective_target_title(self) -> str | None:
+        if self.title_plan is not None and self.title_plan.policy == TitlePolicy.NATIVE:
+            return self.title_plan.native_effective
+        return self.source.title
 
     @property
     def target_sha256(self) -> str:
@@ -305,6 +324,15 @@ def convert_session(
     session: Session, options: ConversionOptions, *, environ: Mapping[str, str] | None = None
 ) -> ConversionArtifact:
     target_format = TargetFormat(options.target_format.value)
+    title_plan = None
+    if options.target_title is not None:
+        title_plan = plan_target_title(
+            target_format,
+            requested=options.target_title,
+            cli_version=options.target_cli_version or _pinned_target_version(target_format),
+            policy=options.title_policy,
+            source_title=session.title,
+        )
     same_format_rewrite = session.source_format.value == target_format.value
     portable_id = _validated_uuid(options.session_id) if options.session_id else str(uuid.uuid4())
     target_cwd = (options.cwd or session.cwd or Path.cwd()).resolve()
@@ -552,6 +580,11 @@ def convert_session(
             provider_id=provider,
             model_id=options.model,
             timestamp=timestamp,
+            **(
+                {"title": title_plan.native_effective}
+                if title_plan is not None and title_plan.policy == TitlePolicy.NATIVE
+                else {}
+            ),
         )
     pinned_target = _pinned_target_version(target_format)
     observed_target = target_version
@@ -649,6 +682,18 @@ def convert_session(
                     "message": "source version differs from the pinned integration target",
                 }
             )
+    if title_plan is not None and title_plan.policy == TitlePolicy.LOCAL_ALIAS:
+        title_plan = replace(
+            title_plan,
+            source_title_disposition=(
+                "omitted"
+                if dropped.get("session:title")
+                else "preserved"
+                if target_format == TargetFormat.CLAUDE
+                else "unknown"
+            ),
+            native_effective=session.title if target_format == TargetFormat.CLAUDE else None,
+        )
     return ConversionArtifact(
         source=session,
         target_format=target_format,
@@ -660,6 +705,7 @@ def convert_session(
         native_record_count=_native_record_count(native_bytes, target_format),
         dropped=dropped,
         warnings=tuple(warnings),
+        title_plan=title_plan,
     )
 
 
@@ -953,7 +999,7 @@ def install_copilot_artifact(
         session_id=artifact.session_id,
         cwd=artifact.cwd,
         timestamp=artifact.timestamp,
-        title=artifact.source.title,
+        title=artifact.effective_target_title,
     )
     created_directory = False
     identities: list[tuple[Path, tuple[int, int]]] = []
@@ -1016,7 +1062,7 @@ def install_antigravity_artifact(
             session_id=artifact.session_id,
             cwd=artifact.cwd,
             timestamp=artifact.timestamp,
-            title=artifact.source.title,
+            title=artifact.effective_target_title,
             target_home=target_home,
             target_cli=target_cli,
             dry_run=True,
@@ -1040,7 +1086,7 @@ def install_antigravity_artifact(
             session_id=artifact.session_id,
             cwd=artifact.cwd,
             timestamp=artifact.timestamp,
-            title=artifact.source.title,
+            title=artifact.effective_target_title,
             target_home=target_home,
             target_cli=target_cli,
             environ=environ,
@@ -2076,7 +2122,10 @@ def _invoke_opencode_export(
 
 
 def _run_opencode(
-    command: list[str], environ: Mapping[str, str]
+    command: list[str],
+    environ: Mapping[str, str],
+    *,
+    cwd: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     try:
         completed = subprocess.run(
@@ -2086,6 +2135,7 @@ def _run_opencode(
             capture_output=True,
             text=True,
             timeout=OPENCODE_COMMAND_TIMEOUT_SECONDS,
+            **({"cwd": cwd} if cwd is not None else {}),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SessionMigrateError("OpenCode CLI invocation failed") from exc

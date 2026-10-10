@@ -28,10 +28,13 @@ from session_migrate.operations import (
     OperationKind,
     OperationRequest,
     OperationResult,
+    PreparedOperation,
     ProgressCallback,
+    TransferReceipt,
     _catalog_virtual_source_environment,
     _load_shared_database_source,
     _temporary_root,
+    prepare_operation,
     run_operation,
 )
 
@@ -639,8 +642,30 @@ def run_profile_operation(
     cancellation: CancellationToken | None = None,
     prepublication_check: Callable[[], None] | None = None,
     max_source_bytes: int | None = None,
-) -> OperationResult:
+) -> OperationResult | TransferReceipt:
     """Bind a transfer to two explicit profiles; adapters re-read native content."""
+    bound, target_values, source_values = _bind_profile_operation(
+        catalog, source_profile, ref, target_profile, request, base_environ
+    )
+    return run_operation(
+        bound,
+        environ=target_values,
+        source_environ=source_values,
+        progress=progress,
+        cancellation=cancellation,
+        prepublication_check=prepublication_check,
+        max_source_bytes=max_source_bytes,
+    )
+
+
+def _bind_profile_operation(
+    catalog: Catalog,
+    source_profile: Profile,
+    ref: SessionRef,
+    target_profile: Profile,
+    request: OperationRequest,
+    base_environ: Mapping[str, str] | None,
+) -> tuple[OperationRequest, dict[str, str], dict[str, str]]:
     if request.command != OperationKind.TRANSFER:
         raise SessionMigrateError("profile operation currently supports transfer only")
     if any(
@@ -710,15 +735,84 @@ def run_profile_operation(
         target_cli=_cli(target_profile, source=False),
         home=home,
     )
-    return run_operation(
+    return bound, target_values, source_values
+
+
+def prepare_profile_operation(
+    catalog: Catalog,
+    source_profile: Profile,
+    ref: SessionRef,
+    target_profile: Profile,
+    request: OperationRequest,
+    *,
+    base_environ: Mapping[str, str] | None = None,
+    progress: ProgressCallback | None = None,
+    cancellation: CancellationToken | None = None,
+    prepublication_check: Callable[[], None] | None = None,
+    max_source_bytes: int | None = None,
+) -> PreparedOperation:
+    """Prepare one exact profile pair; every guard opens its own worker connection."""
+    bound, target_values, source_values = _bind_profile_operation(
+        catalog, source_profile, ref, target_profile, request, base_environ
+    )
+    catalog_path = catalog.path
+    expected_source, expected_target = source_profile.fingerprint, target_profile.fingerprint
+    environment = dict(os.environ if base_environ is None else base_environ)
+
+    def guard() -> None:
+        if (
+            source_profile.fingerprint != expected_source
+            or target_profile.fingerprint != expected_target
+        ):
+            raise SessionMigrateError("prepared profile options changed; prepare again")
+        with Catalog(catalog_path) as current:
+            rebound, target_current, source_current = _bind_profile_operation(
+                current, source_profile, ref, target_profile, request, environment
+            )
+        if rebound != bound or target_current != target_values or source_current != source_values:
+            raise SessionMigrateError("prepared profile binding changed; prepare again")
+        if prepublication_check is not None:
+            prepublication_check()
+
+    return prepare_operation(
         bound,
         environ=target_values,
         source_environ=source_values,
         progress=progress,
         cancellation=cancellation,
-        prepublication_check=prepublication_check,
+        prepublication_check=guard,
         max_source_bytes=max_source_bytes,
+        profile_context={
+            "source_profile_id": source_profile.id,
+            "source_profile_name": source_profile.name,
+            "source_profile_fingerprint": expected_source,
+            "target_profile_id": target_profile.id,
+            "target_profile_name": target_profile.name,
+            "target_profile_fingerprint": expected_target,
+        },
     )
+
+
+def local_alias_for_session(
+    catalog: Catalog,
+    profile: Profile,
+    ref: SessionRef,
+    *,
+    base_environ: Mapping[str, str] | None = None,
+) -> str | None:
+    """Return a separate label for an exact validated ref; never replace catalog title."""
+    from session_migrate.conversion import default_migration_state_home
+    from session_migrate.titles import AliasIdentity, TitleAliasStore
+
+    resolve_source(catalog, profile, ref)
+    identity = AliasIdentity(profile.format, profile.root, ref.native_id)
+    store = TitleAliasStore(
+        default_migration_state_home(environ=profile.environment(base_environ)) / "title-aliases/v1"
+    )
+    if not os.path.lexists(store.path_for(identity)):
+        store.preflight(identity)
+        return None
+    return store.load(identity).alias
 
 
 class ProfileStore:

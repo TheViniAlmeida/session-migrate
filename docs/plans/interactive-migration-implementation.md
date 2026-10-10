@@ -1,7 +1,9 @@
 # Plano de implementação — evolução do SessionMigrate
 
 Status: implementação em andamento. Spec/plano revisão 1, 09/10/2026; progresso atualizado em 10/10/2026.
-F2A e F2B integradas em `next`; F2C é o marco atual. Os demais marcos seguem os gates abaixo.
+F2A, F2B e F2C integradas em `next`; o hotfix de cancelamento pós-publicação
+está concluído. F3 é o marco em implementação; F4 tem desenho inicial.
+Os demais marcos seguem os gates abaixo.
 
 Fonte normativa: [spec](../specs/interactive-migration.md), revisão 1.
 Base de código: commit `662976e`. A fase 1 não integra este plano.
@@ -63,7 +65,14 @@ localizados por formato; não criar handlers HTTP que façam writes diretos.
 Proposta de API core:
 `resolve_source`, `read_preview`, `prepare_transfer`, `commit_transfer`,
 `reconcile_transfer`, `assess_continuity`, `prepare_handoff`, `prepare_update`.
-Nomes são contrato proposto, não funções já disponíveis.
+Nomes de continuidade são contrato proposto, não funções já disponíveis.
+A implementação F3 usa `prepare_operation`, `proposal_metadata` e
+`commit_operation`, além de `prepare_profile_operation` para perfis.
+`PreparedOperation` é um handle privado em memória, consumido uma vez;
+`TransferProposal` é metadado, não um comando executável persistido.
+A CLI `smigrate proposal <convert|import|transfer>` descarta o handle após
+emitir JSON schema1. Aplicar/reproduzir uma proposta entre processos depende
+do ledger da fase4 e não é um comando F3.
 
 Estados de operação: `preparing → ready → publishing → verifying → completed`;
 terminais alternativos `cancelled`, `failed`, `needs_reconcile`. Um resultado

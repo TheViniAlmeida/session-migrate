@@ -1,6 +1,6 @@
 import pytest
 
-from session_migrate.capabilities import capabilities_for, list_capabilities
+from session_migrate.capabilities import capabilities_for, list_capabilities, title_capability_for
 from session_migrate.errors import SessionMigrateError
 from session_migrate.model import AgentFormat
 
@@ -41,3 +41,42 @@ def test_media_is_scoped_or_unknown_and_cursor_is_text_only():
 def test_unknown_format_or_schema_fails_explicitly(format, schema):
     with pytest.raises(SessionMigrateError, match="unsupported|unknown"):
         capabilities_for(format, schema=schema)
+
+
+@pytest.mark.parametrize("version", ["2.0.22", "2.0.23"])
+def test_title_proof_is_scoped_to_exact_opencode_client_and_schema(version):
+    proved = title_capability_for("opencode", cli_version=version)
+    assert proved.status == "native_verified"
+    assert proved.schema == "v2"
+    assert proved.proof_version == version
+    assert proved.proof_id == f"opencode-{version}-public-list-cold-export"
+    assert (
+        title_capability_for("opencode", schema="legacy", cli_version=version).status
+        == "unsupported"
+    )
+    assert title_capability_for("opencode", cli_version="2.0.24").status == "unsupported"
+    assert title_capability_for("opencode", cli_version="2.0.23-beta").status == "unsupported"
+    assert title_capability_for("opencode", cli_version=None).status == "unsupported"
+    assert title_capability_for("opencode", cli_version="2.0.22-beta").status == "unsupported"
+
+
+@pytest.mark.parametrize("format", list(AgentFormat))
+def test_local_alias_is_explicit_and_does_not_enable_native_title(format):
+    native = title_capability_for(format)
+    assert native.status == "unsupported"
+    alias = title_capability_for(format, policy="local_alias")
+    assert alias.status == "local_alias"
+    assert alias.proof_version is None
+    assert alias.proof_id is None
+    assert "picker title is unchanged" in alias.reason
+
+
+def test_title_policy_never_enables_unsupported_schema_direction():
+    assert (
+        title_capability_for("codex", schema="paginated", policy="local_alias").status
+        == "unsupported"
+    )
+    with pytest.raises(SessionMigrateError, match="policy"):
+        title_capability_for("claude", policy="auto")
+    with pytest.raises(SessionMigrateError, match="version"):
+        title_capability_for("claude", cli_version=1)
