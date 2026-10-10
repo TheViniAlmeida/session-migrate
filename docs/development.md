@@ -19,6 +19,7 @@ pytest and Ruff are development dependencies locked by `uv.lock`.
 | Path | Responsibility |
 | --- | --- |
 | `src/session_migrate/cli.py` | Arguments, JSON results, and content-safe errors |
+| `src/session_migrate/operations.py` | Shared typed operations, environment snapshots, and stage callbacks |
 | `src/session_migrate/jsonl.py` | Bounded JSONL reads and atomic private writes |
 | `src/session_migrate/inspection.py` | Format detection and content-free inventory |
 | `src/session_migrate/discovery.py` | Native UUID lookup |
@@ -44,7 +45,7 @@ pytest and Ruff are development dependencies locked by `uv.lock`.
 | `src/session_migrate/formats/mastracode.py` | MastraCode 0.37.1 LibSQL adapter |
 | `src/session_migrate/formats/devin.py` | Devin CLI 3000.6.7 active-forest adapter |
 | `src/session_migrate/formats/common.py` | Shared timestamps, text, and image validation |
-| `src/session_migrate/conversion.py` | Mapping orchestration, manifests, and installation |
+| `src/session_migrate/conversion.py` | Portable conversion, manifests, and installation |
 | `tests/fixtures/` | Synthetic, credential-free pinned-version transcripts |
 | `tests/offline_provider.py` | Deterministic OpenAI, Anthropic, and Gemini protocol stub |
 | `scripts/install-native-test-clis.sh` | Checksum/version-pinned native client installer |
@@ -71,6 +72,16 @@ GitHub Actions runs the locked Python suite on Python 3.11–3.13, builds the
 package, and separately lints/builds/tests the landing page. An eighteen-job
 matrix installs every pinned native client and runs its credential-free
 acceptance gates against localhost. No CI provider token is configured.
+
+Shared-operation changes must preserve CLI JSON and exit codes. The synthetic
+`tests/test_operations.py` gate exercises all conversion/import routes,
+CLI/core parity, mutation/collision checks, independent HOME/XDG/native CLI
+stores, OMP path buckets, MastraCode Git subprocess environments, and typed
+native-success/finalization-failure states. Native CLI fixtures in this gate
+are disposable public-command stubs; they do not replace stock-client resume
+acceptance. Progress callbacks are observational and must never print or retain
+conversation data. Pass an explicit environment to isolate operations; do not
+switch profiles by modifying process globals.
 
 Changes to adapters, native paths, serialization, discovery, or installation
 also require:

@@ -34,6 +34,8 @@ def locate_session(
     source_home: Path,
     *,
     cwd: Path | None = None,
+    user_home: Path | None = None,
+    temp_root: Path | None = None,
 ) -> Path:
     """Locate one top-level native transcript without consulting mutable indexes."""
 
@@ -50,7 +52,7 @@ def locate_session(
     elif source_format == AgentFormat.PI:
         matches = _pi_matches(home, normalized_id, cwd)
     elif source_format == AgentFormat.OMP:
-        matches = _omp_matches(home, normalized_id, cwd)
+        matches = _omp_matches(home, normalized_id, cwd, user_home=user_home, temp_root=temp_root)
     elif source_format == AgentFormat.COPILOT:
         if cwd is not None:
             raise SessionMigrateError(
@@ -154,10 +156,21 @@ def _pi_matches(home: Path, session_id: str, cwd: Path | None) -> list[Path]:
     return list(sessions.glob(f"*/*_{session_id}.jsonl"))
 
 
-def _omp_matches(home: Path, session_id: str, cwd: Path | None) -> list[Path]:
+def _omp_matches(
+    home: Path,
+    session_id: str,
+    cwd: Path | None,
+    *,
+    user_home: Path | None = None,
+    temp_root: Path | None = None,
+) -> list[Path]:
     sessions = home / "sessions"
     if cwd is not None:
-        return list((sessions / omp.session_directory_name(cwd)).glob(f"*_{session_id}.jsonl"))
+        return list(
+            (sessions / omp.session_directory_name(cwd, home=user_home, temp_root=temp_root)).glob(
+                f"*_{session_id}.jsonl"
+            )
+        )
     return list(sessions.glob(f"*/*_{session_id}.jsonl"))
 
 

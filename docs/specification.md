@@ -56,7 +56,8 @@ It never installs or invokes a target CLI.
 
 `import` converts and installs into the target's native store. It validates the
 artifact before publication, refuses every collision, and writes a private
-manifest. OpenCode and Kilo use only their official pinned importers.
+manifest. OpenCode uses its supported official importer; Kilo requires its exact
+pinned official importer.
 Antigravity and Cursor use clean-room, exact-version database installers. Vibe,
 Kimi, Grok, and OpenHands publish their native multi-file session directories;
 Muse and Qwen publish one native JSONL plus a manifest. Hermes uses its pinned
@@ -118,11 +119,20 @@ counted as unsupported for that experimental target.
 
 ## Version policy
 
-Each writer has a pinned schema/build. `--target-cli-version` changes only a
-metadata label and emits a warning; it never selects a different architecture.
-Automatic OpenCode, Kilo, Antigravity, and Cursor install requires the exact
-pinned runtime. Cursor additionally requires exact digests/sizes for four
-shipped artifacts.
+Each writer has a validated schema/build. `--target-cli-version` selects legacy
+or 2.0 public transfer schemas for OpenCode; other targets use it only as a
+metadata label and emit a warning. OpenCode native import detects the installed
+supported CLI unless overridden, then rejects artifact/CLI schema mismatches.
+Convert-only OpenCode defaults to the legacy schema. Automatic Kilo,
+Antigravity, Cursor, and Hermes installation requires the exact pinned runtime.
+Cursor additionally requires exact digests/sizes for four shipped artifacts.
+
+The shared operation API accepts typed source selectors/options, an ephemeral
+environment mapping, and content-free stage observers. CLI behavior remains the
+same. It never changes the process environment, exposes conversation bodies in
+its result/progress, or persists profiles. A confirmed native import followed
+by failed verification/finalization has a typed `needs_reconcile` state so
+callers can avoid retrying an already imported identity.
 
 OMP's current fixed-title-slot v3 writer is pinned to 18.0.5. Vibe's writer
 and append-boundary fingerprint are pinned to 2.24.3. Muse,

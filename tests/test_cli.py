@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from session_migrate import __version__
-from session_migrate import cli as cli_module
+from session_migrate import operations as operations_module
 from session_migrate.cli import build_parser, main
 from session_migrate.formats import opencode
 from session_migrate.formats.claude import project_directory_name
@@ -318,9 +318,9 @@ def test_transfer_exports_native_opencode_source(
     assert source.session_id is not None
     source_cli = tmp_path / "opencode"
     monkeypatch.setattr(
-        cli_module,
+        operations_module,
         "load_opencode_session",
-        lambda session_id, *, source_cli=None: source,
+        lambda session_id, *, source_cli=None, environ=None: source,
     )
 
     status = main(
@@ -629,7 +629,7 @@ def test_transfer_by_catalog_id_exports_virtual_opencode_source(
         captured.update(session_id=session_id, source_cli=source_cli, environ=environ)
         return source
 
-    monkeypatch.setattr(cli_module, "load_opencode_session", fake_load)
+    monkeypatch.setattr(operations_module, "load_opencode_session", fake_load)
     assert (
         main(
             [
