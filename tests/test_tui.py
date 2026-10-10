@@ -1132,3 +1132,153 @@ def test_bounded_regular_file_swapped_to_fifo_does_not_block_before_fstat(tmp_pa
     worker.join(timeout=1)
     assert not worker.is_alive(), "FIFO open blocked before regular-file validation"
     assert outcomes == [SourceReadLimitError]
+
+
+@pytest.mark.parametrize("publication_wins", [False, True])
+def test_edit_cancel_publication_race_keeps_committed_receipt_observable(
+    tmp_path, monkeypatch, publication_wins
+):
+    controller, source, _ = setup(tmp_path)
+    entered, cancel_attempted, published, release = (threading.Event() for _ in range(4))
+    calls, cancel_results = [], []
+
+    def commit(draft, token, progress):
+        token.claim()
+        calls.append(draft.result.session_id)
+        entered.set()
+        if publication_wins:
+            assert cancel_attempted.wait(3)
+            token.begin_publication()
+            published.set()
+        assert release.wait(3)
+        token.check()
+        if not publication_wins:
+            token.begin_publication()
+        return replace(draft.result, dry_run=False)
+
+    monkeypatch.setattr(controller, "commit", commit)
+
+    async def flow():
+        app = MigrationApp(controller)
+        async with app.run_test(size=(120, 60)) as pilot:
+            await idle(app, pilot)
+            app.query_one("#source-profile", Select).value = source.id
+            await pilot.pause()
+            await activate(app, pilot, "list")
+            app.query_one("#session-list", OptionList).highlighted = 0
+            await activate(app, pilot, "preview")
+            await activate(app, pilot, "target")
+            fill(app, "target-root", tmp_path / "target")
+            fill(app, "cwd", tmp_path / "project")
+            await pilot.pause()
+            await activate(app, pilot, "prepare")
+            draft = app.draft
+            generation = app.generation
+            expected_id = draft.result.session_id
+            app.query_one("#confirm", Button).focus()
+            await pilot.press("enter")
+            for _ in range(50):
+                await pilot.pause(0.01)
+                if entered.is_set():
+                    break
+            assert entered.is_set()
+            token = app.token
+            original_cancel = token.request_cancel
+
+            def delayed_cancel():
+                # Real on_edit/invalidate reaches this boundary before the
+                # backend starts publication. No native writes occur here.
+                cancel_attempted.set()
+                if publication_wins:
+                    assert published.wait(3)
+                accepted = original_cancel()
+                cancel_results.append(accepted)
+                return accepted
+
+            monkeypatch.setattr(token, "request_cancel", delayed_cancel)
+            fill(app, "model", "synthetic changed after confirmation")
+            await pilot.pause()
+            assert app.value("model") == "synthetic changed after confirmation"
+            assert cancel_results == [not publication_wins]
+            assert app.query_one("#confirm", Button).disabled
+            assert len(calls) == 1
+            if publication_wins:
+                assert app.generation == generation
+                assert app.draft is draft
+                assert token.publishing
+                token.check()  # No false cancellation was recorded.
+                assert "Waiting for verification" in str(app.query_one("#status", Literal).render())
+                await pilot.press("escape", "ctrl+q")
+                assert app.is_running and app.stage == "review"
+                assert app.generation == generation and app.draft is draft
+            else:
+                assert app.generation == generation + 1
+                assert app.draft is None
+                assert not token.publishing
+            app.on_button_pressed(Button.Pressed(app.query_one("#confirm", Button)))
+            assert len(calls) == 1
+            release.set()
+            await idle(app, pilot)
+            assert app.completed == publication_wins
+            assert app.pending is None and app.token is None
+            text = str(app.query_one("#receipt", Literal).render())
+            if publication_wins:
+                assert app.stage == "result"
+                assert "Completed." in text and expected_id in text
+                assert "Selection changed" not in str(app.query_one("#status", Literal).render())
+                assert not app.needs_reconcile
+                # Editing after the result is observed is ordinary input again.
+                fill(app, "model", "synthetic edit after completion")
+                await pilot.pause()
+                assert app.value("model") == "synthetic edit after completion"
+                assert app.completed and expected_id in str(
+                    app.query_one("#receipt", Literal).render()
+                )
+            else:
+                assert "Completed." not in text
+            assert len(calls) == 1
+            assert not list((tmp_path / "target").glob("sessions/**/*.jsonl"))
+
+    try:
+        asyncio.run(flow())
+    finally:
+        release.set()
+        cancel_attempted.set()
+
+
+@pytest.mark.parametrize("pending", [None, "prepare"])
+def test_closed_nonpublishing_token_does_not_block_edit_or_back(tmp_path, pending):
+    controller, _, _ = setup(tmp_path)
+
+    async def flow():
+        app = MigrationApp(controller)
+        async with app.run_test(size=(120, 60)) as pilot:
+            await idle(app, pilot)
+            app.show("review")
+            token = CancellationToken()
+            token.claim()
+            token.close()  # A dry-run can close before its final witness/result arrives.
+            assert not token.request_cancel() and not token.publishing
+            app.token = token
+            app.pending = pending
+            app.draft = object()
+            generation = app.generation
+            fill(app, "model", "synthetic replacement options")
+            await pilot.pause()
+            assert app.value("model") == "synthetic replacement options"
+            assert app.generation == generation + 1
+            assert app.draft is None
+            assert app.query_one("#confirm", Button).disabled
+            if pending:
+                await pilot.press("escape")
+                assert app.stage == "target-step"
+                assert app.generation == generation + 2
+            else:
+                app.draft = object()
+                assert app.invalidate() is True
+                assert app.generation == generation + 2
+                assert app.draft is None
+            app.pending = None
+            app.token = None
+
+    asyncio.run(flow())
