@@ -14,11 +14,12 @@ import pytest
 from session_migrate import operations
 from session_migrate.catalog import Catalog
 from session_migrate.errors import (
-    NativeImportPartialError,
     OperationCancelledError,
+    OperationNeedsReconcileError,
     PublishedArtifactPartialError,
     SessionMigrateError,
 )
+from session_migrate.lineage import LineageStore, NativeState, OperationState
 from session_migrate.model import AgentFormat, TargetFormat
 from session_migrate.operations import (
     CancellationToken,
@@ -267,9 +268,9 @@ def test_alias_after_verified_target_and_separate_receipt_manifest_v2(setup):
 @pytest.mark.parametrize(
     "failure,stage",
     [
-        ("alias", "alias_publication"),
-        ("receipt", "title_receipt_publication"),
-        ("verify", "target_verification"),
+        ("alias", "finalizing"),
+        ("receipt", "finalizing"),
+        ("verify", "observing"),
     ],
 )
 def test_failure_after_native_publication_is_reconcile_with_manifest_preserved(
@@ -288,13 +289,23 @@ def test_failure_after_native_publication_is_reconcile_with_manifest_preserved(
         monkeypatch.setattr(operations, "write_title_receipt", fail)
     else:
         monkeypatch.setattr(operations, "_verify_installed_identity", fail)
-    with pytest.raises(NativeImportPartialError) as caught:
+    with pytest.raises(OperationNeedsReconcileError) as caught:
         commit_operation(prepared)
     error = caught.value
-    assert error.needs_reconcile and error.import_succeeded
+    assert error.needs_reconcile and error.native_state is NativeState.ACKNOWLEDGED
+    assert not hasattr(error, "import_succeeded")
+    assert error.receipt.ledger_recorded
     assert error.stage == stage
     assert Path(error.manifest).is_file()
+    assert any(
+        reference.kind == "manifest" and reference.availability == "available"
+        for reference in error.receipt.references
+    )
     assert "private diagnostic" not in str(error)
+    view = LineageStore.inspect_existing(
+        operations.default_migration_state_home(environ=env) / "lineage-v1"
+    )
+    assert view.operations[0].durable_state is OperationState.NEEDS_RECONCILE
     with pytest.raises(SessionMigrateError, match="consumed"):
         commit_operation(prepared)
 
@@ -573,9 +584,11 @@ def test_native_title_verification_failure_preserves_installed_manifest(
         raise SessionMigrateError("synthetic native body diagnostic")
 
     monkeypatch.setattr(operations, "_observe_native_title", fail)
-    with pytest.raises(NativeImportPartialError) as caught:
+    with pytest.raises(OperationNeedsReconcileError) as caught:
         commit_operation(prepared)
-    assert caught.value.stage == "title_verification"
+    assert caught.value.stage == "finalizing"
+    assert caught.value.native_state is NativeState.ACKNOWLEDGED
+    assert caught.value.receipt.ledger_recorded
     assert Path(caught.value.manifest).is_file()
     assert "body diagnostic" not in str(caught.value)
 
@@ -720,9 +733,15 @@ def test_postinstall_namespace_replacement_never_binds_alias_to_empty_root(
         return session
 
     monkeypatch.setattr(operations, "_verify_installed_identity", verify)
-    with pytest.raises(NativeImportPartialError) as caught:
+    with pytest.raises(OperationNeedsReconcileError) as caught:
         commit_operation(prepared)
-    assert caught.value.stage == "target_verification"
+    assert caught.value.stage == "observing"
+    assert caught.value.native_state is NativeState.ACKNOWLEDGED
+    assert caught.value.receipt.ledger_recorded
+    assert any(
+        reference.kind == "manifest" and reference.availability == "missing"
+        for reference in caught.value.receipt.references
+    )
     root, old = moved[0]
     manifest = Path(proposal["legacy_result"]["manifest"])
     assert (old / manifest.relative_to(root)).is_file()

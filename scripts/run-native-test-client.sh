@@ -104,6 +104,7 @@ case "$client" in
       tests/test_opencode_v2.py::test_native_v2_isolated_import_export_dry_run_and_collision
       tests/test_opencode_v2_native.py
       tests/test_title_native.py
+      tests/test_projections_native.py
       tests/test_opencode_v2_review.py::test_stock_v2_accepts_and_cold_exports_review_sources_and_fixed_targets
       tests/test_profiles.py::test_profile_stock_opencode_two_stores_exact_native_id
     )

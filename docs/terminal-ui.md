@@ -167,3 +167,14 @@ Their commands use bubblewrap with network and host homes/storage hidden;
 missing prerequisites fail the designated no-skips gate. No model or provider
 continuation is asserted by those cases. Existing keyboard/native routes and
 source-drift checks remain part of the same job.
+
+## Durable import state
+
+Real transfers persist publication intent before invoking the native installer
+and observe an acknowledged destination before completing the record. During
+intent recording, Escape cannot cancel an operation that has crossed the gate.
+An uncertain result retains its operation ID, reserved target and evidence
+availability for inspection; it does not offer an automatic retry. A reserved
+target does not itself prove installation. See
+[migration records](migration-records.md) for the three native-result states and
+the separate migrator state directory.

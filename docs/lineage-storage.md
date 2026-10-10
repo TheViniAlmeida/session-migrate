@@ -1,10 +1,11 @@
 # Private lineage storage
 
-The lineage components provide programmatic storage, pure semantic hashing and
-captured-byte parsers. Operation integration, lineage commands, automatic
-continuity, native update and the web dashboard remain future milestones.
-Existing CLI/TUI transfers retain their current behavior. See
-[checkpoint primitives](lineage-checkpoints.md) for the new versioned witnesses.
+The lineage components provide programmatic storage, exact semantic hashing and
+captured-byte parsers. Real CLI/TUI imports and transfers use the durable
+operation protocol described in [migration records](migration-records.md).
+Lineage commands, continuity assessment, native update and the web dashboard
+remain separate milestones. See [checkpoint primitives](lineage-checkpoints.md)
+for the versioned witnesses.
 
 `LineageStore.create_new(path)` creates a fresh schema1 store.
 `open_existing(path)` validates an existing store; `inspect_existing(path)`
@@ -31,8 +32,8 @@ that limitation without inventing a native edge or continuity proof.
 
 Source, target input artifact, expected projection and observed export hashes
 are separate. Source and target checkpoints are independent. Graph edges require
-coherent qualified identities and proof metadata; adapters must supply actual
-coverage and projection evidence in the next integration milestone.
+coherent qualified identities and actual coverage/projection evidence. Counting
+raw records alone does not establish parser fidelity or a preservation proof.
 
 A successful `ready` write creates a volatile authorization on its live guard.
 That authorization is consumed before publication I/O, and the publication claim
@@ -45,8 +46,9 @@ Views distinguish durable state from conservative effective uncertainty.
 Unconfirmed publishing is not a claim that a native import was absent, completed,
 or interrupted. Reconciliation receipts report `native_not_started`,
 `attempted_unknown`, or `acknowledged` only according to the available evidence.
-Planned references are not presented as verified files. Native invocation and
-observation remain responsibilities of the upcoming operation integration.
+Planned references are not presented as verified files. The operation driver
+invokes the native installer and observes acknowledged publication before
+completing the ledger record.
 
 Limits are explicit:64MiB per image,1024 legacy unit/tool-link hashes per collection,
 128KiB per checkpoint and a reserved finalization budget for pending operations.

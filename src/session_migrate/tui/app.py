@@ -218,7 +218,7 @@ class MigrationApp(App):
         cancelled = self.token.request_cancel() if self.token else True
         if self.pending == "commit" and not cancelled:
             self.status(
-                "Installation started. Waiting for verification; it cannot be interrupted."
+                "Cancellation is closed. Waiting for the operation result."
                 if self.token.publishing
                 else "Operation finishing. Waiting for its result."
             )
@@ -517,10 +517,16 @@ class MigrationApp(App):
                         f"Needs attention. Target ID: {result.reconcile_id}\n"
                         f"Publication: {result.publication_kind or 'native import'}\n"
                         f"Stage: {result.reconcile_stage or 'verification'}\n"
+                        f"Installation: {result.reconcile_native_state or 'acknowledged'}\n"
                         f"Destination: {result.reconcile_root or destination}\n"
                         f"Manifest: {manifest}\n"
                         f"Output: {result.reconcile_output or '-'}\n"
-                        "Do not repeat publication. Inspect the published target manually."
+                        + "".join(
+                            f"Evidence {reference.kind}: "
+                            f"{reference.stage}/{reference.availability}\n"
+                            for reference in result.reconcile_references
+                        )
+                        + "Do not repeat publication. Inspect the reserved target and evidence."
                     )
             elif result.kind == "profiles":
                 self.saved_profiles = result.value
@@ -753,6 +759,7 @@ def progress_label(stage: str) -> str:
         "loading": "Reading session…",
         "converting": "Converting history…",
         "preflight": "Checking destination…",
+        "recording_intent": "Recording operation intent…",
         "installing": "Installing new session…",
         "verifying": "Verifying native identity/title and local metadata…",
         "completed": "Finishing result…",

@@ -1,6 +1,6 @@
 # Session migration specification
 
-This is the user-facing contract for `session-migrate` 0.12.0.dev5.
+This is the user-facing contract for `session-migrate` 0.12.0.dev6.
 
 ## Scope
 
@@ -128,11 +128,14 @@ Antigravity, Cursor, and Hermes installation requires the exact pinned runtime.
 Cursor additionally requires exact digests/sizes for four shipped artifacts.
 
 The shared operation API accepts typed source selectors/options, an ephemeral
-environment mapping, and content-free stage observers. CLI behavior remains the
-same. It never changes the process environment, exposes conversation bodies in
-its result/progress, or automatically persists profiles. A confirmed native import followed
-by failed verification/finalization has a typed `needs_reconcile` state so
-callers can avoid retrying an already imported identity.
+environment mapping, and content-free stage observers. Success JSON retains its
+existing fields. The API never changes the process environment, exposes
+conversation bodies in its result/progress, or automatically persists profiles.
+Real imports and transfers persist publication intent and observe acknowledged
+publication before completing a separate lineage receipt. Uncertain outcomes
+have a typed `needs_reconcile` state with native-result and evidence availability,
+so callers can avoid blind retries. See [migration records](migration-records.md)
+for state-directory requirements and verification limits.
 
 OMP's current fixed-title-slot v3 writer is pinned to 18.0.5. Vibe's writer
 and append-boundary fingerprint are pinned to 2.24.3. Muse,

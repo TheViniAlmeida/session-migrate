@@ -60,6 +60,21 @@ smigrate transfer SESSION_UUID --from claude --to codex --cwd "$PWD"
 codex resume NEW_SESSION_UUID
 ```
 
+This fork also provides an optional terminal picker. Install the `tui` extra,
+then select source and destination profiles, preview a session and confirm the
+prepared migration:
+
+```bash
+smigrate tui
+```
+
+See the [terminal interface](docs/terminal-ui.md) for installation, profile roots
+and destination titles. Real imports and transfers write private
+[migration records](docs/migration-records.md) and verify acknowledged
+publication. An uncertain result requires inspection before retrying; it does
+not automatically repeat the import. Native in-place update and the optional
+web dashboard remain roadmap features.
+
 Or find an older session by its native title/name first:
 
 ```bash

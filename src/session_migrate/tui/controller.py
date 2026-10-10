@@ -16,6 +16,7 @@ from session_migrate.catalog import Catalog
 from session_migrate.errors import (
     NativeImportPartialError,
     OperationCancelledError,
+    OperationNeedsReconcileError,
     PublishedArtifactPartialError,
     SessionMigrateError,
     SourceReadLimitError,
@@ -64,6 +65,8 @@ class JobResult:
     reconcile_output: str | None = None
     reconcile_stage: str | None = None
     publication_kind: str | None = None
+    reconcile_native_state: str | None = None
+    reconcile_references: tuple = ()
 
 
 class Worker:
@@ -80,6 +83,23 @@ class Worker:
         def run():
             try:
                 result = JobResult(generation, kind, work())
+            except OperationNeedsReconcileError as exc:
+                result = JobResult(
+                    generation,
+                    kind,
+                    error=(
+                        "Operation requires reconciliation. Inspect its reserved target "
+                        "and evidence; do not repeat the action."
+                    ),
+                    reconcile_id=exc.session_id,
+                    reconcile_manifest=exc.manifest,
+                    reconcile_root=exc.root,
+                    reconcile_output=exc.output,
+                    reconcile_stage=exc.stage,
+                    publication_kind="native operation",
+                    reconcile_native_state=exc.native_state.value,
+                    reconcile_references=exc.receipt.references,
+                )
             except (NativeImportPartialError, PublishedArtifactPartialError) as exc:
                 result = JobResult(
                     generation,

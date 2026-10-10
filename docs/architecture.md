@@ -64,13 +64,16 @@ MastraCode's selected `MASTRA_DB_PATH` must use the canonical `mastra.db`
 filename; custom filenames fail before opening a different sibling database.
 
 Progress events contain only a stage: loading, converting, preflight (dry-run),
-installing, completed, failed, or needs_reconcile. They describe coarse operation
-boundaries; installers perform their own validation and verification. Ordinary
-observer exceptions are ignored so they cannot turn success into a blind retry.
-`NativeImportPartialError` identifies confirmed native import followed by local
-verification/finalization failure, including Hermes verification after its
-official importer confirms the ID. Consumers use its typed status rather than
-parsing messages; they must reconcile the target before retrying.
+recording_intent, installing, verifying, completed, failed, cancelled, or
+needs_reconcile. Native imports persist intent before calling the installer and
+observe an acknowledged destination before completing their ledger record.
+Ordinary observer exceptions are ignored so they cannot turn success into a
+blind retry. `OperationNeedsReconcileError` exposes a typed receipt distinguishing
+native_not_started, attempted_unknown and acknowledged. Adapter-level
+`NativeImportPartialError` confirms native publication, including Hermes after
+its official importer confirms the ID; the driver observes available evidence
+and returns an acknowledged reconciliation receipt. Consumers use typed states
+rather than parsing messages and must inspect evidence before retrying.
 Hermes refusal errors retain their stable prefix but omit free-form importer
 errors/stderr because those diagnostics can contain imported private content.
 

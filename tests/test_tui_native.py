@@ -52,6 +52,7 @@ def environment(base: Path) -> dict[str, str]:
         ("XDG_DATA_HOME", ".local/share"),
         ("XDG_CACHE_HOME", ".cache"),
         ("XDG_STATE_HOME", ".local/state"),
+        ("TMPDIR", ".cache/session-migrate-tmp"),
     ):
         path = home / relative
         path.mkdir(parents=True, mode=0o700)
@@ -342,6 +343,8 @@ def title_stock(tmp_path):
         "/",
         "/",
         *private_root_masks(),
+        "--dev",
+        "/dev",
         "--bind",
         str(tmp_path),
         str(tmp_path),
@@ -350,8 +353,6 @@ def title_stock(tmp_path):
         "/tmp/opencode-title-elf",
         "--proc",
         "/proc",
-        "--dev",
-        "/dev",
     ]
     # The launcher begins outside the project. Honor an explicit subprocess cwd
     # inside the private fixture, but keep default probes in the fixture root.

@@ -1,5 +1,6 @@
 """Cancellation is explicit and atomic; progress observers remain observational."""
 
+import hashlib
 import threading
 from pathlib import Path
 
@@ -149,23 +150,31 @@ def test_token_closes_when_environment_path_setup_fails(tmp_path):
 def test_prepublication_check_rejects_source_drift_without_output(tmp_path, monkeypatch, drift_at):
     source = tmp_path / "source.jsonl"
     source.write_bytes(FIXTURE.read_bytes())
-    original_load = operations.load_session
+    original_capture = operations.capture_source
     original_check = operations.ensure_target_paths_available
+    original_install = operations._install
+    native_calls = []
     initial = source.read_bytes()
 
-    def load(*args, **kwargs):
-        session = original_load(*args, **kwargs)
+    def capture(*args, **kwargs):
+        snapshot = original_capture(*args, **kwargs)
         if drift_at == "after_load":
             source.write_bytes(initial + b"\n")
-        return session
+        return snapshot
 
     def preflight(*paths):
         original_check(*paths)
         if drift_at == "after_preflight":
             source.write_bytes(initial + b"\n")
 
-    monkeypatch.setattr(operations, "load_session", load)
+    def install(*values):
+        if not values[-1]:
+            native_calls.append(True)
+        return original_install(*values)
+
+    monkeypatch.setattr(operations, "capture_source", capture)
     monkeypatch.setattr(operations, "ensure_target_paths_available", preflight)
+    monkeypatch.setattr(operations, "_install", install)
 
     def validate():
         if source.read_bytes() != initial:
@@ -185,3 +194,5 @@ def test_prepublication_check_rejects_source_drift_without_output(tmp_path, monk
     assert not token.publishing
     assert not token.request_cancel()
     assert not (tmp_path / "target").exists()
+    assert native_calls == []
+    assert hashlib.sha256(source.read_bytes()).digest() != hashlib.sha256(initial).digest()

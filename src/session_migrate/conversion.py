@@ -15,7 +15,12 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
+
+if TYPE_CHECKING:
+    from session_migrate.native_snapshots import NativeSnapshot
+
 
 from session_migrate import __version__
 from session_migrate.errors import (
@@ -65,6 +70,51 @@ KILO_HOME_UNSUPPORTED = (
 )
 OPENCODE_COMMAND_TIMEOUT_SECONDS = 30
 OPENCODE_EXPORT_TIMEOUT_SECONDS = 120
+
+
+class _NativeExportProof:
+    __slots__ = ("binding", "__weakref__")
+
+    def __new__(cls):
+        raise SessionMigrateError("Native observation proof is private.")
+
+
+_NATIVE_EXPORTS = WeakKeyDictionary()
+
+
+def _export_binding(session, path, client, environ):
+    return (
+        session.source_format.value,
+        session.session_id,
+        session.source_sha256,
+        str(path),
+        str(Path(client).resolve()) if client else None,
+        tuple((key, environ.get(key)) for key in ("HOME", "XDG_DATA_HOME")),
+    )
+
+
+def _publish_export_proof(session, path, client, environ, callback):
+    if callback is not None:
+        proof = object.__new__(_NativeExportProof)
+        proof.binding = _export_binding(session, path, client, environ)
+        _NATIVE_EXPORTS[proof] = proof.binding
+        callback(proof)
+
+
+def _validate_export_proof(proof, session, environ, client, *, native_path=None):
+    if (
+        type(proof) is not _NativeExportProof
+        or proof not in _NATIVE_EXPORTS
+        or proof.binding != _NATIVE_EXPORTS[proof]
+    ):
+        raise SessionMigrateError("Native observation has no issued loader authority.")
+    path = native_path if native_path is not None else session.source_path
+    observed = _export_binding(session, path, client, environ)
+    if session.source_format in {AgentFormat.HERMES, AgentFormat.MASTRACODE, AgentFormat.DEVIN}:
+        if proof.binding[:4] != observed[:4]:
+            raise SessionMigrateError("Native database observation authority changed.")
+    elif proof.binding != observed:
+        raise SessionMigrateError("Native export observation authority changed.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +260,8 @@ def load_opencode_session(
     source_cli: Path | None = None,
     environ: Mapping[str, str] | None = None,
     max_source_bytes: int | None = None,
+    on_capture: Callable[[NativeSnapshot], None] | None = None,
+    on_native_observation: Callable[[Any], None] | None = None,
 ) -> Session:
     """Export and parse one native OpenCode session through its official CLI."""
 
@@ -242,12 +294,34 @@ def load_opencode_session(
                 raise SessionMigrateError("Source byte budget must be a positive integer.")
             if export_path.stat().st_size > max_source_bytes:
                 raise SourceReadLimitError("Export exceeds the interactive source read budget.")
-        session = load_session(export_path, AgentFormat.OPENCODE)
+        if on_capture is None:
+            session = load_session(export_path, AgentFormat.OPENCODE)
+        else:
+            from session_migrate.jsonl import DEFAULT_MAX_TOTAL_BYTES
+            from session_migrate.native_snapshots import (
+                NativeSnapshot,
+                SourceCaptureContext,
+                capture_source,
+            )
+
+            limit = max_source_bytes or DEFAULT_MAX_TOTAL_BYTES
+            data = capture_source(
+                SourceCaptureContext(AgentFormat.OPENCODE, export_path), byte_limit=limit
+            ).raw_bytes
+            snapshot = NativeSnapshot.from_bytes(
+                data,
+                context=SourceCaptureContext(AgentFormat.OPENCODE, Path(f"opencode:{session_id}")),
+                byte_limit=limit,
+            )
+            session = snapshot.parse()
+            on_capture(snapshot)
     if session.session_id != session_id:
         raise SessionMigrateError("OpenCode export metadata does not match the requested session")
-    return replace(
+    session = replace(
         session, source_path=Path(f"opencode:{session_id}"), cli_version=observed_version
     )
+    _publish_export_proof(session, session.source_path, cli, values, on_native_observation)
+    return session
 
 
 def load_kilo_session(
@@ -256,6 +330,7 @@ def load_kilo_session(
     source_cli: Path | None = None,
     environ: Mapping[str, str] | None = None,
     max_source_bytes: int | None = None,
+    on_native_observation: Callable[[Any], None] | None = None,
 ) -> Session:
     """Export and parse one native Kilo session through its official CLI."""
 
@@ -291,33 +366,58 @@ def load_kilo_session(
         session = load_session(export_path, AgentFormat.KILO)
     if session.session_id != session_id:
         raise SessionMigrateError("Kilo export metadata does not match the requested session")
-    return replace(session, source_path=Path(f"kilo:{session_id}"))
+    session = replace(session, source_path=Path(f"kilo:{session_id}"), cli_version=observed_version)
+    _publish_export_proof(session, session.source_path, cli, values, on_native_observation)
+    return session
 
 
-def load_hermes_session(session_id: str, *, source_home: Path) -> Session:
+def load_hermes_session(
+    session_id: str,
+    *,
+    source_home: Path,
+    on_native_observation: Callable[[Any], None] | None = None,
+) -> Session:
     """Load one ID-addressed session from Hermes's shared state database."""
 
     native_id = hermes.normalized_session_id(session_id)
     database = hermes.state_database_path(source_home, environ={})
     session = hermes.parse_session(database, native_id)
-    return replace(session, source_path=Path(f"hermes:{native_id}"))
+    session = replace(session, source_path=Path(f"hermes:{native_id}"))
+    _publish_export_proof(session, database, None, {}, on_native_observation)
+    return session
 
 
-def load_mastracode_session(session_id: str, *, source_home: Path) -> Session:
+def load_mastracode_session(
+    session_id: str,
+    *,
+    source_home: Path,
+    on_native_observation: Callable[[Any], None] | None = None,
+) -> Session:
     """Load one UUID-addressed thread from MastraCode's shared LibSQL store."""
 
     native_id = mastracode.normalized_session_id(session_id)
     database = _mastracode_database_for_home(source_home)
     session = mastracode.parse_session(database, native_id)
-    return replace(session, source_path=Path(f"mastracode:{native_id}"))
+    session = replace(session, source_path=Path(f"mastracode:{native_id}"))
+    _publish_export_proof(session, database, None, {}, on_native_observation)
+    return session
 
 
-def load_devin_session(session_id: str, *, source_home: Path) -> Session:
+def load_devin_session(
+    session_id: str,
+    *,
+    source_home: Path,
+    on_native_observation: Callable[[Any], None] | None = None,
+) -> Session:
     """Load one slug/UUID-addressed session from Devin's shared database."""
 
     native_id = devin.normalized_session_id(session_id)
     session = devin.parse_session(devin.database_path(source_home), native_id)
-    return replace(session, source_path=Path(f"devin:{native_id}"))
+    session = replace(session, source_path=Path(f"devin:{native_id}"))
+    _publish_export_proof(
+        session, devin.database_path(source_home), None, {}, on_native_observation
+    )
+    return session
 
 
 def convert_session(

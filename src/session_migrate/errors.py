@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from session_migrate.model import TargetFormat
 
 if TYPE_CHECKING:
-    from session_migrate.lineage import ReconcileReceipt
+    from session_migrate.lineage import NativeNamespace, ReconcileReceipt
 
 
 class SessionMigrateError(Exception):
@@ -83,13 +83,36 @@ class OperationNeedsReconcileError(SessionMigrateError):
 
     needs_reconcile = True
 
-    def __init__(self, receipt: ReconcileReceipt) -> None:
+    def __init__(
+        self, receipt: ReconcileReceipt, *, target_namespace: NativeNamespace | None = None
+    ) -> None:
         from session_migrate.lineage import MAX_RECEIPT_BYTES, ReconcileReceipt, _validated
 
         self.receipt = _validated(ReconcileReceipt, receipt, MAX_RECEIPT_BYTES)
         self.operation_id = self.receipt.operation_id
         self.session_id = self.receipt.target_id
         self.native_state = self.receipt.native_state
+        self.stage = self.receipt.phase
+        self.target_format = (
+            TargetFormat(target_namespace.format) if target_namespace is not None else None
+        )
+        self.root = target_namespace.canonical_root if target_namespace is not None else None
+        self.manifest = next(
+            (
+                reference.path
+                for reference in self.receipt.references
+                if reference.kind == "manifest"
+            ),
+            None,
+        )
+        self.output = next(
+            (
+                reference.path
+                for reference in self.receipt.references
+                if reference.kind == "artifact"
+            ),
+            None,
+        )
         super().__init__(
             "Operation requires reconciliation; inspect its reserved target and evidence."
         )

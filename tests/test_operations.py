@@ -12,9 +12,14 @@ import pytest
 from session_migrate import conversion, operations
 from session_migrate.catalog import Catalog
 from session_migrate.cli import main
-from session_migrate.errors import JsonlError, NativeImportPartialError, SessionMigrateError
+from session_migrate.errors import (
+    JsonlError,
+    OperationNeedsReconcileError,
+    SessionMigrateError,
+)
 from session_migrate.formats import antigravity, claude, cursor, hermes, mastracode
-from session_migrate.model import AgentFormat, Session, TargetFormat
+from session_migrate.lineage import EvidenceReference, NativeState, ReconcileReceipt
+from session_migrate.model import AgentFormat, TargetFormat
 from session_migrate.operations import (
     OperationKind,
     OperationRequest,
@@ -25,6 +30,42 @@ from session_migrate.operations import (
 
 FIXTURE = Path(__file__).parent / "fixtures/claude-2.1.209/basic.jsonl"
 TARGET_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+
+
+@pytest.mark.parametrize("native_state", list(NativeState))
+def test_cli_generic_reconciliation_keeps_typed_state_and_reference_availability(
+    tmp_path, monkeypatch, capsys, native_state
+):
+    from session_migrate import cli
+    from session_migrate.native_namespaces import reserve_namespace
+
+    namespace = reserve_namespace(AgentFormat.CODEX, tmp_path / "native", TARGET_ID)
+    receipt = ReconcileReceipt(
+        1,
+        "synthetic-operation",
+        TARGET_ID,
+        "installing",
+        "native_result_unknown",
+        native_state,
+        (EvidenceReference("manifest", "planned", "unknown", str(tmp_path / "manifest"), None),),
+        False,
+    )
+
+    def fail(operation):
+        raise OperationNeedsReconcileError(receipt, target_namespace=namespace)
+
+    monkeypatch.setattr(cli, "run_operation", fail)
+    assert main(["import", str(FIXTURE), "--to", "codex"]) == 2
+    captured = capsys.readouterr()
+    result = json.loads(captured.err)
+    assert captured.out == ""
+    assert result["operation_id"] == "synthetic-operation"
+    assert result["installation_state"] == native_state.value
+    assert result["root"] == str(tmp_path / "native")
+    assert result["target_id"] == TARGET_ID and result["target_format"] == "codex"
+    assert result["references"][0]["availability"] == "unknown"
+    assert result["references"][0]["stage"] == "planned"
+    assert "import_succeeded" not in result and "published" not in result["action"].lower()
 
 
 def request(tmp_path: Path, **options: object) -> OperationRequest:
@@ -45,7 +86,7 @@ def environment(tmp_path: Path) -> dict[str, str]:
     result = {"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"}
     for key in ("HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "TMPDIR"):
         path = tmp_path / key.lower()
-        path.mkdir(parents=True)
+        conversion._mkdir_private_tree(path)
         result[key] = str(path)
     return result
 
@@ -314,7 +355,9 @@ def test_two_environments_resolve_defaults_without_global_mutation(tmp_path, mon
 def test_explicit_environment_without_home_fails_only_when_required(tmp_path):
     with pytest.raises(SessionMigrateError, match="explicit HOME"):
         run_operation(request(tmp_path, home=None), environ={})
-    result = run_operation(request(tmp_path), environ={})
+    result = run_operation(
+        request(tmp_path), environ={}, migration_state_home=tmp_path / "migrator-state"
+    )
     assert Path(result.output).is_relative_to(tmp_path / "target")
     with pytest.raises(SessionMigrateError, match="explicit HOME"):
         run_operation(request(tmp_path, home=Path("~/target")), environ={})
@@ -345,7 +388,11 @@ def test_progress_is_content_free_and_observer_failure_does_not_undo_success(tmp
     assert [event.stage for event in events] == [
         ProgressStage.LOADING,
         ProgressStage.CONVERTING,
+        ProgressStage.PREFLIGHT,
+        ProgressStage.PREFLIGHT,
+        ProgressStage.RECORDING_INTENT,
         ProgressStage.INSTALLING,
+        ProgressStage.VERIFYING,
         ProgressStage.COMPLETED,
     ]
     assert all(not hasattr(event, "session") for event in events)
@@ -364,17 +411,17 @@ def test_progress_is_content_free_and_observer_failure_does_not_undo_success(tmp
 def test_core_preserves_source_mutation_detection(tmp_path, monkeypatch):
     source = tmp_path / "source.jsonl"
     source.write_bytes(FIXTURE.read_bytes())
-    original = claude.parse
+    original = operations.capture_source
 
-    def mutate(path: Path) -> Session:
-        session = original(path)
-        with path.open("a") as stream:
+    def mutate(context, **options):
+        snapshot = original(context, **options)
+        with context.source_path.open("a") as stream:
             stream.write("{}\n")
-        return session
+        return snapshot
 
-    monkeypatch.setattr(claude, "parse", mutate)
+    monkeypatch.setattr(operations, "capture_source", mutate)
     events = []
-    with pytest.raises(JsonlError, match="source session changed"):
+    with pytest.raises(SessionMigrateError, match="prepared source changed"):
         run_operation(request(tmp_path, path=source), progress=events.append)
     assert events[-1].stage == ProgressStage.FAILED
     assert not (tmp_path / "target").exists()
@@ -470,9 +517,9 @@ def test_shared_native_success_then_manifest_failure_is_typed(tmp_path, monkeypa
     monkeypatch.setattr(conversion, "_write_reserved_file", fail)
     events = []
     operation = request(tmp_path, target_format=TargetFormat.MASTRACODE)
-    with pytest.raises(NativeImportPartialError) as failure:
+    with pytest.raises(OperationNeedsReconcileError) as failure:
         run_operation(operation, environ=env, progress=events.append)
-    assert failure.value.import_succeeded and failure.value.needs_reconcile
+    assert failure.value.native_state is NativeState.ACKNOWLEDGED and failure.value.needs_reconcile
     assert failure.value.target_format == TargetFormat.MASTRACODE
     assert failure.value.session_id == TARGET_ID
     assert events[-1].stage == ProgressStage.NEEDS_RECONCILE
@@ -504,14 +551,14 @@ def test_hermes_native_confirmation_then_verification_failure_is_typed(tmp_path,
     monkeypatch.setattr(hermes.subprocess, "run", imported)
     monkeypatch.setattr(hermes, "parse_session", fail)
     events = []
-    with pytest.raises(NativeImportPartialError) as failure:
+    with pytest.raises(OperationNeedsReconcileError) as failure:
         run_operation(
             request(tmp_path, target_format=TargetFormat.HERMES),
             environ=env,
             progress=events.append,
         )
     assert failure.value.target_format == TargetFormat.HERMES
-    assert failure.value.import_succeeded
+    assert failure.value.native_state is NativeState.ACKNOWLEDGED
     assert events[-1].stage == ProgressStage.NEEDS_RECONCILE
     assert not list(target_home.glob("session-migrate/manifests/*.json"))
 
@@ -538,8 +585,9 @@ def test_hermes_refusal_never_exposes_native_diagnostics(tmp_path, monkeypatch, 
             environ=env,
             progress=events.append,
         )
-    assert str(failure.value) == "Hermes refused the imported session bundle"
-    assert events[-1].stage == ProgressStage.FAILED
+    assert isinstance(failure.value, OperationNeedsReconcileError)
+    assert failure.value.native_state is NativeState.ATTEMPTED_UNKNOWN
+    assert events[-1].stage == ProgressStage.NEEDS_RECONCILE
     status = main(
         [
             "import",
@@ -556,7 +604,9 @@ def test_hermes_refusal_never_exposes_native_diagnostics(tmp_path, monkeypatch, 
     )
     assert status == 2
     error = capsys.readouterr().err
-    assert "Hermes refused the imported session bundle" in error
+    receipt = json.loads(error)
+    assert receipt["status"] == "needs_reconcile"
+    assert receipt["installation_state"] == "attempted_unknown"
     assert private not in error
 
 
@@ -616,7 +666,10 @@ def test_pinned_database_installer_success_then_manifest_failure_is_typed(
             else module.session_relative_path(session_id, options["cwd"])
         )
         path = options["target_home"] / relative
-        path.parent.mkdir(parents=True)
+        if options.get("dry_run"):
+            assert not path.exists()
+            return type("Installed", (), {"conversation_path": path})()
+        path.parent.mkdir(parents=True, mode=0o700)
         path.write_bytes(native_bytes)
         observed.append(path)
         return type("Installed", (), {"conversation_path": path})()
@@ -627,10 +680,10 @@ def test_pinned_database_installer_success_then_manifest_failure_is_typed(
     monkeypatch.setattr(module, "install_database", install)
     monkeypatch.setattr(conversion, "_write_reserved_file", fail)
     events = []
-    with pytest.raises(NativeImportPartialError) as failure:
+    with pytest.raises(OperationNeedsReconcileError) as failure:
         run_operation(request(tmp_path, target_format=target), progress=events.append)
     assert failure.value.target_format == target
-    assert failure.value.import_succeeded
+    assert failure.value.native_state is NativeState.ACKNOWLEDGED
     assert observed[0].exists()
     assert events[-1].stage == ProgressStage.NEEDS_RECONCILE
 
@@ -729,11 +782,11 @@ def test_native_subprocess_success_then_finalization_failure_is_typed(
 
     monkeypatch.setattr(conversion, "_write_reserved_file", fail)
     events = []
-    with pytest.raises(NativeImportPartialError) as failure:
+    with pytest.raises(OperationNeedsReconcileError) as failure:
         run_operation(
             request(tmp_path, target_format=target, home=None), environ=env, progress=events.append
         )
-    assert failure.value.import_succeeded and failure.value.needs_reconcile
+    assert failure.value.native_state is NativeState.ACKNOWLEDGED and failure.value.needs_reconcile
     assert failure.value.target_format == target
     assert events[-1].stage == ProgressStage.NEEDS_RECONCILE
     store = Path(env["XDG_DATA_HOME"]) / target.value / "synthetic-store.json"
