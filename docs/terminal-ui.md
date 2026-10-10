@@ -178,3 +178,27 @@ availability for inspection; it does not offer an automatic retry. A reserved
 target does not itself prove installation. See
 [migration records](migration-records.md) for the three native-result states and
 the separate migrator state directory.
+
+## Browse operation continuity
+
+Choose **Operations** or press **Ctrl+O** to open the separate operation browser.
+It lists durable metadata in pages of 50 and accepts an explicit operation ID.
+**Inspect** reads recorded metadata; **Assess** reads current authoritative
+endpoints through the shared continuity core. Both run in a separate worker.
+The screen displays durable/effective native state, qualified roots and IDs,
+coverage, fidelity, comparison reasons and declared native read effects.
+
+Assessment uses an explicitly selected private profile file, the actual profiles
+retained from a completed transfer in this application session, or current
+registered catalog-root profiles. It does not construct a profile from a
+historical hash or receipt path. Missing context is shown as unavailable.
+A missing or stale target catalog entry requires an explicit catalog refresh;
+this browser does not register roots or refresh the catalog automatically.
+
+**Cancel read** abandons the result; a native export already running can finish.
+It does not cancel a transfer publication or invalidate its prepared handle.
+**Back** returns to the previous migration step. The browser offers inspection
+and assessment only; reconciliation and adoption use separately confirmed
+core/CLI operations. A delta label does not enable update: native turn closure
+and external-client coordination remain unproven. See
+[continuity and recovery](continuity.md) for the exact limits.

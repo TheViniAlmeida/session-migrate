@@ -13,6 +13,16 @@ from pathlib import Path
 from typing import Any
 
 from session_migrate.catalog import Catalog
+from session_migrate.continuity import (
+    ContinuityAssessmentV1,
+    ContinuitySelector,
+    LineageInspectionV1,
+    assess_continuity,
+    inspect_lineage,
+)
+from session_migrate.continuity_bindings import EXECUTION_ENVIRONMENT, PUBLIC_ENVIRONMENT
+from session_migrate.continuity_observation import EndpointObserver
+from session_migrate.conversion import default_migration_state_home
 from session_migrate.errors import (
     NativeImportPartialError,
     OperationCancelledError,
@@ -21,6 +31,7 @@ from session_migrate.errors import (
     SessionMigrateError,
     SourceReadLimitError,
 )
+from session_migrate.lineage import CompletionReceipt, LineageStore, RecoveryOperation
 from session_migrate.model import AgentFormat
 from session_migrate.operations import (
     CancellationToken,
@@ -51,6 +62,40 @@ from session_migrate.profiles import (
 
 class SourceChangedError(SessionMigrateError):
     """Selected authoritative content no longer matches the reviewed source."""
+
+
+class ContinuityReadError(SessionMigrateError):
+    def __init__(self, code: str):
+        self.code = (
+            code
+            if code in {"state_home_unavailable", "invalid_page", "read_cancelled"}
+            else "read_unavailable"
+        )
+        super().__init__(f"Continuity read: {self.code}.")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class OperationPage:
+    operations: tuple[RecoveryOperation, ...]
+    offset: int
+    total_count: int
+    reason: str
+
+    @property
+    def has_next(self):
+        return self.offset + len(self.operations) < self.total_count
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ContinuityDetail:
+    inspection: LineageInspectionV1
+    assessment: ContinuityAssessmentV1 | None = None
+    profile_context: str | None = None
+    context_reason: str | None = None
+
+    @property
+    def update_available(self):
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +259,20 @@ class Controller:
         self._draft_lock = threading.Lock()
         self._active_draft: tuple[str, str] | None = None
         self._active_prepared: PreparedOperation | None = None
+        # This is the application's BASE runtime, captured before a destination
+        # profile overrides HOME/XDG. Resolving it has no filesystem write effect.
+        self._continuity_environment = {
+            key: value
+            for key, value in self.environ.items()
+            if key in PUBLIC_ENVIRONMENT | EXECUTION_ENVIRONMENT
+        }
+        try:
+            self.continuity_store_path = (
+                default_migration_state_home(environ=self._continuity_environment) / "lineage-v1"
+            )
+        except (SessionMigrateError, OSError, ValueError):
+            self.continuity_store_path = None
+        self._completed_profiles: dict[str, tuple[Profile, ...]] = {}
 
     def profiles(self, storage: Path | None = None) -> list[Profile]:
         if storage is not None:
@@ -468,7 +527,124 @@ class Controller:
                 raise SessionMigrateError("Prepared options changed; prepare again.")
             if self.revision(draft.source, draft.ref) != draft.revision:
                 raise SourceChangedError("Source changed; prepare again.")
-            return commit_operation(draft.prepared, cancellation=cancellation, progress=progress)
+            receipt = commit_operation(draft.prepared, cancellation=cancellation, progress=progress)
+            if (
+                type(receipt) is TransferReceipt
+                and type(receipt.lineage_receipt) is CompletionReceipt
+                and receipt.lineage_receipt.operation_id == draft.proposal.proposal_id
+            ):
+                with self._draft_lock:
+                    self._completed_profiles[receipt.lineage_receipt.operation_id] = (
+                        draft.source,
+                        draft.target,
+                    )
+                    while len(self._completed_profiles) > 64:
+                        self._completed_profiles.pop(next(iter(self._completed_profiles)))
+            return receipt
         except Exception:
             draft.prepared.discard()
             raise
+
+    def _continuity_path(self):
+        if self.continuity_store_path is None:
+            raise ContinuityReadError("state_home_unavailable")
+        return self.continuity_store_path
+
+    @staticmethod
+    def _check_read_cancel(cancel_event):
+        if cancel_event is not None and cancel_event.is_set():
+            raise ContinuityReadError("read_cancelled")
+
+    def continuity_profiles(self, storage: Path | None = None) -> tuple[Profile, ...]:
+        """Current explicit profiles; this entrypoint never initializes a catalog."""
+        if storage is not None:
+            return tuple(ProfileStore(storage).load())
+        with Catalog.open_readonly_existing(self.catalog) as catalog:
+            roots = catalog.roots(enabled_only=True)
+        return tuple(
+            Profile(
+                f"root-{root.id}",
+                f"{root.format}: {Path(root.path).name}",
+                root.format,
+                Path(root.path),
+            )
+            for root in roots
+        )
+
+    def list_operations(self, *, offset=0, limit=50, cancel_event=None) -> OperationPage:
+        if (
+            type(offset) is not int
+            or not 0 <= offset <= 2**31 - 1
+            or type(limit) is not int
+            or not 1 <= limit <= 50
+        ):
+            raise ContinuityReadError("invalid_page")
+        self._check_read_cancel(cancel_event)
+        view = LineageStore.inspect_existing(self._continuity_path())
+        self._check_read_cancel(cancel_event)
+        if view is None:
+            return OperationPage((), offset, 0, "ledger_missing")
+        return OperationPage(
+            view.operations[offset : offset + limit],
+            offset,
+            len(view.operations),
+            "operations" if view.operations else "empty",
+        )
+
+    def inspect_operation(self, operation_id, *, cancel_event=None) -> ContinuityDetail:
+        self._check_read_cancel(cancel_event)
+        selector = ContinuitySelector(operation_id=operation_id)
+        inspection = inspect_lineage(selector, self._continuity_path())
+        self._check_read_cancel(cancel_event)
+        return ContinuityDetail(inspection)
+
+    def assess_operation(
+        self, operation_id, *, profiles_file=None, current_profiles=None, cancel_event=None
+    ) -> ContinuityDetail:
+        """C1 authority from current profiles and a worker-local readonly index.
+
+        Same-session context is retained from the actual committed Draft. Neither
+        a historical profile hash nor a receipt root can construct a Profile.
+        Cancellation abandons the result; an already running export can finish.
+        """
+        detail = self.inspect_operation(operation_id, cancel_event=cancel_event)
+        if detail.inspection.operation is None:
+            return detail
+        if profiles_file is not None:
+            profiles = self.continuity_profiles(profiles_file)
+            context = "saved_profiles"
+        elif current_profiles is not None:
+            profiles = tuple(current_profiles)
+            context = "explicit_current_profiles"
+        else:
+            with self._draft_lock:
+                profiles = self._completed_profiles.get(operation_id)
+            if profiles is not None:
+                context = "completed_transfer"
+            else:
+                profiles = self.continuity_profiles()
+                context = "registered_roots"
+        if (
+            not profiles
+            or any(type(p) is not Profile for p in profiles)
+            or len({p.id for p in profiles}) != len(profiles)
+        ):
+            return ContinuityDetail(
+                detail.inspection,
+                profile_context=context,
+                context_reason="profile_context_required",
+            )
+        self._check_read_cancel(cancel_event)
+        with Catalog.open_readonly_existing(self.catalog) as catalog:
+            observer = EndpointObserver(
+                catalog,
+                profiles,
+                base_environ=self._continuity_environment,
+                byte_limit=self.source_bytes,
+            )
+            self._check_read_cancel(cancel_event)
+            assessment = assess_continuity(
+                ContinuitySelector(operation_id=operation_id), observer, self._continuity_path()
+            )
+            self._check_read_cancel(cancel_event)
+            return ContinuityDetail(detail.inspection, assessment, context)

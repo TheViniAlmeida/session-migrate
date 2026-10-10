@@ -39,8 +39,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=_expanded_path,
         help="catalog database (default: SESSION_MIGRATE_CATALOG or XDG state)",
     )
+    parser.add_argument(
+        "--state-home",
+        type=_expanded_path,
+        help="existing migration state home (default: XDG state/session-migrate)",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+    from session_migrate.lineage_cli import add_readonly_commands
+
+    add_readonly_commands(subparsers)
+    from session_migrate.recovery_cli import add_action_commands
+
+    add_action_commands(subparsers, _add_operation_arguments)
 
     tui_parser = subparsers.add_parser("tui", help="interactive migration (optional tui extra)")
     tui_parser.add_argument(
@@ -277,6 +288,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command in {"reconcile", "adopt"} or (
+            args.command == "lineage" and args.lineage_command in {"cancel-ready", "baseline"}
+        ):
+            from session_migrate.recovery_cli import run_action_command
+
+            return run_action_command(args, parser, _operation_request)
+        if args.command in {"lineage", "assess"}:
+            from session_migrate.lineage_cli import run_readonly_command
+
+            return run_readonly_command(args, parser)
         if args.command == "tui":
             return _run_tui(args)
         if args.command == "catalog":

@@ -29,6 +29,10 @@ independent conversation.
 | `operations.py` | Typed convert/import/transfer orchestration and observational progress |
 | `profiles.py` / `capabilities.py` | Root-qualified profiles, private snapshots, conservative adapter capabilities |
 | `preview.py` | Bounded literal preview projection and cancellable authoritative readers |
+| `lineage.py` / `baselines.py` | Private durable operations/checkpoints and append-only adopted-now baselines |
+| `continuity.py` / `continuity_observation.py` | Readonly assessment from independently captured endpoints and current profiles |
+| `continuity_bindings.py` | Explicit current runtime bindings for older operations without saved profiles |
+| `recovered_projections.py` | Independent reconstruction of projection evidence from the original input |
 | `tui/` | Optional Textual workflow calling profiles and shared operations |
 | `cli.py` | User-facing commands and JSON/error contracts |
 
@@ -334,3 +338,33 @@ A new adapter needs:
 Private-format work must be clean-room and publish only independently observed
 descriptions and synthetic generators—not vendor code, binaries, descriptors,
 credentials, or real transcripts.
+
+## Continuity evidence
+
+Continuity selects either an exact operation ID or a pair of root-qualified
+references. Each reference includes its current profile; an old fingerprint is
+never accepted as a substitute for that profile. File-backed endpoints are
+captured through their actual loaders. OpenCode endpoints use the selected
+public exporter, declaring scratch/cache/WAL effects even if reading fails.
+Assessment reads each endpoint twice and rechecks the ledger. It does not create
+a ledger, import a session, infer a closed native turn, or grant update authority.
+
+The result separates source and target prefix comparisons, structural and
+relation evidence, raw coverage, parser fidelity, and native read effects.
+Unchanged verified endpoints with a completed receipt can be `no_op`; changes
+on the target or both sides are conflicts. An extended source remains blocked
+when a native turn boundary is unproven. `delta_candidate` is reserved for the
+additional proofs that are currently unavailable. `update_supported` remains
+false. A cold public export proves observable content, not model continuation
+or coordination with an external agent process.
+
+Operations made before explicit profiles can be observed with a deliberately
+selected `legacy_runtime_v1` binding. The caller supplies the current public
+runtime environment exactly; the observer does not guess historical HOME/XDG
+values or invent a historical profile ID.
+
+Adoption records live in a separate append-only baseline image coordinated by
+the existing ledger locks. They record evidence observed now, with
+`adopted_now` provenance. They do not create historical imports, acknowledgements,
+or receipts. Locks coordinate this migrator's operation and both endpoint
+namespaces; they do not exclude external native clients.
