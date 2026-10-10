@@ -12,6 +12,7 @@ from session_migrate import __version__
 from session_migrate.catalog import Catalog, CatalogEntry, default_catalog_path
 from session_migrate.errors import (
     NativeImportPartialError,
+    OperationNeedsReconcileError,
     PublishedArtifactPartialError,
     SessionMigrateError,
 )
@@ -300,6 +301,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
         parser.error(f"{args.command!r} is specified but not implemented yet")
+    except OperationNeedsReconcileError as exc:
+        from dataclasses import asdict
+
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "needs_reconcile",
+                    "publication_kind": "native_import",
+                    "operation_id": exc.operation_id,
+                    "target_format": exc.target_format.value if exc.target_format else None,
+                    "target_id": exc.session_id,
+                    "manifest": exc.manifest,
+                    "root": exc.root,
+                    "output": exc.output,
+                    "stage": exc.stage,
+                    "installation_state": exc.native_state.value,
+                    "ledger_recorded": exc.receipt.ledger_recorded,
+                    "references": [asdict(reference) for reference in exc.receipt.references],
+                    "action": (
+                        "Inspect the reserved target and evidence; do not repeat publication."
+                    ),
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 2
     except (NativeImportPartialError, PublishedArtifactPartialError) as exc:
         if getattr(args, "target_title", None) is not None:
             print(

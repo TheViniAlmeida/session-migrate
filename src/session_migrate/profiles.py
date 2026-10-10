@@ -19,7 +19,12 @@ from types import MappingProxyType
 from typing import Any
 
 from session_migrate.catalog import Catalog, CatalogEntry, CatalogRoot, CatalogTransferSource
-from session_migrate.conversion import load_kilo_session, load_opencode_session, load_session
+from session_migrate.conversion import (
+    default_migration_state_home,
+    load_kilo_session,
+    load_opencode_session,
+    load_session,
+)
 from session_migrate.discovery import normalized_source_id
 from session_migrate.errors import SessionMigrateError, SourceReadLimitError
 from session_migrate.model import AgentFormat, Session, TargetFormat
@@ -644,8 +649,10 @@ def run_profile_operation(
     max_source_bytes: int | None = None,
 ) -> OperationResult | TransferReceipt:
     """Bind a transfer to two explicit profiles; adapters re-read native content."""
-    bound, target_values, source_values = _bind_profile_operation(
-        catalog, source_profile, ref, target_profile, request, base_environ
+    environment = dict(os.environ if base_environ is None else base_environ)
+    state_home = default_migration_state_home(environ=environment)
+    bound, target_values, source_values, guard, context = _prepared_profile_binding(
+        catalog, source_profile, ref, target_profile, request, environment, prepublication_check
     )
     return run_operation(
         bound,
@@ -653,8 +660,10 @@ def run_profile_operation(
         source_environ=source_values,
         progress=progress,
         cancellation=cancellation,
-        prepublication_check=prepublication_check,
+        prepublication_check=guard,
         max_source_bytes=max_source_bytes,
+        migration_state_home=state_home,
+        profile_context=context,
     )
 
 
@@ -752,12 +761,32 @@ def prepare_profile_operation(
     max_source_bytes: int | None = None,
 ) -> PreparedOperation:
     """Prepare one exact profile pair; every guard opens its own worker connection."""
+    environment = dict(os.environ if base_environ is None else base_environ)
+    state_home = default_migration_state_home(environ=environment)
+    bound, target_values, source_values, guard, context = _prepared_profile_binding(
+        catalog, source_profile, ref, target_profile, request, environment, prepublication_check
+    )
+    return prepare_operation(
+        bound,
+        environ=target_values,
+        source_environ=source_values,
+        progress=progress,
+        cancellation=cancellation,
+        prepublication_check=guard,
+        max_source_bytes=max_source_bytes,
+        migration_state_home=state_home,
+        profile_context=context,
+    )
+
+
+def _prepared_profile_binding(
+    catalog, source_profile, ref, target_profile, request, environment, prepublication_check
+):
     bound, target_values, source_values = _bind_profile_operation(
-        catalog, source_profile, ref, target_profile, request, base_environ
+        catalog, source_profile, ref, target_profile, request, environment
     )
     catalog_path = catalog.path
     expected_source, expected_target = source_profile.fingerprint, target_profile.fingerprint
-    environment = dict(os.environ if base_environ is None else base_environ)
 
     def guard() -> None:
         if (
@@ -774,15 +803,12 @@ def prepare_profile_operation(
         if prepublication_check is not None:
             prepublication_check()
 
-    return prepare_operation(
+    return (
         bound,
-        environ=target_values,
-        source_environ=source_values,
-        progress=progress,
-        cancellation=cancellation,
-        prepublication_check=guard,
-        max_source_bytes=max_source_bytes,
-        profile_context={
+        target_values,
+        source_values,
+        guard,
+        {
             "source_profile_id": source_profile.id,
             "source_profile_name": source_profile.name,
             "source_profile_fingerprint": expected_source,

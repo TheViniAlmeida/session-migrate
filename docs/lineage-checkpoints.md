@@ -1,9 +1,10 @@
 # Checkpoint primitives
 
-Version 0.12.0.dev5 adds programmatic primitives for the next operation-integration
-milestone. CLI/TUI transfers do not yet write checkpoints or assess continuity.
-These helpers establish neither native preservation nor permission to update an
-existing session.
+The checkpoint primitives support the durable operation protocol described in
+[migration records](migration-records.md). Real CLI/TUI transfers write
+checkpoints when their identities and evidence can be verified. Continuity
+assessment remains a separate milestone. Hashing alone establishes neither
+native preservation nor permission to update an existing session.
 
 ## Exact semantic hashing
 
@@ -40,7 +41,7 @@ they cannot establish native evidence. Zero pending tools or an assistant
 message does not prove a completed turn.
 
 Lineage source, expectation and checkpoint records accept optional v2 witnesses.
-The expectation also accepts a relation hash for the future private projection
+The expectation also accepts a relation hash for the private projection
 certificate. V2 uses an explicit record version and exact keysets. Existing v1
 records reencode with the same bytes and hashes; unknown versions/fields fail
 closed. No existing database migration or native-session update is performed.
@@ -65,5 +66,5 @@ at256MiB, and a caller may impose a smaller limit.
 `check_source_identity` checks names and filesystem metadata only. Fresh content
 verification requires another whole capture and its authority hash. Captures
 have no public serializer and exclude their bodies and paths from repr. Native
-coverage, expected/observed projection, namespace qualification and durable
-operation integration require the subsequent adapter and operation gates.
+coverage, expected/observed projection and namespace qualification require the
+independent adapter and operation checks described in migration records.

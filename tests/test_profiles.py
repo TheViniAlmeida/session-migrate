@@ -315,6 +315,15 @@ def test_profile_transfer_uses_target_root_and_cwd_without_copying_source_config
         assert Path(result.output).is_relative_to(target.root)
         assert source_path.read_bytes() == snapshot
         assert not (Path(target.environ["HOME"]) / ".config/synthetic.json").exists()
+        base_state = operations.default_migration_state_home(environ=environment(tmp_path))
+        assert (base_state / "lineage-v1/ledger.sqlite3").is_file()
+        assert not (
+            operations.default_migration_state_home(
+                environ=target.environment(environment(tmp_path))
+            )
+            / "lineage-v1"
+        ).exists()
+        assert not (target.root / "lineage-v1").exists()
         with pytest.raises(SessionMigrateError, match="selectors"):
             run_profile_operation(
                 catalog, source, ref, target, replace(request, source_id=SOURCE_ID)
@@ -356,7 +365,7 @@ def test_two_virtual_stores_use_exact_source_cli_config_and_target_environment(
     )
     observations = []
 
-    def export(native_id, *, source_cli, environ):
+    def export(native_id, *, source_cli, environ, on_capture=None, on_native_observation=None):
         assert native_id == NATIVE_ID
         assert source_cli == executable
         assert Path(environ["XDG_DATA_HOME"]) / format.value == source.root
@@ -386,7 +395,7 @@ def test_two_virtual_stores_use_exact_source_cli_config_and_target_environment(
             base_environ=base,
         )
         assert Path(result.output).is_relative_to(target.root)
-        assert len(observations) == 2
+        assert len(observations) >= 3  # Independent authoritative guards recapture the source.
         bad = replace(
             source,
             environ={"HOME": source.environ["HOME"], "XDG_DATA_HOME": str(other.root.parent)},

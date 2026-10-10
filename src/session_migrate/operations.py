@@ -5,13 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import threading
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from copy import deepcopy
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
@@ -61,12 +62,34 @@ from session_migrate.discovery import locate_session, normalized_source_id
 from session_migrate.errors import (
     NativeImportPartialError,
     OperationCancelledError,
+    OperationNeedsReconcileError,
     PublishedArtifactPartialError,
     SessionMigrateError,
     SourceReadLimitError,
 )
 from session_migrate.formats import opencode_v2
+from session_migrate.lineage import (
+    CheckpointRecord,
+    CompletionReceipt,
+    CompletionRecord,
+    Coverage,
+    EvidenceReference,
+    LineageStore,
+    NativeState,
+    OperationRecord,
+    OperationState,
+    PolicyVersions,
+    ProjectionExpectation,
+    ReconcileReceipt,
+    SourceMetadata,
+)
 from session_migrate.model import AgentFormat, Session, TargetFormat
+from session_migrate.native_namespaces import (
+    _bind_execution_context,
+    qualify_namespace,
+    reserve_namespace,
+)
+from session_migrate.native_snapshots import NativeSnapshot, SourceCaptureContext, capture_source
 from session_migrate.titles import (
     AliasIdentity,
     TitleAliasStore,
@@ -101,6 +124,7 @@ class ProgressStage(StrEnum):
     LOADING = "loading"
     CONVERTING = "converting"
     PREFLIGHT = "preflight"
+    RECORDING_INTENT = "recording_intent"
     INSTALLING = "installing"
     COMPLETED = "completed"
     NEEDS_RECONCILE = "needs_reconcile"
@@ -222,10 +246,15 @@ class OperationResult:
     sha256: str
     dropped_events: dict[str, int]
     warnings: list[dict[str, Any]]
+    lineage_receipt: CompletionReceipt | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
 
-        return {field.name: deepcopy(getattr(self, field.name)) for field in fields(self)}
+        return {
+            field.name: deepcopy(getattr(self, field.name))
+            for field in fields(self)
+            if field.name != "lineage_receipt"
+        }
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -248,6 +277,7 @@ class TransferReceipt:
     title: TitleReceipt | None
     title_receipt: str | None
     _identity_json: str
+    lineage_receipt: CompletionReceipt | None
 
     def __init__(
         self,
@@ -258,6 +288,7 @@ class TransferReceipt:
         title: TitleReceipt | None = None,
         title_receipt: Path | None = None,
         target_identity: Mapping[str, Any] | None = None,
+        lineage_receipt: CompletionReceipt | None = None,
     ) -> None:
         object.__setattr__(self, "proposal", proposal)
         object.__setattr__(self, "status", status)
@@ -265,6 +296,7 @@ class TransferReceipt:
         object.__setattr__(self, "title", title)
         object.__setattr__(self, "title_receipt", str(title_receipt) if title_receipt else None)
         object.__setattr__(self, "_identity_json", _canonical_json(target_identity))
+        object.__setattr__(self, "lineage_receipt", lineage_receipt)
 
     @property
     def legacy_result(self) -> dict[str, Any]:
@@ -413,6 +445,11 @@ def _target_epoch_matches(path: Path, expected: tuple, *, database_file: bool = 
         return True
     if expected[0] == expected[1]:
         return False
+    if not path.exists():
+        # Creating the migrator's private state can materialize HOME/.local
+        # while the native destination is still absent. The original existing
+        # ancestor must remain identical and the new chain must be no-follow.
+        return _root_epoch(Path(expected[1]))[1:] == expected[1:]
     # An absent destination has no prior root inode. An unrelated native session
     # may safely create it, provided the existing ancestor was not replaced and
     # the exact target ID still passes the installer's collision preflight.
@@ -433,6 +470,10 @@ def _target_root(built: _OperationBuild, environ: Mapping[str, str]) -> Path | N
 def _source_root(built: _OperationBuild, environ: Mapping[str, str]) -> Path:
     if built.source_root is not None:
         return built.source_root.resolve()
+    if built.request.command != OperationKind.TRANSFER:
+        return _physical_source_root(
+            built.artifact.source.source_path, built.artifact.source.source_format
+        )
     if built.artifact.source.source_format in {AgentFormat.OPENCODE, AgentFormat.KILO}:
         data = environ.get("XDG_DATA_HOME")
         parent = Path(data) if data else environment_home(environ) / ".local/share"
@@ -596,6 +637,15 @@ class _PreparedState:
     artifact_fingerprint: str
     check: Callable[[], None] | None
     max_source_bytes: int | None
+    migration_state_home: Path | None
+    projection: Any = None
+    observed_captures: list[NativeSnapshot] = field(default_factory=list, repr=False, compare=False)
+    projection_versions: PolicyVersions | None = None
+    projection_context: Any = None
+    observed_export_proofs: list[Any] = field(default_factory=list, repr=False, compare=False)
+    last_source_capture: list[NativeSnapshot] = field(
+        default_factory=list, repr=False, compare=False
+    )
 
 
 def _title_preflight(state: _PreparedState) -> tuple[TitleAliasStore | None, AliasIdentity | None]:
@@ -623,16 +673,25 @@ def _read_prepared_source(state: _PreparedState) -> None:
         state.check()
     if _root_epoch(state.source_root) != state.source_epoch:
         raise SessionMigrateError("prepared source root changed; prepare again")
+    captures = []
     session, _target, root = _resolve_source(
         state.built.request,
         state.source_environment,
         state.max_source_bytes,
         expected_root=state.source_root,
+        on_capture=captures.append if state.built.source_snapshot is not None else None,
     )
     if root is not None and root.resolve() != state.source_root:
         raise SessionMigrateError("prepared source root changed; prepare again")
     if _source_witness(session, state.source_root) != state.source_witness:
         raise SessionMigrateError("prepared source changed; prepare again")
+    if state.built.source_snapshot is not None and (
+        len(captures) != 1
+        or captures[0].authority_sha256 != state.built.source_snapshot.authority_sha256
+    ):
+        raise SessionMigrateError("prepared source changed; prepare again")
+    state.last_source_capture.clear()
+    state.last_source_capture.extend(captures)
 
 
 def _artifact_fingerprint(built: _OperationBuild) -> str:
@@ -652,6 +711,7 @@ def _artifact_fingerprint(built: _OperationBuild) -> str:
                 "model_provider": source.model_provider,
                 "records": source.raw_record_count,
                 "events": source.event_counts(),
+                "payload_fingerprint": _source_payload_fingerprint(source),
             },
             "target": {
                 "format": artifact.target_format.value,
@@ -673,6 +733,30 @@ def _artifact_fingerprint(built: _OperationBuild) -> str:
             },
         }
     )
+
+
+def _source_payload_fingerprint(source: Session) -> str:
+    from session_migrate.canonical import _json_bytes
+
+    try:
+        value = [
+            {
+                "kind": event.kind.value,
+                "role": event.role.value if event.role is not None else None,
+                "provenance": asdict(event.provenance),
+                "timestamp": event.timestamp,
+                "text": event.text,
+                "tool_name": event.tool_name,
+                "tool_call_id": event.tool_call_id,
+                "payload": event.payload,
+            }
+            for event in source.events
+        ]
+        return hashlib.sha256(
+            b"session-migrate/private-source-ir/v1\0" + _json_bytes(value)
+        ).hexdigest()
+    except (SessionMigrateError, TypeError, ValueError, UnicodeError, RecursionError):
+        raise SessionMigrateError("Prepared source payload cannot be bound safely.") from None
 
 
 def _client_epoch(path: Path | None) -> tuple | None:
@@ -700,6 +784,15 @@ def _client_epoch(path: Path | None) -> tuple | None:
 
 
 def _verify_prepared_options(state: _PreparedState) -> None:
+    if state.projection is not None:
+        from session_migrate.projections import validate_prepared
+
+        try:
+            validate_prepared(state.projection)
+        except SessionMigrateError:
+            raise SessionMigrateError(
+                "prepared options or artifact changed; prepare again"
+            ) from None
     if not all(
         isinstance(values, MappingProxyType)
         for values in (
@@ -761,6 +854,7 @@ def prepare_operation(
     prepublication_check: Callable[[], None] | None = None,
     max_source_bytes: int | None = None,
     profile_context: Mapping[str, str] | None = None,
+    migration_state_home: Path | None = None,
 ) -> PreparedOperation:
     """Resolve and serialize once, then preflight without installing output/metadata."""
     token = cancellation or CancellationToken()
@@ -775,6 +869,7 @@ def prepare_operation(
             prepublication_check=prepublication_check,
             max_source_bytes=max_source_bytes,
             profile_context=profile_context,
+            migration_state_home=migration_state_home,
         )
     finally:
         token.close()
@@ -790,6 +885,7 @@ def _prepare_operation(
     prepublication_check: Callable[[], None] | None = None,
     max_source_bytes: int | None = None,
     profile_context: Mapping[str, str] | None = None,
+    migration_state_home: Path | None = None,
 ) -> PreparedOperation:
     """Resolve and serialize once, then preflight without installing output/metadata."""
     try:
@@ -800,6 +896,12 @@ def _prepare_operation(
         ):
             raise SessionMigrateError("proposal profile metadata is invalid")
         token.check()
+        base_environment = dict(os.environ if environ is None else environ)
+        state_home = migration_state_home
+        if state_home is None and (
+            base_environment.get("HOME") or base_environment.get("XDG_STATE_HOME")
+        ):
+            state_home = default_migration_state_home(environ=base_environment)
         request, target, source = _operation_context(request, environ, source_environ)
         for environment in (target, source):
             for key in _PUBLIC_ENVIRONMENT:
@@ -864,6 +966,14 @@ def _prepare_operation(
             _artifact_fingerprint(built),
             prepublication_check,
             max_source_bytes,
+            state_home,
+        )
+        projection, projection_versions, projection_context = _prepare_lineage_projection(state)
+        state = replace(
+            state,
+            projection=projection,
+            projection_versions=projection_versions,
+            projection_context=projection_context,
         )
         _title_preflight(state)
         _read_prepared_source(state)
@@ -995,19 +1105,33 @@ def _verify_installed_identity(state: _PreparedState) -> Session:
             built.artifact.session_id,
             source_cli=built.request.target_cli,
             environ=state.target_environment,
+            on_capture=state.observed_captures.append,
+            on_native_observation=state.observed_export_proofs.append,
         )
     elif target == TargetFormat.KILO:
         session = load_kilo_session(
             built.artifact.session_id,
             source_cli=built.request.target_cli,
             environ=state.target_environment,
+            on_native_observation=state.observed_export_proofs.append,
         )
     elif target in _SHARED_DATABASE_TARGETS:
         session = _load_shared_database_source(
-            AgentFormat(target), built.artifact.session_id, built.home
+            AgentFormat(target),
+            built.artifact.session_id,
+            built.home,
+            on_native_observation=state.observed_export_proofs.append,
         )
     else:
-        session = load_session(built.output, AgentFormat(target))
+        session = _load_path_source(
+            Path(built.output),
+            AgentFormat(target),
+            state.target_root,
+            state.target_environment,
+            None,
+            state.observed_captures.append,
+            state.observed_export_proofs.append,
+        )
     if (
         session.source_format.value != target.value
         or not session.session_id
@@ -1101,6 +1225,399 @@ def _verify_published_namespace(
         raise SessionMigrateError("published target/manifest namespace changed")
 
 
+def _native_namespace(state: _PreparedState):
+    return reserve_namespace(
+        AgentFormat(state.built.artifact.target_format),
+        state.target_root,
+        state.built.artifact.session_id,
+    )
+
+
+def _profile_fingerprint(state: _PreparedState, side: str) -> str:
+    return state.profiles.get(f"{side}_profile_fingerprint") or _digest(
+        {
+            "format": (
+                state.built.artifact.source.source_format.value
+                if side == "source"
+                else state.built.artifact.target_format.value
+            ),
+            "environment": {
+                key: value
+                for key, value in (
+                    state.source_environment if side == "source" else state.target_environment
+                ).items()
+                if key in _PUBLIC_ENVIRONMENT
+            },
+            "root": str(state.source_root if side == "source" else state.target_root),
+        }
+    )
+
+
+def _client_identifier(value: str | None) -> str | None:
+    return (
+        value
+        if type(value) is str and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+:-]{0,63}", value)
+        else None
+    )
+
+
+def _prepare_lineage_projection(state: _PreparedState):
+    if state.built.request.command == OperationKind.CONVERT or state.built.source_snapshot is None:
+        return None, None, None
+    from session_migrate.projection_policies import ProjectionPolicy
+    from session_migrate.projections import (
+        ProjectionContext,
+        SourceVersionContext,
+        prepare_projection,
+    )
+
+    artifact = state.built.artifact
+    known_sources = {
+        AgentFormat.CLAUDE: {"2.1.209"},
+        AgentFormat.CODEX: {"0.144.4", "0.153.4"},
+        AgentFormat.OPENCODE: {"2.0.22", "2.0.23"},
+    }
+    known_targets = {
+        TargetFormat.CLAUDE: {"2.1.209"},
+        TargetFormat.CODEX: {"0.144.4"},
+        TargetFormat.OPENCODE: {"2.0.22", "2.0.23"},
+    }
+    if artifact.source.cli_version not in known_sources.get(
+        artifact.source.source_format, ()
+    ) or artifact.target_cli_version not in known_targets.get(artifact.target_format, ()):
+        return None, None, None
+    policy = ProjectionPolicy()
+    versions = PolicyVersions(
+        policy.canonical_policy.algorithm,
+        policy.policy_id,
+        "native-audit-v1",
+        "native-audit-v1",
+        artifact.source.cli_version,
+        artifact.target_cli_version,
+    )
+    context = ProjectionContext(
+        artifact.target_format,
+        artifact.target_cli_version,
+        _profile_fingerprint(state, "target"),
+        _digest(asdict(_native_namespace(state))),
+    )
+    request = state.built.request
+    options = ConversionOptions(
+        artifact.target_format,
+        session_id=request.session_id,
+        cwd=artifact.cwd,
+        target_cli_version=artifact.target_cli_version,
+        model_provider=request.model_provider,
+        model=request.model,
+        target_title=request.target_title,
+        title_policy=request.title_policy,
+    )
+    source_context = None
+    if (
+        artifact.source.source_format is AgentFormat.OPENCODE
+        and state.built.source_snapshot.source_path
+        == Path(f"opencode:{artifact.source.session_id}")
+    ):
+        source_context = SourceVersionContext(
+            AgentFormat.OPENCODE,
+            artifact.source.cli_version,
+            state.built.source_snapshot.source_path,
+            state.built.source_snapshot.authority_sha256,
+        )
+    prepared = prepare_projection(
+        state.built.source_snapshot,
+        artifact,
+        options=options,
+        versions=versions,
+        context=context,
+        policy=policy,
+        source_context=source_context,
+    )
+    return prepared, versions, context
+
+
+def _lineage_versions(state):
+    return state.projection_versions or PolicyVersions(
+        "unverified-v1",
+        "unverified-v1",
+        "legacy-unverified-v1",
+        "legacy-unverified-v1",
+        _client_identifier(state.built.artifact.source.cli_version),
+        _client_identifier(state.built.artifact.target_cli_version),
+    )
+
+
+def _canonical_snapshot_sha(observation, versions):
+    from session_migrate.lineage import _encode
+
+    value = {
+        "prefix": json.loads(_encode(observation.source_prefix)),
+        "versions": asdict(versions),
+        "policy_sha256": observation.policy.sha256,
+    }
+    return hashlib.sha256(
+        b"session-migrate/checkpoint-prefix/v2\0" + _canonical_json(value).encode()
+    ).hexdigest()
+
+
+def _source_identity(state):
+    if state.built.request.command != OperationKind.TRANSFER or state.built.source_snapshot is None:
+        return None
+    session = state.built.artifact.source
+    root = state.built.source_root or state.built.request.source_home
+    if root is None:
+        root = (
+            _source_root(state.built, state.source_environment)
+            if session.source_format in {AgentFormat.OPENCODE, AgentFormat.KILO}
+            else default_target_home(session.source_format, environ=state.source_environment)
+        )
+    try:
+        namespace = reserve_namespace(session.source_format, root, session.session_id)
+        context = _bind_execution_context(
+            namespace,
+            session,
+            native_path=session.source_path,
+            environ=state.source_environment,
+            client=state.built.request.source_cli,
+            snapshot=state.built.source_snapshot,
+            export_proof=state.built.source_export_proof,
+        )
+    except SessionMigrateError:
+        return None
+    return qualify_namespace(
+        session, namespace, _profile_fingerprint(state, "source"), execution_context=context
+    )
+
+
+def _planned_references(state):
+    path = str(state.built.output) if isinstance(state.built.output, Path) else None
+    return (
+        EvidenceReference("artifact", "planned", "unknown", path, state.artifact_sha256),
+        EvidenceReference("manifest", "planned", "unknown", str(state.built.manifest), None),
+    )
+
+
+def _ready_record(state, operation_id):
+    projection, versions = state.projection, _lineage_versions(state)
+    source_observation = projection.source_observation if projection is not None else None
+    target_observation = projection.artifact_observation if projection is not None else None
+    source_known = (
+        source_observation is not None
+        and _effective_source_coverage(source_observation) is not Coverage.UNKNOWN
+    )
+    target_known = (
+        target_observation is not None and projection.expectation_coverage is not Coverage.UNKNOWN
+    )
+    source = SourceMetadata(
+        _source_identity(state),
+        state.built.artifact.source.source_sha256,
+        state.source_witness,
+        _canonical_snapshot_sha(source_observation, versions) if source_known else None,
+        source_observation.source_prefix if source_known else None,
+    )
+    expected = ProjectionExpectation(
+        _canonical_snapshot_sha(target_observation, versions) if target_known else None,
+        (),
+        projection.expectation_coverage if projection is not None else Coverage.UNKNOWN,
+        target_observation.source_prefix if target_known else None,
+        projection.expected.relation.chain_sha256 if target_known else None,
+    )
+    return OperationRecord(
+        operation_id,
+        source,
+        _native_namespace(state),
+        _profile_fingerprint(state, "target"),
+        state.options_fingerprint,
+        state.artifact_sha256,
+        versions,
+        expected,
+        _planned_references(state),
+    )
+
+
+def _checkpoint(observation, identity, artifact_sha, versions, coverage):
+    known = observation is not None and coverage is not Coverage.UNKNOWN
+    prefix = observation.source_prefix if known else None
+    return CheckpointRecord(
+        identity,
+        artifact_sha,
+        _canonical_snapshot_sha(observation, versions) if known else None,
+        (),
+        prefix.closed_turn_count if prefix else 0,
+        (),
+        False,
+        coverage,
+        None,
+        versions,
+        prefix,
+    )
+
+
+def _effective_source_coverage(observation):
+    if observation.coverage is Coverage.UNKNOWN or observation.fidelity is Coverage.UNKNOWN:
+        return Coverage.UNKNOWN
+    if (
+        observation.coverage is not Coverage.VERIFIED
+        or observation.fidelity is not Coverage.VERIFIED
+    ):
+        return Coverage.PARTIAL
+    return Coverage.VERIFIED
+
+
+def _completion_record(state, record, session):
+    from session_migrate.canonical import CanonicalPolicy
+    from session_migrate.native_audit import AuditPolicy, audit_snapshot, canonicalize_snapshot
+    from session_migrate.projections import verify_projection
+
+    snapshot = state.observed_captures[-1] if state.observed_captures else None
+    native_path = (
+        Path(state.built.output)
+        if isinstance(state.built.output, Path)
+        else Path(record.target_namespace.canonical_root)
+        if session.source_format in _SHARED_DATABASE_SOURCES
+        else session.source_path
+    )
+    context = _bind_execution_context(
+        record.target_namespace,
+        session,
+        native_path=native_path,
+        environ=state.target_environment,
+        client=state.built.request.target_cli,
+        snapshot=snapshot,
+        export_proof=state.observed_export_proofs[-1] if state.observed_export_proofs else None,
+    )
+    identity = qualify_namespace(
+        session,
+        record.target_namespace,
+        record.target_profile_fingerprint,
+        native_path=native_path,
+        execution_context=context,
+    )
+    if identity is None:
+        raise SessionMigrateError("Observed native namespace cannot be qualified.")
+    source_cp = target_cp = None
+    if state.projection is not None:
+        if snapshot is None:
+            raise SessionMigrateError("Observed target capture is unavailable.")
+        verification = verify_projection(
+            state.projection, snapshot, context=state.projection_context
+        )
+        if not verification.semantic_matches or not verification.structure_matches:
+            raise SessionMigrateError(
+                "Observed target projection differs from its prepared expectation."
+            )
+        observed = canonicalize_snapshot(
+            snapshot,
+            audit_snapshot(snapshot, AuditPolicy(client_version=record.versions.target_client)),
+            CanonicalPolicy(),
+        )
+        actual_coverage = _effective_source_coverage(observed)
+        expected_coverage = record.expected_projection.coverage
+        if expected_coverage is Coverage.VERIFIED and (
+            actual_coverage is not Coverage.VERIFIED
+            or not verification.relation_complete
+            or not verification.preserves_content
+            or state.projection.certificate is None
+        ):
+            raise SessionMigrateError(
+                "Observed target does not sustain its prepared projection authority."
+            )
+        if expected_coverage is Coverage.PARTIAL and actual_coverage is Coverage.UNKNOWN:
+            raise SessionMigrateError("Observed target projection authority became unknown.")
+        source_cp = _checkpoint(
+            state.projection.source_observation,
+            record.source.identity,
+            record.source.artifact_sha256,
+            record.versions,
+            _effective_source_coverage(state.projection.source_observation),
+        )
+        target_cp = _checkpoint(
+            observed,
+            identity,
+            session.source_sha256,
+            record.versions,
+            record.expected_projection.coverage,
+        )
+    return CompletionRecord(
+        identity, state.artifact_sha256, source_cp, target_cp, _planned_references(state)
+    )
+
+
+def _observed_references(state, session=None):
+    references = []
+    for reference in _planned_references(state):
+        if reference.path is None:
+            references.append(reference)
+            continue
+        path = Path(reference.path)
+        try:
+            descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_nlink != 1
+                    or info.st_size > 64 * 1024 * 1024
+                ):
+                    references.append(reference)
+                    continue
+                digest = hashlib.sha256()
+                remaining = info.st_size
+                while remaining:
+                    block = stream.read(min(65536, remaining))
+                    if not block:
+                        break
+                    digest.update(block)
+                    remaining -= len(block)
+                after = os.fstat(stream.fileno())
+                named = path.lstat()
+                if (
+                    remaining
+                    or stream.read(1)
+                    or (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+                    != (
+                        after.st_dev,
+                        after.st_ino,
+                        after.st_size,
+                        after.st_mtime_ns,
+                        after.st_ctime_ns,
+                    )
+                    or (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino)
+                ):
+                    references.append(reference)
+                    continue
+            references.append(
+                EvidenceReference(
+                    reference.kind, "observed", "available", reference.path, digest.hexdigest()
+                )
+            )
+        except FileNotFoundError:
+            references.append(
+                EvidenceReference(reference.kind, "observed", "missing", reference.path, None)
+            )
+        except OSError:
+            references.append(reference)
+    if session is not None:
+        references.append(
+            EvidenceReference("native", "observed", "available", None, session.source_sha256)
+        )
+    return tuple(references)
+
+
+def _open_lineage_store(state):
+    from session_migrate.native_namespaces import ensure_migration_state_home
+
+    if state.migration_state_home is None:
+        raise SessionMigrateError("Native publication requires explicit migration state HOME.")
+    ensure_migration_state_home(state.migration_state_home)
+    directory = state.migration_state_home / "lineage-v1"
+    return (
+        LineageStore.open_existing(directory)
+        if os.path.lexists(directory)
+        else LineageStore.create_new(directory)
+    )
+
+
 def commit_operation(
     prepared: PreparedOperation,
     *,
@@ -1118,6 +1635,12 @@ def _commit_operation(
     token: CancellationToken,
     progress: ProgressCallback | None,
 ) -> TransferReceipt:
+    if (
+        isinstance(prepared, PreparedOperation)
+        and prepared._state is not None
+        and prepared._state.built.request.command != OperationKind.CONVERT
+    ):
+        return _commit_native_operation(prepared, token, progress)
     state = None
     published = False
     stage = "preflight"
@@ -1250,6 +1773,261 @@ def _commit_operation(
         token.close()
 
 
+def _prepublication_guards(state, *, preflight=True):
+    _verify_prepared_options(state)
+    if preflight:
+        built = state.built
+        _install(
+            built.request,
+            built.artifact,
+            built.artifact.target_format,
+            built.output,
+            built.manifest,
+            built.home,
+            state.target_environment,
+            True,
+        )
+    _verify_prepared_options(state)
+    _read_prepared_source(state)
+    _quick_publication_guards(state)
+
+
+def _quick_publication_guards(state):
+    from session_migrate.native_snapshots import CaptureProvenance, check_source_identity
+
+    if (
+        state.last_source_capture
+        and state.last_source_capture[-1].provenance is CaptureProvenance.FILE
+    ):
+        check_source_identity(state.last_source_capture[-1])
+    if (
+        _client_epoch(state.built.request.source_cli),
+        _client_epoch(state.built.request.target_cli),
+    ) != tuple(
+        revision[:-1] if revision is not None else None for revision in state.client_revisions
+    ):
+        raise SessionMigrateError("prepared client identity changed; prepare again")
+    if (
+        _root_epoch(state.source_root) != state.source_epoch
+        or _root_epoch(state.built.artifact.cwd) != state.cwd_epoch
+    ):
+        raise SessionMigrateError("prepared source root or CWD changed; prepare again")
+    if not _target_epoch_matches(
+        state.target_root,
+        state.target_epoch,
+        database_file=state.built.artifact.target_format is TargetFormat.MASTRACODE,
+    ):
+        raise SessionMigrateError("prepared destination changed; prepare again")
+
+
+def _raise_reconcile(
+    state, operation_id, native_state, phase, reason, *, store=None, guard=None, session=None
+):
+    try:
+        references = _observed_references(state, session)
+    except Exception:
+        references = _planned_references(state)
+    receipt = ReconcileReceipt(
+        1,
+        operation_id,
+        state.built.artifact.session_id,
+        phase,
+        reason,
+        native_state,
+        references,
+        False,
+    )
+    if store is not None and guard is not None:
+        with suppress(Exception):
+            receipt = store.needs_reconcile(receipt, guard)
+    raise OperationNeedsReconcileError(receipt, target_namespace=_native_namespace(state)) from None
+
+
+def _commit_native_operation(prepared, token, progress):
+    state = None
+    store = guard = session = None
+    operation_id = None
+    native_state = NativeState.NATIVE_NOT_STARTED
+    phase, reason = "recording_intent", "intent_persistence_failed"
+    gate_closed = ready = recording = False
+    try:
+        state, proposal = prepared._consume()
+        operation_id = proposal.proposal_id
+        token.check()
+        _notify(progress, ProgressStage.PREFLIGHT)
+        _prepublication_guards(state)
+        title_store, planned_title_identity = _title_preflight(state)
+        record = _ready_record(state, operation_id)
+        LineageStore.preflight_metadata(record)
+        recording = True
+        store = _open_lineage_store(state)
+        with store.lock_operation(operation_id, record.target_namespace) as guard:
+            try:
+                store.ready(record, guard)
+                ready = True
+                token.check()
+                reason = "guards_changed"
+                _prepublication_guards(state)
+                store.check_guard(operation_id, guard, expected_state=OperationState.READY)
+                _quick_publication_guards(state)
+                token.check()
+                token.begin_publication()
+                gate_closed = True
+                _notify(progress, ProgressStage.RECORDING_INTENT)
+                reason = "intent_persistence_failed"
+                store.begin_publication(operation_id, guard)
+                reason = "guards_changed"
+                _prepublication_guards(state)
+                store.check_guard(operation_id, guard, expected_state=OperationState.PUBLISHING)
+                _notify(progress, ProgressStage.INSTALLING)
+                _quick_publication_guards(state)
+                phase, reason = "installing", "native_result_unknown"
+                native_state = NativeState.ATTEMPTED_UNKNOWN
+                built = state.built
+                _install(
+                    built.request,
+                    built.artifact,
+                    built.artifact.target_format,
+                    built.output,
+                    built.manifest,
+                    built.home,
+                    state.target_environment,
+                    False,
+                )
+                native_state = NativeState.ACKNOWLEDGED
+                phase, reason = "observing", "observation_failed"
+                store.mark_verifying(operation_id, guard)
+                _notify(progress, ProgressStage.VERIFYING)
+                session = _verify_installed_identity(state)
+                completion = _completion_record(state, record, session)
+                namespace = _published_namespace(state)
+                title_identity = (
+                    planned_title_identity.bind_root()
+                    if planned_title_identity is not None
+                    else None
+                )
+                title = None
+                receipt_path = None
+                if built.artifact.title_plan is not None:
+                    phase, reason = "finalizing", "finalization_failed"
+                    title = TitleReceipt.pending(built.artifact.title_plan)
+                    _verify_published_namespace(state, title_identity, namespace)
+                    if built.artifact.title_plan.policy is TitlePolicy.NATIVE:
+                        title = _observe_native_title(state, session)
+                    else:
+                        title_store.create(
+                            title_identity,
+                            built.artifact.title_plan.requested,
+                            proposal_id=operation_id,
+                            target_verified=True,
+                        )
+                        title = TitleReceipt.published_alias(built.artifact.title_plan)
+                    _verify_published_namespace(state, title_identity, namespace)
+                    receipt_path = title_receipt_path(built.manifest)
+                    binding = TitleReceiptBinding(
+                        built.artifact.target_format,
+                        built.artifact.target_sha256,
+                        identity=title_identity,
+                        output_path=None,
+                        session_id=built.artifact.session_id,
+                        manifest_path=built.manifest,
+                        proposal_id=operation_id,
+                    )
+                    write_title_receipt(
+                        receipt_path, title, binding=binding, alias_store=title_store
+                    )
+                phase, reason = "finalizing", "finalization_failed"
+                references = _observed_references(state, session)
+                _verify_prepared_options(state)
+                _read_prepared_source(state)
+                previous_target_sha = session.source_sha256
+                state.observed_captures.clear()
+                state.observed_export_proofs.clear()
+                session = _verify_installed_identity(state)
+                if session.source_sha256 != previous_target_sha:
+                    raise SessionMigrateError("Observed target changed during local finalization.")
+                completion = _completion_record(state, record, session)
+                _verify_published_namespace(state, title_identity, namespace)
+                store.check_guard(operation_id, guard, expected_state=OperationState.VERIFYING)
+                _quick_publication_guards(state)
+                if state.observed_captures and state.observed_captures[-1].identity is not None:
+                    from session_migrate.native_snapshots import check_source_identity
+
+                    check_source_identity(state.observed_captures[-1])
+                completion = replace(completion, references=references)
+                lineage_receipt = store.complete(operation_id, completion, guard)
+                result = content_free_result(
+                    built.artifact,
+                    output_path=built.output,
+                    manifest_path=built.manifest,
+                    dry_run=False,
+                )
+                _notify(progress, ProgressStage.COMPLETED)
+                return TransferReceipt(
+                    proposal,
+                    "completed",
+                    result,
+                    title=title,
+                    title_receipt=receipt_path,
+                    target_identity=title_identity.to_dict() if title_identity else None,
+                    lineage_receipt=lineage_receipt,
+                )
+            except OperationCancelledError:
+                if ready and not gate_closed:
+                    store.cancel_ready(operation_id, guard)
+                _notify(progress, ProgressStage.CANCELLED)
+                raise
+            except NativeImportPartialError:
+                native_state = NativeState.ACKNOWLEDGED
+                with suppress(Exception):
+                    session = _verify_installed_identity(state)
+                _notify(progress, ProgressStage.NEEDS_RECONCILE)
+                _raise_reconcile(
+                    state,
+                    operation_id,
+                    native_state,
+                    "finalizing",
+                    "finalization_failed",
+                    store=store,
+                    guard=guard,
+                    session=session,
+                )
+            except Exception:
+                if ready and not gate_closed:
+                    with suppress(Exception):
+                        store.fail_ready(operation_id, guard)
+                    _notify(progress, ProgressStage.FAILED)
+                    raise
+                _notify(progress, ProgressStage.NEEDS_RECONCILE)
+                _raise_reconcile(
+                    state,
+                    operation_id,
+                    native_state,
+                    phase,
+                    reason,
+                    store=store,
+                    guard=guard,
+                    session=session,
+                )
+    except (OperationCancelledError, OperationNeedsReconcileError):
+        raise
+    except Exception:
+        if (
+            state is not None
+            and operation_id is not None
+            and recording
+            and (store is None or not ready)
+        ):
+            _notify(progress, ProgressStage.NEEDS_RECONCILE)
+            _raise_reconcile(state, operation_id, native_state, phase, reason)
+        _notify(progress, ProgressStage.FAILED)
+        raise
+    finally:
+        if store is not None:
+            store.close()
+        token.close()
+
+
 def _notify(callback: ProgressCallback | None, stage: ProgressStage) -> None:
     if callback is not None:
         # Observers cannot turn a completed native import into a retry.
@@ -1321,13 +2099,22 @@ def run_operation(
     cancellation: CancellationToken | None = None,
     prepublication_check: Callable[[], None] | None = None,
     max_source_bytes: int | None = None,
+    migration_state_home: Path | None = None,
+    profile_context: Mapping[str, str] | None = None,
 ) -> OperationResult | TransferReceipt:
     """Snapshot target/source environments independently and use validated adapters.
 
     Omitted source_environ preserves the legacy single-environment contract.
     """
 
-    if request.target_title is not None or request.require_native_title:
+    if (
+        request.target_title is not None
+        or request.require_native_title
+        or (
+            request.command in {OperationKind.IMPORT, OperationKind.TRANSFER}
+            and not request.dry_run
+        )
+    ):
         token = cancellation or CancellationToken()
         token.claim()
         try:
@@ -1339,13 +2126,20 @@ def run_operation(
                 progress=progress,
                 max_source_bytes=max_source_bytes,
                 prepublication_check=prepublication_check,
+                migration_state_home=migration_state_home,
+                profile_context=profile_context,
             )
             if request.dry_run and request.command != OperationKind.CONVERT:
                 token.check()
                 proposal = proposal_metadata(prepared)
                 prepared.discard()
                 return TransferReceipt(proposal, "ready", proposal.to_dict()["legacy_result"])
-            return _commit_operation(prepared, token, progress)
+            receipt = _commit_operation(prepared, token, progress)
+            if request.target_title is None and not request.require_native_title:
+                return OperationResult(
+                    **receipt.legacy_result, lineage_receipt=receipt.lineage_receipt
+                )
+            return receipt
         finally:
             token.close()
     if cancellation is not None:
@@ -1505,6 +2299,8 @@ class _OperationBuild:
     home: Path | None
     source_root: Path | None
     dry_run: bool
+    source_snapshot: NativeSnapshot | None = None
+    source_export_proof: Any = None
 
 
 def _resolve_source(
@@ -1512,6 +2308,8 @@ def _resolve_source(
     source_environ: Mapping[str, str],
     max_source_bytes: int | None,
     expected_root: Path | None = None,
+    on_capture: Callable[[NativeSnapshot], None] | None = None,
+    on_native_observation: Callable[[Any], None] | None = None,
 ) -> tuple[Session, TargetFormat, Path | None]:
     if request.command != OperationKind.TRANSFER and (
         request.path is None or request.target_format is None
@@ -1602,6 +2400,16 @@ def _resolve_source(
                     source_cli=request.source_cli,
                     environ=source_environ,
                     **source_options,
+                    **(
+                        {"on_native_observation": on_native_observation}
+                        if on_native_observation is not None
+                        else {}
+                    ),
+                    **(
+                        {"on_capture": on_capture}
+                        if source_format == AgentFormat.OPENCODE and on_capture is not None
+                        else {}
+                    ),
                 )
             elif source_format in _SHARED_DATABASE_SOURCES:
                 source_home = request.source_home or default_target_home(
@@ -1652,6 +2460,16 @@ def _resolve_source(
                     source_cli=request.source_cli,
                     environ=virtual_source_environ or source_environ,
                     **source_options,
+                    **(
+                        {"on_native_observation": on_native_observation}
+                        if on_native_observation is not None
+                        else {}
+                    ),
+                    **(
+                        {"on_capture": on_capture}
+                        if source_format == AgentFormat.OPENCODE and on_capture is not None
+                        else {}
+                    ),
                 )
             elif source_format in _SHARED_DATABASE_SOURCES:
                 if not requested_source_id:
@@ -1667,7 +2485,12 @@ def _resolve_source(
             else:
                 assert source_path is not None
                 session = _load_path_source(
-                    source_path, source_format, source_root, source_environ, max_source_bytes
+                    source_path,
+                    source_format,
+                    source_root,
+                    source_environ,
+                    max_source_bytes,
+                    on_capture,
                 )
         if not session.session_id:
             raise SessionMigrateError("discovered transcript has no native session ID metadata")
@@ -1690,7 +2513,7 @@ def _resolve_source(
     else:
         source_format = AgentFormat(request.source_format) if request.source_format else None
         session = _load_path_source(
-            request.path, source_format, None, source_environ, max_source_bytes
+            request.path, source_format, None, source_environ, max_source_bytes, on_capture
         )
         target_format = TargetFormat(request.target_format)
     return session, target_format, source_root
@@ -1705,7 +2528,19 @@ def _build_operation(
     max_source_bytes: int | None,
     observe_target: bool = False,
 ) -> _OperationBuild:
-    session, target_format, source_root = _resolve_source(request, source_environ, max_source_bytes)
+    captures = []
+    export_proofs = []
+    session, target_format, source_root = _resolve_source(
+        request,
+        source_environ,
+        max_source_bytes,
+        on_capture=captures.append
+        if observe_target and request.command != OperationKind.CONVERT
+        else None,
+        on_native_observation=export_proofs.append
+        if observe_target and request.command != OperationKind.CONVERT
+        else None,
+    )
     target_cli_version = request.target_cli_version
     if cancellation is not None:
         cancellation.check()
@@ -1796,7 +2631,15 @@ def _build_operation(
         )
         dry_run = request.dry_run
     return _OperationBuild(
-        request, artifact, output_path, manifest_path, home, source_root, dry_run
+        request,
+        artifact,
+        output_path,
+        manifest_path,
+        home,
+        source_root,
+        dry_run,
+        captures[0] if captures else None,
+        export_proofs[0] if export_proofs else None,
     )
 
 
@@ -1902,34 +2745,89 @@ def _load_path_source(
     root: Path | None,
     environ: Mapping[str, str],
     max_source_bytes: int | None,
+    on_capture: Callable[[NativeSnapshot], None] | None = None,
+    on_native_observation: Callable[[Any], None] | None = None,
 ) -> Session:
+    if on_capture is not None:
+        from session_migrate.inspection import detect_path_format
+        from session_migrate.jsonl import DEFAULT_MAX_TOTAL_BYTES
+
+        selected_format = source_format or detect_path_format(path)
+        if selected_format in {AgentFormat.CLAUDE, AgentFormat.CODEX, AgentFormat.OPENCODE}:
+            try:
+                snapshot = capture_source(
+                    SourceCaptureContext(selected_format, path),
+                    byte_limit=max_source_bytes or DEFAULT_MAX_TOTAL_BYTES,
+                )
+            except SessionMigrateError as error:
+                if (
+                    max_source_bytes is not None
+                    and str(error) == "native capture exceeds the byte safety limit"
+                ):
+                    raise SourceReadLimitError(
+                        "Source exceeds the interactive read budget."
+                    ) from None
+                raise
+            session = snapshot.parse()
+            on_capture(snapshot)
+            return session
     if max_source_bytes is None:
-        return load_session(path, source_format)
-    from session_migrate.inspection import detect_path_format
-    from session_migrate.profiles import load_bounded_source
+        session = load_session(path, source_format)
+    else:
+        from session_migrate.inspection import detect_path_format
+        from session_migrate.profiles import load_bounded_source
 
-    source_format = source_format or detect_path_format(path)
+        source_format = source_format or detect_path_format(path)
+        session = load_bounded_source(
+            path,
+            source_format,
+            root=root or _physical_source_root(path, source_format),
+            max_source_bytes=max_source_bytes,
+            environ=environ,
+        )
+    if on_native_observation is not None:
+        from session_migrate.conversion import _publish_export_proof
 
-    return load_bounded_source(
-        path,
-        source_format,
-        root=root or _physical_source_root(path, source_format),
-        max_source_bytes=max_source_bytes,
-        environ=environ,
-    )
+        _publish_export_proof(session, path, None, {}, on_native_observation)
+    return session
 
 
 def _load_shared_database_source(
     source_format: AgentFormat,
     session_id: str,
     source_home: Path,
+    on_native_observation: Callable[[Any], None] | None = None,
 ) -> Session:
     if source_format == AgentFormat.HERMES:
-        return load_hermes_session(session_id, source_home=source_home)
+        return load_hermes_session(
+            session_id,
+            source_home=source_home,
+            **(
+                {"on_native_observation": on_native_observation}
+                if on_native_observation is not None
+                else {}
+            ),
+        )
     if source_format == AgentFormat.MASTRACODE:
-        return load_mastracode_session(session_id, source_home=source_home)
+        return load_mastracode_session(
+            session_id,
+            source_home=source_home,
+            **(
+                {"on_native_observation": on_native_observation}
+                if on_native_observation is not None
+                else {}
+            ),
+        )
     if source_format == AgentFormat.DEVIN:
-        return load_devin_session(session_id, source_home=source_home)
+        return load_devin_session(
+            session_id,
+            source_home=source_home,
+            **(
+                {"on_native_observation": on_native_observation}
+                if on_native_observation is not None
+                else {}
+            ),
+        )
     raise SessionMigrateError("source is not a supported shared-database format")
 
 

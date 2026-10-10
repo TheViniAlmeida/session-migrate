@@ -18,7 +18,12 @@ from textual.widgets import Button, Checkbox, Input, OptionList, Select
 from session_migrate import conversion, operations, profiles
 from session_migrate.catalog import Catalog
 from session_migrate.conversion import load_session
-from session_migrate.errors import NativeImportPartialError, SourceReadLimitError
+from session_migrate.errors import (
+    NativeImportPartialError,
+    OperationNeedsReconcileError,
+    SourceReadLimitError,
+)
+from session_migrate.lineage import EvidenceReference, NativeState, ReconcileReceipt
 from session_migrate.model import AgentFormat, TargetFormat
 from session_migrate.operations import CancellationToken, OperationRequest
 from session_migrate.profiles import Profile, list_profile_sessions
@@ -48,7 +53,7 @@ def setup(tmp_path, format=AgentFormat.CLAUDE):
         )
         path = root / "opencode.db"
         data = b""
-    path.parent.mkdir(parents=True)
+    conversion._mkdir_private_tree(path.parent)
     if format == AgentFormat.OPENCODE:
         with sqlite3.connect(path) as db:
             db.executescript("""
@@ -76,7 +81,12 @@ def setup(tmp_path, format=AgentFormat.CLAUDE):
         environ={"HOME": str(tmp_path / "source-home")},
     )
     controller = Controller(
-        catalog_path, environ={"HOME": str(tmp_path / "base-home"), "PATH": "/usr/bin:/bin"}
+        catalog_path,
+        environ={
+            "HOME": str(tmp_path / "base-home"),
+            "PATH": "/usr/bin:/bin",
+            "TMPDIR": str(tmp_path),
+        },
     )
     return controller, source, path
 
@@ -353,6 +363,36 @@ def test_worker_bounds_jobs_and_never_exposes_native_exception(tmp_path):
     assert "Do not repeat" in result.error
 
 
+@pytest.mark.parametrize("native_state", list(NativeState))
+def test_worker_generic_receipt_preserves_uncertainty_and_blocks_retry(tmp_path, native_state):
+    receipt = ReconcileReceipt(
+        1,
+        "synthetic-operation",
+        "synthetic-target",
+        "recording_intent",
+        "guards_changed",
+        native_state,
+        (EvidenceReference("artifact", "planned", "unknown", str(tmp_path / "artifact"), None),),
+        False,
+    )
+
+    def reconcile():
+        raise OperationNeedsReconcileError(receipt)
+
+    worker = Worker()
+    assert worker.submit(7, "commit", reconcile)
+    for _ in range(100):
+        result = worker.poll()
+        if result is not None:
+            break
+        time.sleep(0.01)
+    assert result.generation == 7 and result.reconcile_id == "synthetic-target"
+    assert result.reconcile_native_state == native_state.value
+    assert result.reconcile_stage == "recording_intent"
+    assert result.reconcile_references == receipt.references
+    assert "reserved target" in result.error and "Publication completed" not in result.error
+
+
 @pytest.mark.parametrize(
     "source_format,target_format", [("codex", "opencode"), ("opencode", "claude")]
 )
@@ -428,7 +468,7 @@ def test_keyboard_opencode_routes_use_profile_environment_and_reserved_id(
             assert app.completed
             assert reserved in str(app.query_one("#receipt", Literal).render())
             if target_format == "opencode":
-                assert len(calls) == 3
+                assert len(calls) >= 3  # repeated preflight never repeats native publication
                 assert all(id == reserved for id, dry_run in calls)
                 assert sum(not dry_run for id, dry_run in calls) == 1
             else:
@@ -835,7 +875,9 @@ def test_directory_source_preview_budget_membership_and_provenance(tmp_path, mon
         assert [event.provenance for event in limited.events] == [
             event.provenance for event in original.events
         ]
-    controller = Controller(catalog_path, environ={"HOME": str(tmp_path / "home")})
+    controller = Controller(
+        catalog_path, environ={"HOME": str(tmp_path / "home"), "TMPDIR": str(tmp_path)}
+    )
     preview = controller.start_preview(selected, ref).wait(3)
     assert preview.snapshot is not None
     before = controller.revision(selected, ref)
@@ -1066,7 +1108,9 @@ def test_kimi_bounded_layout_original_identity_and_state_witness(tmp_path, entry
             catalog.add_root(AgentFormat.KIMI, root)
             assert catalog.refresh(include_auto=False).root_errors == 0
             ref = list_profile_sessions(catalog, selected)[0].ref
-        controller = Controller(catalog_path, environ={"HOME": str(tmp_path / "home")})
+        controller = Controller(
+            catalog_path, environ={"HOME": str(tmp_path / "home"), "TMPDIR": str(tmp_path)}
+        )
         before = controller.revision(selected, ref)
         state_path.write_bytes(state_path.read_bytes() + b" ")
         assert controller.revision(selected, ref) != before
@@ -1273,7 +1317,9 @@ def test_edit_cancel_publication_race_keeps_committed_receipt_observable(
                 assert app.draft is draft
                 assert token.publishing
                 token.check()  # No false cancellation was recorded.
-                assert "Waiting for verification" in str(app.query_one("#status", Literal).render())
+                assert "Waiting for the operation result" in str(
+                    app.query_one("#status", Literal).render()
+                )
                 await pilot.press("escape", "ctrl+q")
                 assert app.is_running and app.stage == "review"
                 assert app.generation == generation and app.draft is draft

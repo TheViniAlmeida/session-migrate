@@ -402,6 +402,7 @@ def test_alias_invalid_schema_or_identity_rejected(alias, change):
 def test_alias_insecure_directory_and_traversal_no_residue(alias, tmp_path):
     store, identity = alias
     store.directory.mkdir(parents=True, mode=0o755)
+    store.directory.chmod(0o755)
     with pytest.raises(SessionMigrateError, match="0700"):
         store.preflight(identity)
     with pytest.raises(SessionMigrateError, match="traversal"):

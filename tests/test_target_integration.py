@@ -860,8 +860,12 @@ def test_opencode_cli_rejects_home_before_native_import(
 
 
 def test_opencode_cli_target_version_override_cannot_bypass_pinned_import(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    def forbidden(*args, **kwargs):
+        pytest.fail("version override invoked native import without a validated client")
+
+    monkeypatch.setattr(conversion, "_invoke_opencode_import", forbidden)
     status = main(
         [
             "import",
@@ -879,8 +883,8 @@ def test_opencode_cli_target_version_override_cannot_bypass_pinned_import(
 
     assert status == 2
     error = capsys.readouterr().err
-    assert "requires target metadata version 1.17.20" in error
-    assert "was not found" not in error
+    assert "target client version probe failed or is unsupported" in error
+    assert not (tmp_path / "not-consulted").exists()
 
 
 def test_opencode_cli_dry_run_delegates_to_official_preflight_without_manifest(
