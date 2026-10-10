@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from collections import Counter, deque
+from collections.abc import Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +14,7 @@ from typing import Any
 
 from session_migrate.errors import SessionMigrateError
 from session_migrate.formats.common import content_text, object_value, string, valid_rfc3339
-from session_migrate.jsonl import encode_jsonl, file_sha256, iter_jsonl
+from session_migrate.jsonl import JsonlRecord, encode_jsonl, iter_jsonl_bytes, read_jsonl_bytes
 from session_migrate.model import AgentFormat, Event, EventKind, Provenance, Role, Session
 
 PINNED_CODEX_VERSION = "0.144.4"
@@ -27,7 +29,26 @@ SUPPORTED_HISTORY_MODES = frozenset({"legacy", "paginated"})
 
 
 def parse(path: Path) -> Session:
-    records = list(iter_jsonl(path))
+    source_path = path.resolve()
+    return parse_bytes(read_jsonl_bytes(path), source_path)
+
+
+def parse_bytes(data: bytes, source_path: Path) -> Session:
+    """Parse one captured authority without resolving or rereading its source path."""
+
+    return parse_records(
+        list(iter_jsonl_bytes(data)),
+        source_path=source_path,
+        source_sha256=hashlib.sha256(data).hexdigest(),
+    )
+
+
+def parse_records(
+    records: Sequence[JsonlRecord], *, source_path: Path, source_sha256: str
+) -> Session:
+    """Project records whose digest and location were bound by the capture caller."""
+
+    records = list(records)
     history_mode = _history_mode(records)
     if history_mode == "paginated":
         _validate_paginated_root(records)
@@ -213,8 +234,8 @@ def parse(path: Path) -> Session:
     events.sort(key=lambda event: event.provenance.record_index)
     return Session(
         source_format=AgentFormat.CODEX,
-        source_path=path.resolve(),
-        source_sha256=file_sha256(path),
+        source_path=source_path,
+        source_sha256=source_sha256,
         session_id=session_id,
         cwd=cwd,
         started_at=started_at,

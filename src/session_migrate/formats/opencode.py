@@ -6,6 +6,7 @@ never writes OpenCode's SQLite database directly.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -20,7 +21,7 @@ from typing import Any
 from session_migrate.errors import SessionMigrateError
 from session_migrate.formats import opencode_v2
 from session_migrate.formats.common import portable_data_image, string, valid_rfc3339
-from session_migrate.jsonl import file_sha256
+from session_migrate.jsonl import read_jsonl_bytes
 from session_migrate.model import AgentFormat, Event, EventKind, Provenance, Role, Session
 
 PINNED_OPENCODE_VERSION = "1.17.20"
@@ -457,6 +458,12 @@ def parse_import(path: Path) -> ParsedOpenCodeSession:
         data = path.read_bytes()
     except OSError as exc:
         raise SessionMigrateError("cannot read OpenCode import bundle") from exc
+    return parse_import_bytes(data)
+
+
+def parse_import_bytes(data: bytes) -> ParsedOpenCodeSession:
+    """Project a captured export using the existing decoder and native validator."""
+
     value = _decode_import_bundle(data)
     native_v2 = value if opencode_v2.is_bundle(value) else None
     _validate_import_bundle(value)
@@ -742,11 +749,20 @@ parse = parse_import
 def parse_session(path: Path) -> Session:
     """Parse an official OpenCode export as an authoritative source session."""
 
-    parsed = parse_import(path)
+    source_path = path.resolve()
+    return parse_session_bytes(
+        read_jsonl_bytes(path, max_total_bytes=MAX_NATIVE_BYTES), source_path
+    )
+
+
+def parse_session_bytes(data: bytes, source_path: Path) -> Session:
+    """Parse the captured export without re-exporting or rereading its source."""
+
+    parsed = parse_import_bytes(data)
     return Session(
         source_format=AgentFormat.OPENCODE,
-        source_path=path.resolve(),
-        source_sha256=file_sha256(path),
+        source_path=source_path,
+        source_sha256=hashlib.sha256(data).hexdigest(),
         session_id=parsed.session_id,
         cwd=parsed.cwd,
         started_at=parsed.started_at,

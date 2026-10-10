@@ -31,6 +31,13 @@ from typing import Union, get_args, get_origin, get_type_hints
 
 from session_migrate.errors import SessionMigrateError
 from session_migrate.model import AgentFormat
+from session_migrate.witnesses import (
+    BoundaryKind,
+    BoundaryWitness,
+    PrefixWitness,
+    SequenceWitness,
+    WitnessValidationError,
+)
 
 MAX_IMAGE_BYTES = 64 * 1024 * 1024
 MAX_METADATA_BYTES = 128 * 1024
@@ -254,12 +261,15 @@ class SourceMetadata:
     artifact_sha256: str
     witness_sha256: str
     snapshot_sha256: str | None
+    prefix_witness: PrefixWitness | None = None
 
     def __post_init__(self) -> None:
         _require(self.identity is None or type(self.identity) is QualifiedIdentity)
         _hash(self.artifact_sha256)
         _hash(self.witness_sha256)
         _hash(self.snapshot_sha256, optional=True)
+        _require(self.prefix_witness is None or type(self.prefix_witness) is PrefixWitness)
+        _require(self.prefix_witness is None or self.snapshot_sha256 is not None)
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -267,14 +277,24 @@ class ProjectionExpectation:
     snapshot_sha256: str | None
     unit_hashes: tuple[str, ...]
     coverage: Coverage
+    prefix_witness: PrefixWitness | None = None
+    relation_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _hash(self.snapshot_sha256, optional=True)
         _hashes(self.unit_hashes)
         _require(type(self.coverage) is Coverage)
+        _require(self.prefix_witness is None or type(self.prefix_witness) is PrefixWitness)
+        _hash(self.relation_sha256, optional=True)
+        _require(self.prefix_witness is None or not self.unit_hashes)
         _require(
             self.coverage is not Coverage.UNKNOWN
-            or (self.snapshot_sha256 is None and not self.unit_hashes)
+            or (
+                self.snapshot_sha256 is None
+                and not self.unit_hashes
+                and self.prefix_witness is None
+                and self.relation_sha256 is None
+            )
         )
         _require(self.coverage is Coverage.UNKNOWN or self.snapshot_sha256 is not None)
 
@@ -323,6 +343,7 @@ class CheckpointRecord:
     coverage: Coverage
     branch_sha256: str | None
     versions: PolicyVersions
+    prefix_witness: PrefixWitness | None = None
 
     def __post_init__(self) -> None:
         _require(self.identity is None or type(self.identity) is QualifiedIdentity)
@@ -334,6 +355,19 @@ class CheckpointRecord:
         _count(self.turn_count)
         _require(type(self.boundary_closed) is bool and type(self.coverage) is Coverage)
         _require(type(self.versions) is PolicyVersions)
+        _require(self.prefix_witness is None or type(self.prefix_witness) is PrefixWitness)
+        if self.prefix_witness is not None:
+            prefix = self.prefix_witness
+            _require(not self.unit_hashes and not self.tool_link_hashes)
+            _require(prefix.closed_turn_count <= self.turn_count)
+            _require(
+                self.boundary_closed
+                is (
+                    prefix.boundary.kind is not BoundaryKind.UNPROVEN
+                    and prefix.boundary.unit_offset == prefix.units.count
+                    and prefix.boundary.pending_call_count == 0
+                )
+            )
         _require(
             self.coverage is not Coverage.UNKNOWN
             or (
@@ -341,6 +375,7 @@ class CheckpointRecord:
                 and not self.unit_hashes
                 and not self.tool_link_hashes
                 and not self.boundary_closed
+                and self.prefix_witness is None
             )
         )
         _require(self.coverage is Coverage.UNKNOWN or self.snapshot_sha256 is not None)
@@ -477,17 +512,31 @@ _RECORD_TYPES = (
     CompletionReceipt,
     ReconcileReceipt,
     EdgeRecord,
+    SequenceWitness,
+    BoundaryWitness,
+    PrefixWitness,
 )
+_OPTIONAL_RECORD_FIELDS = {
+    SourceMetadata: ("prefix_witness",),
+    ProjectionExpectation: ("prefix_witness", "relation_sha256"),
+    CheckpointRecord: ("prefix_witness",),
+}
 
 
 def _json_value(value: object, depth: int = 0) -> object:
     _require(depth <= 12)
     if type(value) in _RECORD_TYPES:
-        return {
+        extensions = _OPTIONAL_RECORD_FIELDS.get(type(value), ())
+        version_two = any(getattr(value, name) is not None for name in extensions)
+        result = {
             field.name: _json_value(getattr(value, field.name), depth + 1)
             for field in dataclasses.fields(value)
+            if field.name not in extensions or version_two
         }
-    if type(value) in (Coverage, NativeState, OperationState):
+        if version_two:
+            result["record_schema_version"] = 2
+        return result
+    if type(value) in (Coverage, NativeState, OperationState, BoundaryKind):
         return value.value
     if type(value) is tuple:
         return [_json_value(item, depth + 1) for item in value]
@@ -527,12 +576,22 @@ def _typed(kind: object, value: object, depth: int = 0) -> object:
         _require(type(value) is list and len(value) <= MAX_UNITS)
         return tuple(_typed(get_args(kind)[0], item, depth + 1) for item in value)
     if kind in _RECORD_TYPES:
-        _require(
-            type(value) is dict and set(value) == {field.name for field in dataclasses.fields(kind)}
-        )
+        _require(type(value) is dict)
+        fields = {field.name for field in dataclasses.fields(kind)}
+        extensions = _OPTIONAL_RECORD_FIELDS.get(kind, ())
+        if extensions and "record_schema_version" in value:
+            _require(
+                type(value["record_schema_version"]) is int
+                and value["record_schema_version"] == 2
+                and set(value) == fields | {"record_schema_version"}
+                and any(value[name] is not None for name in extensions)
+            )
+            value = {name: item for name, item in value.items() if name != "record_schema_version"}
+        else:
+            _require(set(value) == fields - set(extensions))
         hints = get_type_hints(kind)
         return kind(**{name: _typed(hints[name], item, depth + 1) for name, item in value.items()})
-    if kind in (Coverage, NativeState, OperationState):
+    if kind in (Coverage, NativeState, OperationState, BoundaryKind):
         _require(type(value) is str)
         try:
             return kind(value)
@@ -556,7 +615,7 @@ def _decode(kind: object, payload: object, maximum: int = MAX_METADATA_BYTES):
         result = _typed(kind, value)
         _require(_encode(result, maximum) == payload, "noncanonical_metadata")
         return result
-    except (ValueError, TypeError, UnicodeError, RecursionError):
+    except (ValueError, TypeError, UnicodeError, RecursionError, WitnessValidationError):
         raise LineageError("invalid_metadata") from None
 
 
@@ -1506,6 +1565,7 @@ class LineageStore:
                 source.identity == record.source.identity
                 and source.artifact_sha256 == record.source.artifact_sha256
                 and source.snapshot_sha256 == record.source.snapshot_sha256
+                and source.prefix_witness == record.source.prefix_witness
                 and source.versions == record.versions,
                 "proof_mismatch",
             )
@@ -1515,6 +1575,7 @@ class LineageStore:
                 and target.versions == record.versions
                 and target.snapshot_sha256 == record.expected_projection.snapshot_sha256
                 and target.unit_hashes == record.expected_projection.unit_hashes
+                and target.prefix_witness == record.expected_projection.prefix_witness
                 and target.coverage is record.expected_projection.coverage,
                 "proof_mismatch",
             )

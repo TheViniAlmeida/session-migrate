@@ -2,7 +2,8 @@
 
 Status: implementação em andamento. Spec/plano revisão 1, 09/10/2026; progresso atualizado em 10/10/2026.
 F2A, F2B e F2C integradas em `next`; o hotfix de cancelamento pós-publicação
-está concluído. F3 é o marco em implementação; F4 tem desenho inicial.
+está concluído. F3 está integrada e instalada. F4A, a API privada do ledger, está integrada;
+F4B prepara canonicalização e integração das operações. A fase 4 continua em andamento.
 Os demais marcos seguem os gates abaixo.
 
 Fonte normativa: [spec](../specs/interactive-migration.md), revisão 1.
