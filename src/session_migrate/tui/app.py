@@ -9,6 +9,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import (
     Button,
+    Checkbox,
     ContentSwitcher,
     Footer,
     Header,
@@ -19,11 +20,13 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from session_migrate.capabilities import capabilities_for, list_capabilities
+from session_migrate.capabilities import capabilities_for, list_capabilities, title_capability_for
+from session_migrate.errors import SessionMigrateError
 from session_migrate.model import AgentFormat
 from session_migrate.operations import CancellationToken, OperationRequest
 from session_migrate.preview import PreviewRequest, PreviewSnapshot, PreviewStatus, literal_text
 from session_migrate.profiles import ENVIRONMENT_KEYS, Profile, ProfileSession, ProfileStore
+from session_migrate.titles import TitlePolicy, validate_title
 from session_migrate.tui.controller import Controller, Draft, Worker
 from session_migrate.tui.widgets import Literal, plain
 
@@ -153,6 +156,14 @@ class MigrationApp(App):
                 )
                 yield Input(placeholder="Model provider when required", id="provider")
                 yield Input(placeholder="Model when required", id="model")
+                yield Input(
+                    placeholder="Destination title (optional, preserved exactly)", id="target-title"
+                )
+                yield Checkbox(
+                    "Use an explicit local alias (does not rename native picker)",
+                    id="local-title-alias",
+                )
+                yield Checkbox("Require verified installed native title", id="require-native-title")
                 yield Literal("", id="capability")
                 yield Button("Prepare transfer", id="prepare", variant="primary")
             with VerticalScroll(id="review"):
@@ -212,6 +223,7 @@ class MigrationApp(App):
                 else "Operation finishing. Waiting for its result."
             )
             return False
+        self.controller.discard()
         self.generation += 1
         self.draft = None
         self.query_one("#confirm", Button).disabled = True
@@ -271,6 +283,17 @@ class MigrationApp(App):
     def on_input_changed(self, event: Input.Changed):
         if not self._form_loading:
             self.on_edit()
+            if event.input.id in {"target-title", "schema"}:
+                self.show_capabilities()
+
+    def on_checkbox_changed(self, event: Checkbox.Changed):
+        if not self._form_loading:
+            self.on_edit()
+            self.show_capabilities()
+
+    def target_title(self) -> str | None:
+        raw = self.query_one("#target-title", Input).value
+        return validate_title(raw) if raw != "" else None
 
     def on_edit(self):
         # Only option edits invalidate a draft; typing filters has no publication side effects.
@@ -291,8 +314,35 @@ class MigrationApp(App):
         schemas = ", ".join(
             item.schema for item in list_capabilities(format) if item.target_supported
         )
+        alias = self.query_one("#local-title-alias", Checkbox).value
+        required = self.query_one("#require-native-title", Checkbox).value
+        capability = title_capability_for(
+            format,
+            cli_version=self.value("schema") or None,
+            policy="local_alias" if alias else "native",
+        )
+        problem = None
+        try:
+            title = self.target_title()
+            if alias and required:
+                problem = "Local alias and required native title are incompatible."
+            elif (alias or required) and title is None:
+                problem = "Choose a destination title for the selected title policy."
+            elif (
+                title is not None
+                and not alias
+                and capability.status == "unsupported"
+                and (format != "opencode" or self.value("schema"))
+            ):
+                problem = "Native naming unsupported. Choose local alias explicitly."
+        except SessionMigrateError as error:
+            problem = str(error)
+        self.query_one("#prepare", Button).disabled = problem is not None
         self.query_one("#capability", Literal).set_text(
-            f"Supported output: {schemas}. Media: {info.media_scope}\nNew session only."
+            f"Supported output: {schemas}. Media: {info.media_scope}\n"
+            f"Naming policy: {capability.status}. {capability.reason}\n"
+            "Prepare checks the effective client/version. New session only.\n"
+            f"{problem or ''}"
         )
 
     def search(self):
@@ -390,6 +440,13 @@ class MigrationApp(App):
                 if not self.value("cwd") or not Path(self.value("cwd")).is_absolute():
                     self.status("Choose an absolute project CWD before preparing.")
                     return
+                if (
+                    self.query_one("#local-title-alias", Checkbox).value
+                    and self.query_one("#require-native-title", Checkbox).value
+                ):
+                    raise SessionMigrateError(
+                        "Local alias and required native title are incompatible."
+                    )
                 target = self.profile_form("target")
                 request = OperationRequest(
                     "transfer",
@@ -397,6 +454,11 @@ class MigrationApp(App):
                     target_cli_version=self.value("schema") or None,
                     model_provider=self.value("provider") or None,
                     model=self.value("model") or None,
+                    target_title=self.target_title(),
+                    title_policy=TitlePolicy.LOCAL_ALIAS
+                    if self.query_one("#local-title-alias", Checkbox).value
+                    else None,
+                    require_native_title=self.query_one("#require-native-title", Checkbox).value,
                 )
                 self.token = CancellationToken()
                 source, ref, token = self.source, self.selected.ref, self.token
@@ -424,6 +486,8 @@ class MigrationApp(App):
                 self.show_source_summary()
                 self.show("sessions")
                 self.search()
+        except SessionMigrateError as error:
+            self.status(str(error))
         except Exception:
             self.status("Invalid profile or options. Use absolute paths and supported formats.")
 
@@ -433,6 +497,8 @@ class MigrationApp(App):
             self.pending = None
             self.token = None
             if result.generation != self.generation:
+                if result.kind == "prepare" and isinstance(result.value, Draft):
+                    self.controller.discard(result.value)
                 self.status("Selection changed; repeat the selected action.")
             elif result.error:
                 failed_draft = self.draft
@@ -444,12 +510,17 @@ class MigrationApp(App):
                     self.query_one("#another", Button).disabled = True
                     self.show("result")
                     destination = failed_draft.target.root if failed_draft else "selected profile"
-                    manifest = failed_draft.result.manifest if failed_draft else "not available"
+                    manifest = result.reconcile_manifest or (
+                        failed_draft.result.manifest if failed_draft else "not available"
+                    )
                     self.query_one("#receipt", Literal).set_text(
                         f"Needs attention. Target ID: {result.reconcile_id}\n"
-                        f"Destination: {destination}\n"
+                        f"Publication: {result.publication_kind or 'native import'}\n"
+                        f"Stage: {result.reconcile_stage or 'verification'}\n"
+                        f"Destination: {result.reconcile_root or destination}\n"
                         f"Manifest: {manifest}\n"
-                        "Do not repeat the import. Inspect the native target manually."
+                        f"Output: {result.reconcile_output or '-'}\n"
+                        "Do not repeat publication. Inspect the published target manually."
                     )
             elif result.kind == "profiles":
                 self.saved_profiles = result.value
@@ -483,7 +554,9 @@ class MigrationApp(App):
                     options.add_option(
                         Option(
                             plain(
-                                f"{item.entry.title or '(untitled)'} | "
+                                f"Native title: {item.entry.title or '(untitled)'} | "
+                                f"Local alias: {getattr(item, 'local_alias', None) or '-'} | "
+                                f"{getattr(item, 'alias_status', None) or ''}"
                                 f"{item.entry.session_id or '(no ID)'} | "
                                 f"{item.entry.lifecycle} | {item.entry.status}"
                             ),
@@ -506,42 +579,7 @@ class MigrationApp(App):
                 self.draft = result.value
                 self.show("review")
                 draft = self.draft
-                losses = (
-                    "\n".join(
-                        f"{key}: {count}" for key, count in draft.result.dropped_events.items()
-                    )
-                    or "None reported."
-                )
-                warnings = (
-                    ", ".join(str(item.get("code", "warning")) for item in draft.result.warnings)
-                    or "None reported."
-                )
-                effects = (
-                    "Native probes may initialize normal cache/store state."
-                    if draft.target.format in {AgentFormat.OPENCODE, AgentFormat.KILO}
-                    else "A new session and manifest will be written."
-                )
-                self.query_one("#proposal", Literal).set_text(
-                    f"Source: {draft.source.name}\n"
-                    f"Root: {draft.source.root}\n"
-                    f"Native ID: {draft.ref.native_id}\n"
-                    f"Source HOME: {draft.source.environ.get('HOME', '(runtime default)')}\n"
-                    f"Source CLI: {draft.source.cli or '(adapter default)'}\n"
-                    f"Destination: {draft.target.name}\n"
-                    f"Root: {draft.target.root}\n"
-                    f"HOME: {draft.target.environ.get('HOME', '(runtime default)')}\n"
-                    f"CLI: {draft.target.cli or '(adapter default)'}\n"
-                    f"Project: {draft.result.cwd}\n"
-                    f"Reserved target ID: {draft.result.session_id}\n"
-                    f"Target version: {draft.request.target_cli_version or '(adapter default)'}\n"
-                    f"Model: {draft.request.model_provider or '(default)'}/"
-                    f"{draft.request.model or '(default)'}\n"
-                    f"Records: {draft.result.records}\n"
-                    f"Reported losses:\n"
-                    f"{losses}\n"
-                    f"Warnings: {warnings}\n"
-                    f"Effects: {effects}"
-                )
+                self.query_one("#proposal", Literal).set_text(review_text(draft))
                 self.query_one("#confirm", Button).disabled = False
                 self.status("Ready for confirmation. Back preserves your options.")
             elif result.kind == "commit":
@@ -550,19 +588,22 @@ class MigrationApp(App):
                 target_cli = target_profile.cli if target_profile else None
                 self.draft = None
                 self.show("result")
-                receipt = result.value
+                envelope = result.value.to_dict()
+                receipt = envelope.get("legacy_result", envelope)
                 resume = resume_instruction(
-                    receipt.target_format,
-                    receipt.session_id,
-                    receipt.cwd,
+                    receipt["target_format"],
+                    receipt["session_id"],
+                    receipt["cwd"],
                     cli=target_cli,
                     profile=target_profile,
                 )
                 self.query_one("#receipt", Literal).set_text(
                     f"Completed.\n"
-                    f"Target ID: {receipt.session_id}\n"
-                    f"Output: {receipt.output}\n"
-                    f"Manifest: {receipt.manifest}\n"
+                    f"Target ID: {receipt['session_id']}\n"
+                    f"Output: {receipt['output']}\n"
+                    f"Manifest: {receipt['manifest']}\n"
+                    f"{title_text(envelope.get('title'), receipt=True)}\n"
+                    f"Title receipt: {envelope.get('title_receipt') or '-'}\n"
                     f"Resume manually:\n"
                     f"{resume}"
                 )
@@ -582,12 +623,16 @@ class MigrationApp(App):
     def action_back(self):
         if self.needs_reconcile:
             self.status(
-                "Verification needs attention. Inspect the target manually; "
-                "do not repeat the import."
+                "Verification needs attention. Inspect the published target manually; "
+                "do not repeat publication."
             )
             return
         if self.pending and not self.invalidate():
             return
+        if not self.pending and self.stage == "review" and self.draft:
+            self.invalidate()
+        if not self.pending and self.stage == "result":
+            self.completed = False
         if self.preview_request:
             self.preview_request.cancel()
             self.preview_request = None
@@ -612,7 +657,53 @@ class MigrationApp(App):
             self.token.request_cancel()
         if self.preview_request:
             self.preview_request.cancel()
+        self.controller.discard()
         self.exit()
+
+
+def title_text(metadata: dict | None, *, receipt: bool = False) -> str:
+    if metadata is None:
+        return "Title override: none; native naming follows the adapter."
+    plan = metadata["title_plan"] if receipt else metadata
+    return (
+        f"Requested title: {plan['requested']}\n"
+        f"Native effective (planned): {plan.get('native_effective') or 'unchanged/unknown'}\n"
+        f"Native observed: {metadata.get('native_observed') or 'not verified'}\n"
+        f"Local alias (app only): {plan.get('local_alias') or '-'}\n"
+        f"Persistence: {metadata.get('persistence', plan['intended_persistence'])}\n"
+        f"Verification: {metadata.get('verification_state', 'pending')}\n"
+        f"Native proof: {plan.get('proof_version') or '-'} / {plan.get('proof_id') or '-'}\n"
+        f"Source title disposition: {plan['source_title_disposition']}"
+    )
+
+
+def review_text(draft: Draft) -> str:
+    metadata = draft.proposal.to_dict()
+    source, target, options = metadata["source"], metadata["target"], metadata["options"]
+    loss = "\n".join(f"{reason}: {count}" for reason, count in sorted(metadata["losses"].items()))
+    warnings = ", ".join(item.get("code", "warning") for item in metadata["warnings"])
+    effects = ", ".join(metadata["effects"]) or "No native probe effects reported."
+    return (
+        f"Source: {draft.source.name} ({source['format']})\n"
+        f"Source root: {source['root']}\nSource native ID: {source['native_id']}\n"
+        f"Source title (native): {source.get('title') or '(untitled)'}\n"
+        f"Source counts: {source['events']} / {source['records']} records\n"
+        f"Source read limit: {source['read_limit_bytes']} / {source['read_limit_scope']}\n"
+        f"Source environment: {options['source_environment']}\n"
+        f"Destination: {draft.target.name} ({target['format']})\n"
+        f"Root: {target['root']}\nCLI: {target['cli'] or '(adapter default)'}\n"
+        f"Target environment: {options['target_environment']}\n"
+        f"Project CWD: {target['cwd']}\nReserved target ID: {target['native_id']}\n"
+        f"Target version: {target['cli_version']} ({target['cli_version_source']})\n"
+        f"Schema: {target['schema']}\n"
+        f"Model/provider: {target['model']}/{target['model_provider']}\n"
+        f"Artifact SHA256: {target['sha256']}\n{title_text(metadata['title'])}\n"
+        f"Reported losses:\n{loss or 'None reported.'}\nWarnings: {warnings or 'None reported.'}\n"
+        f"Probe effects: {effects}\nNew session output: {metadata['legacy_result']['output']}\n"
+        f"Manifest: {metadata['legacy_result']['manifest']}\n"
+        f"Title receipt: {metadata['title_receipt'] or '-'}\n"
+        "Confirm publishes this exact prepared artifact. Resume remains manual."
+    )
 
 
 def resume_instruction(
@@ -663,6 +754,7 @@ def progress_label(stage: str) -> str:
         "converting": "Converting history…",
         "preflight": "Checking destination…",
         "installing": "Installing new session…",
+        "verifying": "Verifying native identity/title and local metadata…",
         "completed": "Finishing result…",
         "cancelled": "Cancelled before installation.",
         "needs_reconcile": "Verification needs attention.",

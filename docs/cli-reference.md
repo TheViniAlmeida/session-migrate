@@ -1,6 +1,6 @@
 # CLI reference
 
-This page documents `session-migrate` 0.11.0. `smigrate` is an exact shorthand
+This page documents the current `session-migrate` CLI. `smigrate` is an exact shorthand
 for the same executable.
 
 ## Commands
@@ -12,6 +12,9 @@ session-migrate import PATH --to TARGET [--home PATH] [--dry-run] [OPTIONS]
 session-migrate transfer SOURCE_ID --from FORMAT --to TARGET [OPTIONS]
 session-migrate transfer --catalog-id ID --to TARGET [OPTIONS]
 session-migrate transfer --title TITLE [--from FORMAT] --to TARGET [OPTIONS]
+session-migrate proposal convert PATH --to TARGET --output PATH [OPTIONS]
+session-migrate proposal import PATH --to TARGET [--home PATH] [OPTIONS]
+session-migrate proposal transfer [SOURCE_ID | --catalog-id ID | --title TITLE] [OPTIONS]
 session-migrate catalog refresh [ROOT OPTIONS] [--validate] [--json]
 session-migrate catalog roots list|add|remove ...
 session-migrate catalog list [FILTERS]
@@ -309,3 +312,68 @@ select private state. It requires an interactive terminal and the explicitly
 installed `session-migrate[tui]` extra; missing prerequisites return exit code 2
 without automatic installation. See [Terminal interface](terminal-ui.md) for
 profile selection, bounded previews, confirmation and cancellation behavior.
+
+
+## Destination titles
+
+`--target-title TITLE` requests a destination name independently of the source
+`--title` selector. Names are preserved exactly, including spaces, Unicode and
+ZWJ; empty/whitespace-only names, terminal/bidi controls and names exceeding the
+app's 1024-byte UTF-8 limit are rejected. No silent normalization or truncation
+occurs. Omitting the flag preserves the existing conversion behavior.
+
+Native naming currently has exact-client proof for stock OpenCode **2.0.22**
+and **2.0.23**, through its public session list and cold export. This does not
+promote other builds, versions or harnesses. Unsupported native naming fails;
+choose `--local-title-alias` explicitly if a private app label is wanted.
+Aliases do not rename a native picker or change catalog/source title matching.
+
+```sh
+smigrate import SOURCE --to opencode --target-cli /path/to/opencode \
+  --cwd /absolute/project --target-title "Ação 🧪" --require-native-title
+smigrate import SOURCE --to codex --home /absolute/native-home \
+  --cwd /absolute/project --target-title "Local label" --local-title-alias
+```
+
+`--require-native-title` and `--local-title-alias` are mutually exclusive and
+require an explicit title. Convert-only refuses the native requirement because
+it cannot verify an installed name. A titled standalone conversion records
+`pending_native_import` or `alias_pending`, never installed persistence.
+
+With title flags, successful output is a **schema 1 receipt** containing the
+unchanged `legacy_result`, requested/native/local naming metadata, verification,
+identity and probe effects. Native/session manifests remain **schema 2**. A
+private, exclusive title receipt is separate from the manifest. Alias publication
+follows confirmed target identity; neither aliases nor title receipts are
+published by a dry-run. Alias/receipt failure after publication returns exit 2
+with content-free `needs_reconcile` JSON on stderr: target ID, phase, manifest,
+root/output and a manual inspection action. Do not repeat the publication.
+Without title flags, legacy result JSON and manifests are unchanged.
+
+See [title contracts](target-titles.md) for identity and verification limits.
+
+## `proposal` — read-only review metadata
+
+`smigrate proposal <convert|import|transfer>` uses the same selectors/options as
+its direct counterpart and prints a **schema 1 proposal** without prompting.
+It prepares one artifact, projects only metadata, then discards the private
+handle at process exit. It never publishes a session, output, manifest, alias or
+title receipt. Official native read/list/export probes may initialize normal
+cache/store/WAL metadata; the proposal's `effects` declare those runtime effects.
+
+```sh
+smigrate proposal convert SOURCE --to codex --output /absolute/out.jsonl
+smigrate proposal transfer --catalog-id CATALOG_ID --to opencode \
+  --target-cli /path/to/opencode --cwd /absolute/project --target-title "Review 🧪"
+```
+
+The proposal includes root-qualified source identity, counts/read scope,
+destination/schema/client version, CWD/model/provider, reserved UUID/native ID,
+artifact SHA256, losses/warnings, title intent and preflight/effects. It contains
+no conversation bodies, tool arguments/results, media bytes or full environment.
+Names and paths are still private metadata; protect any saved JSON accordingly.
+
+Saved proposal JSON is informational. There is no `--apply`, confirm or
+cross-process replay. Use the TUI or the core API in one process to publish the
+same prepared artifact. Direct `convert`/`import`/`transfer` commands continue to
+execute normally; they do not apply a previous proposal JSON.

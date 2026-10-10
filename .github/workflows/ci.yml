@@ -59,6 +59,15 @@ jobs:
           python-version: "3.13"
           enable-cache: true
       - run: uv sync --locked --extra tui
+      - name: Install bubblewrap
+        run: |
+          if ! command -v bwrap >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install --yes bubblewrap
+          fi
+          if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Install designated stock OpenCode
         run: ./scripts/install-native-test-clis.sh /tmp/session-migrate-tui-native opencode-v2
       - name: Real keyboard/core migration gates (skips fail)
