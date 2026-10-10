@@ -8,6 +8,7 @@ store. The exact-client CI selector rejects skips from this module.
 from __future__ import annotations
 
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -20,6 +21,7 @@ from pathlib import Path
 
 import pytest
 from native_corpus.route_oracle import expected_semantic_signature, normalize_source_session
+from native_sandbox import PRIVATE_ROOTS, private_root_masks
 
 from session_migrate.conversion import ConversionOptions, convert_session
 from session_migrate.formats import claude, opencode
@@ -93,16 +95,7 @@ def native_client(tmp_path: Path) -> _NativeClient:
         "--ro-bind",
         "/",
         "/",
-        "--tmpfs",
-        "/home",
-        "--tmpfs",
-        "/storage",
-        "--tmpfs",
-        "/root",
-        "--tmpfs",
-        "/run",
-        "--tmpfs",
-        "/tmp",
+        *private_root_masks(),
         "--bind",
         str(tmp_path),
         str(tmp_path),
@@ -144,6 +137,106 @@ def native_client(tmp_path: Path) -> _NativeClient:
     if version not in _STOCK_SHA256 or _STOCK_SHA256[version] != digest:
         pytest.fail("native title version/checksum mismatch", pytrace=False)
     return _NativeClient(version, digest, run)
+
+
+def test_offline_private_root_masks_handle_absent_storage_in_readonly_root(tmp_path: Path):
+    if not os.environ.get("SESSION_MIGRATE_TEST_OPENCODE_V2"):
+        pytest.skip("explicit native gate requires SESSION_MIGRATE_TEST_OPENCODE_V2")
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        pytest.skip("bubblewrap is required for the offline sandbox regression")
+    root = tmp_path / "synthetic-root"
+    root.mkdir(mode=0o700)
+    for name in (*PRIVATE_ROOTS, "/usr", "/bin", "/lib", "/lib64", "/proc", "/dev"):
+        if name != "/storage":
+            directory = root / name.lstrip("/")
+            directory.mkdir(mode=0o700, exist_ok=True)
+            if name in PRIVATE_ROOTS:
+                (directory / "synthetic-private-marker").write_text("synthetic-only")
+    assert not (root / "storage").exists()
+    assert private_root_masks(root) == [
+        argument for name in PRIVATE_ROOTS if name != "/storage" for argument in ("--tmpfs", name)
+    ]
+    # The host's private directories are never bound: only this synthetic root
+    # and public runtime binaries/libraries are reachable in either probe.
+    base = [
+        bwrap,
+        "--die-with-parent",
+        "--unshare-net",
+        "--unshare-pid",
+        "--ro-bind",
+        str(root),
+        "/",
+    ]
+    for name in ("/usr", "/bin", "/lib", "/lib64"):
+        if Path(name).exists():
+            base.extend(("--ro-bind", name, name))
+    base.extend(("--proc", "/proc", "--dev", "/dev", "--chdir", "/"))
+    script = (
+        "import os; "
+        "assert not os.path.lexists('/storage'); "
+        "assert all(not os.path.exists(p + '/synthetic-private-marker') "
+        "for p in ('/home', '/root', '/run', '/tmp'))"
+    )
+    suffix = ["--", "/usr/bin/python3", "-I", "-S", "-c", script]
+
+    def probe(masks: list[str]):
+        return subprocess.run(
+            base + masks + suffix,
+            cwd=tmp_path,
+            env={"PATH": os.defpath, "LANG": "C.UTF-8"},
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+
+    original = probe([argument for name in PRIVATE_ROOTS for argument in ("--tmpfs", name)])
+    assert original.returncode == 1
+    assert b"Read-only file system" in original.stderr
+    fixed = probe(private_root_masks(root))
+    assert fixed.returncode == 0, "offline synthetic-root sandbox failed"
+    assert fixed.stdout == b"" and fixed.stderr == b""
+    # Existing host roots retain their masks; this is inspection, never a probe
+    # that drops /storage from a namespace where it actually exists.
+    assert private_root_masks() == [
+        argument
+        for name in PRIVATE_ROOTS
+        if os.path.lexists(name)
+        for argument in ("--tmpfs", name)
+    ]
+
+
+@pytest.mark.parametrize("error_number", [errno.EACCES, errno.EIO])
+def test_private_root_presence_failure_stops_before_native_command(
+    tmp_path: Path, monkeypatch, error_number: int
+):
+    root = tmp_path / "synthetic-root"
+    root.mkdir(mode=0o700)
+    # lstat must preserve a mask even for a dangling private-root symlink.
+    (root / "storage").symlink_to("synthetic-missing-root", target_is_directory=True)
+    assert private_root_masks(root) == ["--tmpfs", "/storage"]
+    original_lstat = Path.lstat
+    invocations = []
+
+    def lstat(path, *args, **kwargs):
+        if path == root / "storage":
+            raise OSError(error_number, "SYNTHETIC_PRIVATE_EXCEPTION_BODY")
+        return original_lstat(path, *args, **kwargs)
+
+    def run(*args, **kwargs):
+        invocations.append(args)
+        pytest.fail("native invocation after unverified private root")
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(
+        RuntimeError, match="^private-root presence could not be verified$"
+    ) as failure:
+        command = ["synthetic-sandbox", *private_root_masks(root), "--", "synthetic-native"]
+        subprocess.run(command)
+    assert not invocations
+    assert "SYNTHETIC_PRIVATE_EXCEPTION_BODY" not in str(failure.value)
+    assert failure.value.__suppress_context__
 
 
 def _portable(session: Session):

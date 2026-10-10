@@ -16,6 +16,7 @@ import pytest
 
 pytest.importorskip("textual", reason="native TUI gate requires the optional tui extra")
 
+from native_sandbox import private_root_masks
 from textual.widgets import Button, Input, OptionList, Select
 
 from session_migrate.catalog import Catalog
@@ -340,16 +341,7 @@ def title_stock(tmp_path):
         "--ro-bind",
         "/",
         "/",
-        "--tmpfs",
-        "/home",
-        "--tmpfs",
-        "/storage",
-        "--tmpfs",
-        "/root",
-        "--tmpfs",
-        "/run",
-        "--tmpfs",
-        "/tmp",
+        *private_root_masks(),
         "--bind",
         str(tmp_path),
         str(tmp_path),
