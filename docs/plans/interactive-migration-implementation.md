@@ -1,14 +1,14 @@
 # Plano de implementação — evolução do SessionMigrate
 
-Status: revisado e autorizado para publicação. Revisão 1, 09/10/2026.
-Implementação ainda não iniciada.
+Status: implementação em andamento. Spec/plano revisão 1, 09/10/2026; progresso atualizado em 10/10/2026.
+F2A integrada em `next`; F2B é o marco atual. Os demais marcos seguem os gates abaixo.
 
 Fonte normativa: [spec](../specs/interactive-migration.md), revisão 1.
 Base de código: commit `662976e`. A fase 1 não integra este plano.
-Nenhuma tarefa de implementação abaixo foi executada nesta entrega documental.
+As checkboxes abaixo definem o plano; o todo registra execução e evidências por marco.
 
 Progresso versionado:
-`/storage/Agents/AgentZero/.ai-data/todos/2026-10/todo-session-migrate-evolution-spec-plan-091026.md`.
+`/storage/Agents/AgentZero/.ai-data/todos/2026-10/todo-session-migrate-evolution-101026.md`.
 Antes de executar, adicionar os itens de cada marco ao todo, com responsável,
 escopo e evidência. Checkboxes deste plano são um modelo de execução; o todo é
 a fonte de progresso e deve apontar a versão aprovada destes documentos.

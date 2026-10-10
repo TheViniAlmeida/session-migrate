@@ -1417,3 +1417,32 @@ def test_busy_oversized_and_unavailable_root_states_are_retained(
         assert catalog.list_sessions(include_missing=True, limit=10)
         assert all(entry.status != "missing" for entry in catalog.list_sessions(limit=10))
         assert catalog.roots()[0].id == root.id
+
+
+def test_exact_root_filter_precedes_pagination_without_changing_legacy_json(tmp_path):
+    first, second = tmp_path / "one", tmp_path / "two"
+    _write_jsonl(
+        first / "projects/-synthetic" / f"{CLAUDE_ID}.jsonl",
+        _claude_records(CLAUDE_ID, "First root"),
+    )
+    _write_jsonl(
+        second / "projects/-synthetic" / f"{CLAUDE_ID}.jsonl",
+        _claude_records(CLAUDE_ID, "Second root"),
+    )
+    with _catalog(tmp_path) as catalog:
+        root = catalog.add_root(AgentFormat.CLAUDE, first)
+        catalog.add_root(AgentFormat.CLAUDE, second)
+        catalog.refresh(include_auto=False)
+        legacy = catalog.list_sessions(include_paths=True)
+        filtered = catalog.list_sessions(root_id=root.id, limit=1, include_paths=True)
+        assert len(filtered) == 1
+        assert filtered[0].title == "First root"
+        assert filtered[0].duplicate
+        assert catalog.list_sessions(root_id=root.id, offset=1) == []
+        assert set(filtered[0].to_dict()) == set(legacy[0].to_dict())
+        assert "root_id" not in filtered[0].to_dict()
+        with pytest.raises(SessionMigrateError, match="not found"):
+            catalog.list_sessions(root_id=9999)
+        for invalid in (0, -1, True, "1"):
+            with pytest.raises(SessionMigrateError, match="positive integer"):
+                catalog.list_sessions(root_id=invalid)

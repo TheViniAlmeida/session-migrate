@@ -209,32 +209,41 @@ def run_operation(
     *,
     environ: Mapping[str, str] | None = None,
     progress: ProgressCallback | None = None,
+    source_environ: Mapping[str, str] | None = None,
 ) -> OperationResult:
-    """Snapshot the environment once and use existing validated adapters."""
+    """Snapshot target/source environments independently and use validated adapters.
+
+    Omitted source_environ preserves the legacy single-environment contract.
+    """
 
     values = dict(os.environ if environ is None else environ)
     if environ is None and not values.get("HOME"):
         values["HOME"] = str(Path.home())
+    source_values = dict(values if source_environ is None else source_environ)
+    source_fields = {"path", "source_home", "source_cwd", "source_cli", "catalog"}
     paths = {
-        field.name: expand_environment_path(value, values)
+        field.name: expand_environment_path(
+            value, source_values if field.name in source_fields else values
+        )
         for field in fields(request)
         if isinstance(value := getattr(request, field.name), Path)
     }
     request = replace(request, **paths)
-    for key in (
-        "OPENCODE_BIN",
-        "KILO_BIN",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "SESSION_MIGRATE_CATALOG",
-    ):
-        if values.get(key):
-            values[key] = str(expand_environment_path(Path(values[key]), values))
-    # Explicit temp roots avoid tempfile's process-wide, cached environment.
-    values["TMPDIR"] = str(_temporary_root(values))
+    for selected in (values, source_values):
+        for key in (
+            "OPENCODE_BIN",
+            "KILO_BIN",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "SESSION_MIGRATE_CATALOG",
+        ):
+            if selected.get(key):
+                selected[key] = str(expand_environment_path(Path(selected[key]), selected))
+        # Explicit temp roots avoid tempfile's process-wide, cached environment.
+        selected["TMPDIR"] = str(_temporary_root(selected))
     _notify(progress, ProgressStage.LOADING)
     try:
-        result = _execute(request, values, progress)
+        result = _execute(request, values, progress, source_values)
     except NativeImportPartialError:
         _notify(progress, ProgressStage.NEEDS_RECONCILE)
         raise
@@ -249,6 +258,7 @@ def _execute(
     request: OperationRequest,
     environ: Mapping[str, str],
     progress: ProgressCallback | None,
+    source_environ: Mapping[str, str],
 ) -> OperationResult:
     if request.command != OperationKind.TRANSFER and (
         request.path is None or request.target_format is None
@@ -269,7 +279,7 @@ def _execute(
                 raise SessionMigrateError(
                     "--source-home/--source-cwd do not apply with catalog selection"
                 )
-            with Catalog(request.catalog or _catalog_default(environ)) as catalog:
+            with Catalog(request.catalog or _catalog_default(source_environ)) as catalog:
                 catalog_id = request.catalog_id
                 if request.title:
                     title = request.title.strip()
@@ -309,7 +319,7 @@ def _execute(
             requested_source_id = entry.session_id
             if source_format in {AgentFormat.OPENCODE, AgentFormat.KILO}:
                 virtual_source_environ = _catalog_virtual_source_environment(
-                    source_format, source_reference.root, environ
+                    source_format, source_reference.root, source_environ
                 )
         else:
             if not request.source_id or not request.source_format:
@@ -331,11 +341,11 @@ def _execute(
                     else load_kilo_session
                 )
                 session = loader(
-                    requested_source_id, source_cli=request.source_cli, environ=environ
+                    requested_source_id, source_cli=request.source_cli, environ=source_environ
                 )
             elif source_format in _SHARED_DATABASE_SOURCES:
                 source_home = request.source_home or default_target_home(
-                    source_format, environ=environ
+                    source_format, environ=source_environ
                 )
                 session = _load_shared_database_source(
                     source_format,
@@ -344,7 +354,7 @@ def _execute(
                 )
             else:
                 source_home = request.source_home or default_target_home(
-                    source_format, environ=environ
+                    source_format, environ=source_environ
                 )
                 source_path = locate_session(
                     source_format,
@@ -352,11 +362,11 @@ def _execute(
                     source_home,
                     cwd=request.source_cwd,
                     user_home=(
-                        environment_home(environ)
+                        environment_home(source_environ)
                         if source_format == AgentFormat.OMP and request.source_cwd is not None
-                        else _optional_home(environ)
+                        else _optional_home(source_environ)
                     ),
-                    temp_root=_temporary_root(environ),
+                    temp_root=_temporary_root(source_environ),
                 )
         if request.source_cli and source_format not in {
             AgentFormat.OPENCODE,
@@ -377,7 +387,7 @@ def _execute(
                 session = loader(
                     requested_source_id,
                     source_cli=request.source_cli,
-                    environ=virtual_source_environ or environ,
+                    environ=virtual_source_environ or source_environ,
                 )
             elif source_format in _SHARED_DATABASE_SOURCES:
                 if not requested_source_id:
