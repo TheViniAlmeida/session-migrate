@@ -1,6 +1,13 @@
 """User-facing failures with content-safe messages."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from session_migrate.model import TargetFormat
+
+if TYPE_CHECKING:
+    from session_migrate.lineage import ReconcileReceipt
 
 
 class SessionMigrateError(Exception):
@@ -69,3 +76,20 @@ class OperationCancelledError(SessionMigrateError):
 
 class SourceReadLimitError(SessionMigrateError):
     """A source cannot be read within the requested interactive byte budget."""
+
+
+class OperationNeedsReconcileError(SessionMigrateError):
+    """Local or native uncertainty with a bounded, content-free receipt."""
+
+    needs_reconcile = True
+
+    def __init__(self, receipt: ReconcileReceipt) -> None:
+        from session_migrate.lineage import MAX_RECEIPT_BYTES, ReconcileReceipt, _validated
+
+        self.receipt = _validated(ReconcileReceipt, receipt, MAX_RECEIPT_BYTES)
+        self.operation_id = self.receipt.operation_id
+        self.session_id = self.receipt.target_id
+        self.native_state = self.receipt.native_state
+        super().__init__(
+            "Operation requires reconciliation; inspect its reserved target and evidence."
+        )
