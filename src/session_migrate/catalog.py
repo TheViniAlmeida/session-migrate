@@ -1752,6 +1752,7 @@ class Catalog:
         include_paths: bool = False,
         include_missing: bool = False,
         agent_format: AgentFormat | None = None,
+        root_id: int | None = None,
         statuses: Sequence[str] = (),
         kinds: Sequence[str] = (),
         lifecycles: Sequence[str] = (),
@@ -1766,6 +1767,13 @@ class Catalog:
             raise SessionMigrateError("catalog offset cannot be negative")
         where: list[str] = []
         parameters: list[Any] = []
+        if root_id is not None:
+            if isinstance(root_id, bool) or not isinstance(root_id, int) or root_id < 1:
+                raise SessionMigrateError("catalog root ID must be a positive integer")
+            if not any(root.id == root_id for root in self.roots()):
+                raise SessionMigrateError("catalog root ID was not found")
+            where.append("s.root_id = ?")
+            parameters.append(root_id)
         if not include_missing:
             where.append("s.status != 'missing'")
         if agent_format:
