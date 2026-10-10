@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import stat
@@ -36,6 +37,59 @@ class FileSnapshot:
     inode: int
     size: int
     modified_ns: int
+
+
+def read_jsonl_bytes(path: Path, *, max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES) -> bytes:
+    """Read a legacy path once, retaining its existing symlink behavior."""
+
+    try:
+        with path.open("rb") as stream:
+            if os.fstat(stream.fileno()).st_size > max_total_bytes:
+                raise JsonlError(
+                    f"session file exceeds the {max_total_bytes}-byte total safety limit"
+                )
+            data = stream.read(max_total_bytes + 1)
+    except OSError as exc:
+        raise JsonlError(f"cannot open session file {path}: {exc.strerror or exc}") from exc
+    if len(data) > max_total_bytes:
+        raise JsonlError(f"session file exceeds the {max_total_bytes}-byte total safety limit")
+    return data
+
+
+def iter_jsonl_bytes(
+    data: bytes,
+    *,
+    max_record_bytes: int = DEFAULT_MAX_RECORD_BYTES,
+    max_total_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
+    max_records: int = DEFAULT_MAX_RECORDS,
+) -> Iterator[JsonlRecord]:
+    """Decode captured bytes with the same physical locations and rules as paths."""
+
+    if len(data) > max_total_bytes:
+        raise JsonlError(f"session file exceeds the {max_total_bytes}-byte total safety limit")
+    stream = io.BytesIO(data)
+    record_index = 0
+    line_number = 0
+    while raw_line := stream.readline(max_record_bytes + 1):
+        line_number += 1
+        if len(raw_line) > max_record_bytes:
+            raise JsonlError(
+                f"session record at line {line_number} exceeds "
+                f"the {max_record_bytes}-byte safety limit"
+            )
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        try:
+            value = json.loads(stripped, parse_constant=_reject_json_constant)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            raise JsonlError(f"invalid JSON session record at line {line_number}") from exc
+        if not isinstance(value, dict):
+            raise JsonlError(f"session record at line {line_number} is not a JSON object")
+        if record_index >= max_records:
+            raise JsonlError(f"session file exceeds the {max_records}-record safety limit")
+        yield JsonlRecord(index=record_index, line_number=line_number, value=value)
+        record_index += 1
 
 
 def iter_jsonl(

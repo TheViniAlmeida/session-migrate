@@ -2,7 +2,8 @@
 
 Status: revisado e autorizado para publicação. Revisão 1, 09/10/2026.
 Progresso em 10/10/2026: F2 integrada, hotfix de publicação concluído;
-F3 em implementação. Esta spec continua descrevendo também fases futuras.
+F3 integrada e instalada; F4A integrada como API privada do ledger.
+F4B/C seguem em andamento. Esta spec continua descrevendo também fases futuras.
 
 Base: fork no commit `662976e`, com OpenCode 2.0 e contrato legado preservado.
 Escopo: fases 2–6 do pedido. A instalação da versão corrigida é uma entrega

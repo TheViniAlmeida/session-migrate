@@ -1,8 +1,10 @@
 # Private lineage storage
 
-The first lineage component is a programmatic storage API. It does not yet add
-lineage commands, canonicalization, automatic continuity, native update, or a
-web dashboard. Existing CLI/TUI transfers retain their current behavior.
+The lineage components provide programmatic storage, pure semantic hashing and
+captured-byte parsers. Operation integration, lineage commands, automatic
+continuity, native update and the web dashboard remain future milestones.
+Existing CLI/TUI transfers retain their current behavior. See
+[checkpoint primitives](lineage-checkpoints.md) for the new versioned witnesses.
 
 `LineageStore.create_new(path)` creates a fresh schema1 store.
 `open_existing(path)` validates an existing store; `inspect_existing(path)`
@@ -46,11 +48,15 @@ or interrupted. Reconciliation receipts report `native_not_started`,
 Planned references are not presented as verified files. Native invocation and
 observation remain responsibilities of the upcoming operation integration.
 
-Limits are explicit:64MiB per image,1024 unit/tool-link hashes per collection,
+Limits are explicit:64MiB per image,1024 legacy unit/tool-link hashes per collection,
 128KiB per checkpoint and a reserved finalization budget for pending operations.
 Growth and reservations are enforced under the store lock; uncertain operations
 keep their reservation. No history or witness is truncated to fit. Persistence
 costs O(image size), including free pages; no vacuum or compaction discards data.
+V2 checkpoints store complete sequence counts and chain roots at constant size;
+they do not truncate long conversations or treat bounded diagnostic arrays as
+authority. V1 records retain their original encoding and receipt hashes. SQL
+schema1 remains unchanged, with no automatic migration of an existing ledger.
 A logical reservation cannot prevent a physical disk failure.
 
 Tests cover fault boundaries, namespace/lock substitution, concurrent processes,

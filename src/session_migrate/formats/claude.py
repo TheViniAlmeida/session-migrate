@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import uuid
 from collections import Counter, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ from session_migrate.formats.common import (
     string,
     valid_rfc3339,
 )
-from session_migrate.jsonl import JsonlRecord, encode_jsonl, file_sha256, iter_jsonl
+from session_migrate.jsonl import JsonlRecord, encode_jsonl, iter_jsonl_bytes, read_jsonl_bytes
 from session_migrate.model import AgentFormat, Event, EventKind, Provenance, Role, Session
 
 PINNED_CLAUDE_VERSION = "2.1.209"
@@ -27,7 +28,26 @@ TITLE_TYPES = {"custom-title": "customTitle", "ai-title": "aiTitle"}
 
 
 def parse(path: Path) -> Session:
-    records = list(iter_jsonl(path))
+    source_path = path.resolve()
+    return parse_bytes(read_jsonl_bytes(path), source_path)
+
+
+def parse_bytes(data: bytes, source_path: Path) -> Session:
+    """Parse one captured authority without resolving or rereading its source path."""
+
+    return parse_records(
+        list(iter_jsonl_bytes(data)),
+        source_path=source_path,
+        source_sha256=hashlib.sha256(data).hexdigest(),
+    )
+
+
+def parse_records(
+    records: Sequence[JsonlRecord], *, source_path: Path, source_sha256: str
+) -> Session:
+    """Project records whose digest and location were bound by the capture caller."""
+
+    records = list(records)
     selected_records = _active_conversation_records(records)
     selected = {record.index for record in selected_records}
     selected_session_ids = {
@@ -143,8 +163,8 @@ def parse(path: Path) -> Session:
 
     return Session(
         source_format=AgentFormat.CLAUDE,
-        source_path=path.resolve(),
-        source_sha256=file_sha256(path),
+        source_path=source_path,
+        source_sha256=source_sha256,
         session_id=session_id,
         cwd=Path(cwd) if cwd else None,
         started_at=started_at,
