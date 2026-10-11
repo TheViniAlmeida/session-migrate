@@ -79,6 +79,8 @@ selection, transfer reviews, usage observations and explicitly enabled handoff,
 return and recovery actions. Native in-place update remains unavailable pending
 its concurrency and recovery proofs.
 
+See the [fork changelog](changelog.md) for dated deliveries and validation details.
+
 Or find an older session by its native title/name first:
 
 ```bash
