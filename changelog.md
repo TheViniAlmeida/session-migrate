@@ -13,6 +13,23 @@ publicação no PyPI nem atualização automática das instalações existentes.
 - Adicionado este histórico datado das melhorias do fork, com referências às
   PRs, versões, validações e limitações.
 - Adicionado link para este arquivo no README.
+- Instalada e validada a `0.12.0.dev9` com extras `tui` e `web`, primeiro no
+  usuário operador em ambiente isolado e depois na instalação compartilhada.
+- Instalação do operador: 16 distribuições e 83 arquivos conferidos,
+  **197 testes passaram sem skips**, além do fluxo de navegador privado.
+- Instalação compartilhada: **sete contas validadas**, com 42 verificações de
+  CLI, sete imports de core/TUI/web, `pip check`, migração e recuperação
+  sintéticas, TUI por teclado e fluxo de navegador. Os nove runtimes anteriores
+  e o pip compartilhado permaneceram intactos; somente seis dependências web
+  foram acrescentadas.
+- Corrigida a validação dos executáveis internos declarados pelos wheels
+  `idna` e `uvicorn`: caminhos relativos do RECORD passaram a ser normalizados.
+  A etapa parcial foi concluída com backup do estado real e sem reinstalar
+  pacotes, mudar suas permissões ou apagar o journal da tentativa anterior.
+  Esses executáveis internos não foram publicados como comandos globais extras.
+- Backups restaurados para conferência, revisão independente pós-instalação
+  aprovada e servidores de teste encerrados. Nenhum perfil, autenticação ou
+  conversa real dos harnesses foi usado nos testes.
 
 ## 10/10/2026 — integração das melhorias
 
