@@ -72,8 +72,15 @@ See the [terminal interface](docs/terminal-ui.md) for installation, profile root
 and destination titles. Real imports and transfers write private
 [migration records](docs/migration-records.md) and verify acknowledged
 publication. An uncertain result requires inspection before retrying; it does
-not automatically repeat the import. Native in-place update and the optional
-web dashboard remain roadmap features.
+not automatically repeat the import.
+
+Use [offline handoff and return-new](docs/handoff-return-new.md) to review a
+literal USER handoff, transfer its accepted document, or return current work to
+a new session linked to a completed parent. The terminal picker also offers
+**Handoff / return-new** with Ctrl+H. Full return is available for the proved
+Claude/Codex clients; OpenCode 2.0.22/2.0.23 supports the derived USER handoff
+with explicitly partial context fidelity. Native in-place update and the
+optional web dashboard remain roadmap features.
 
 Or find an older session by its native title/name first:
 

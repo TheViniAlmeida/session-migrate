@@ -188,8 +188,31 @@ def serialize(
 ) -> tuple[bytes, dict[str, int]]:
     """Serialize the portable subset accepted by Claude Code 2.1.209."""
 
-    fallback_timestamp = valid_rfc3339(timestamp) or valid_rfc3339(session.started_at) or _utc_now()
-    target_model = model or session.model or "unknown"
+    return serialize_events(
+        session.events,
+        session_id=session_id,
+        cwd=cwd,
+        cli_version=cli_version,
+        model=model or session.model,
+        timestamp=valid_rfc3339(timestamp) or valid_rfc3339(session.started_at) or _utc_now(),
+        title=session.title,
+    )
+
+
+def serialize_events(
+    events: Sequence[Event],
+    *,
+    session_id: str,
+    cwd: Path,
+    cli_version: str = PINNED_CLAUDE_VERSION,
+    model: str | None = None,
+    timestamp: str | None = None,
+    title: str | None = None,
+) -> tuple[bytes, dict[str, int]]:
+    """Emit a portable timeline without requiring a native source Session."""
+
+    fallback_timestamp = valid_rfc3339(timestamp) or _utc_now()
+    target_model = model or "unknown"
     emitted: list[dict[str, Any]] = []
     dropped: Counter[str] = Counter()
     parent_uuid: str | None = None
@@ -264,7 +287,7 @@ def serialize(
         pending_timestamp = None
         pending_source_record = None
 
-    for event in session.events:
+    for event in events:
         target_role: Role | None = None
         block: dict[str, Any] | None = None
         if (
@@ -360,11 +383,11 @@ def serialize(
         pending_blocks.append(block)
     flush()
 
-    if session.title:
+    if title:
         emitted.append(
             {
                 "type": "custom-title",
-                "customTitle": session.title,
+                "customTitle": title,
                 "sessionId": session_id,
             }
         )

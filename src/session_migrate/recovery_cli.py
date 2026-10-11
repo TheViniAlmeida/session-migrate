@@ -129,6 +129,11 @@ def add_action_commands(subparsers, operation_arguments):
             help="original manifest for same-operation title finalization",
         )
         parser.add_argument(
+            "--handoff-document",
+            type=_absolute_path,
+            help="private accepted USER document for genuine derived reconciliation; no replay",
+        )
+        parser.add_argument(
             "--profile-operation",
             action="store_true",
             help="reproduce the original Profile API transfer binding",
@@ -366,6 +371,7 @@ def _reconcile(args, environment, state_home, operation_request):
             source_profile,
             target_profile,
             args.manifest_file,
+            handoff_document=args.handoff_document,
         )
         proposal = prepare_reconciliation(
             args.operation_id,

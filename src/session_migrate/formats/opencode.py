@@ -12,7 +12,7 @@ import math
 import re
 import uuid
 from collections import Counter, defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,11 +85,42 @@ def serialize(
 ) -> tuple[bytes, dict[str, int]]:
     """Serialize portable events as an official OpenCode import bundle."""
 
+    return serialize_events(
+        session.events,
+        session_id=session_id,
+        cwd=cwd,
+        cli_version=cli_version,
+        provider_id=provider_id,
+        model_id=model_id or session.model,
+        agent=agent,
+        timestamp=valid_rfc3339(timestamp) or valid_rfc3339(session.started_at) or _utc_now(),
+        title=title or session.title,
+        slug=slug,
+        legacy_schema=legacy_schema,
+    )
+
+
+def serialize_events(
+    events: Sequence[Event],
+    *,
+    session_id: str,
+    cwd: Path,
+    cli_version: str = PINNED_OPENCODE_VERSION,
+    provider_id: str = "anthropic",
+    model_id: str | None = None,
+    agent: str = "build",
+    timestamp: str | None = None,
+    title: str | None = None,
+    slug: str | None = None,
+    legacy_schema: bool = False,
+) -> tuple[bytes, dict[str, int]]:
+    """Emit events through the official export shape, including the v2 wrapper."""
+
     if not session_id.startswith("ses_"):
         raise SessionMigrateError("OpenCode session IDs must start with 'ses_'")
-    fallback_timestamp = valid_rfc3339(timestamp) or valid_rfc3339(session.started_at) or _utc_now()
+    fallback_timestamp = valid_rfc3339(timestamp) or _utc_now()
     fallback_ms = _timestamp_ms(fallback_timestamp)
-    target_model = model_id or session.model or "unknown"
+    target_model = model_id or "unknown"
     dropped: Counter[str] = Counter()
     messages: list[dict[str, Any]] = []
     latest_user_id: str | None = None
@@ -251,7 +282,7 @@ def serialize(
         pending_timestamp = pending_timestamp or event_timestamp
         pending_parts.append(part)
 
-    for event in session.events:
+    for event in events:
         if (
             event.kind == EventKind.MESSAGE
             and event.text
@@ -431,7 +462,7 @@ def serialize(
             "slug": slug or f"session-migrate-{session_id.removeprefix('ses_')[:12]}",
             "projectID": "global",
             "directory": str(cwd),
-            "title": title or session.title or "Imported session",
+            "title": title or "Imported session",
             "version": cli_version,
             "time": {"created": fallback_ms, "updated": updated_ms},
         },
