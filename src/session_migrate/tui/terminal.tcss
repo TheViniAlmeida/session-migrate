@@ -16,3 +16,7 @@ Button { margin-right: 1; }
 #operations-content { height: 1fr; }
 #operations-list { height: 10; min-height: 4; margin-bottom: 1; }
 #operation-detail { height: auto; }
+#handoff-status { height: auto; min-height: 2; padding: 0 1; }
+#handoff-form { height: 1fr; }
+#handoff-document { height: 16; min-height: 8; margin-bottom: 1; }
+#handoff-metadata { height: auto; margin: 1 0; }

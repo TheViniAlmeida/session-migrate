@@ -72,8 +72,12 @@ See the [terminal interface](docs/terminal-ui.md) for installation, profile root
 and destination titles. Real imports and transfers write private
 [migration records](docs/migration-records.md) and verify acknowledged
 publication. An uncertain result requires inspection before retrying; it does
-not automatically repeat the import. Native in-place update and the optional
-web dashboard remain roadmap features.
+not automatically repeat the import. Use the [handoff and return workflow](docs/handoff-return-new.md)
+to edit a handoff or carry your current work back into a new native session.
+The optional [local web dashboard](docs/web-dashboard.md) adds profile/session
+selection, transfer reviews, usage observations and explicitly enabled handoff,
+return and recovery actions. Native in-place update remains unavailable pending
+its concurrency and recovery proofs.
 
 Or find an older session by its native title/name first:
 

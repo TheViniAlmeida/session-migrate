@@ -12,7 +12,7 @@ from session_migrate.formats.claude import project_directory_name
 
 
 def test_parser_exposes_version() -> None:
-    assert __version__ == "0.12.0.dev7"
+    assert __version__ == "0.12.0.dev9"
     assert build_parser().prog == "session-migrate"
 
 

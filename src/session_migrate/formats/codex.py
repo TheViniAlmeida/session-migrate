@@ -444,7 +444,30 @@ def serialize(
 ) -> tuple[bytes, dict[str, int]]:
     """Serialize the model-visible subset accepted by Codex CLI 0.144.4."""
 
-    fallback_timestamp = valid_rfc3339(timestamp) or valid_rfc3339(session.started_at) or _utc_now()
+    return serialize_events(
+        session.events,
+        session_id=session_id,
+        cwd=cwd,
+        cli_version=cli_version,
+        model_provider=model_provider,
+        timestamp=valid_rfc3339(timestamp) or valid_rfc3339(session.started_at) or _utc_now(),
+        title=session.title,
+    )
+
+
+def serialize_events(
+    events: Sequence[Event],
+    *,
+    session_id: str,
+    cwd: Path,
+    cli_version: str = PINNED_CODEX_VERSION,
+    model_provider: str = "openai",
+    timestamp: str | None = None,
+    title: str | None = None,
+) -> tuple[bytes, dict[str, int]]:
+    """Emit a portable timeline without requiring a native source Session."""
+
+    fallback_timestamp = valid_rfc3339(timestamp) or _utc_now()
     records: list[dict[str, Any]] = [
         {
             "timestamp": fallback_timestamp,
@@ -466,7 +489,7 @@ def serialize(
     generated_tool_ids: deque[str] = deque()
     seen_tool_call_ids: set[str] = set()
     seen_tool_result_ids: set[str] = set()
-    for event in session.events:
+    for event in events:
         event_timestamp = valid_rfc3339(event.timestamp)
         if event.timestamp and not event_timestamp:
             dropped["timestamp:invalid"] += 1
@@ -602,7 +625,7 @@ def serialize(
                 dropped["compaction:boundary_metadata"] += 1
         else:
             dropped[_omission_key(event)] += 1
-    if session.title:
+    if title:
         dropped["session:title"] += 1
     return encode_jsonl(records), dict(sorted(dropped.items()))
 

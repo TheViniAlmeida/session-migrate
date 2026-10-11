@@ -380,8 +380,11 @@ def _public_options(
     target: Mapping[str, str],
     source: Mapping[str, str],
     profiles: Mapping[str, str],
+    *,
+    transformation=None,
+    return_link=None,
 ) -> dict[str, Any]:
-    return {
+    value = {
         "request": {
             item.name: str(value) if isinstance(value, Path) else value
             for item in fields(request)
@@ -391,6 +394,14 @@ def _public_options(
         "source_environment": {key: source[key] for key in _PUBLIC_ENVIRONMENT if key in source},
         "profiles": dict(profiles),
     }
+    if transformation is not None or return_link is not None:
+        from session_migrate.lineage import _encode
+
+        value["runtime_metadata"] = {
+            "transformation": json.loads(_encode(transformation)) if transformation else None,
+            "return_link": json.loads(_encode(return_link)) if return_link else None,
+        }
+    return value
 
 
 def _validate_title_request(request: OperationRequest) -> None:
@@ -646,6 +657,7 @@ class _PreparedState:
     last_source_capture: list[NativeSnapshot] = field(
         default_factory=list, repr=False, compare=False
     )
+    catalog_opener: Callable[[Path], Catalog] | None = None
 
 
 def _title_preflight(state: _PreparedState) -> tuple[TitleAliasStore | None, AliasIdentity | None]:
@@ -669,6 +681,10 @@ def _title_preflight(state: _PreparedState) -> tuple[TitleAliasStore | None, Ali
 
 
 def _read_prepared_source(state: _PreparedState) -> None:
+    if state.built.runtime_context is not None:
+        from session_migrate.handoff_operations import validate_runtime_context
+
+        validate_runtime_context(state.built.runtime_context, fresh=True)
     if state.check is not None:
         state.check()
     if _root_epoch(state.source_root) != state.source_epoch:
@@ -680,6 +696,8 @@ def _read_prepared_source(state: _PreparedState) -> None:
         state.max_source_bytes,
         expected_root=state.source_root,
         on_capture=captures.append if state.built.source_snapshot is not None else None,
+        catalog_opener=state.catalog_opener,
+        readonly_catalog=state.built.runtime_context is not None,
     )
     if root is not None and root.resolve() != state.source_root:
         raise SessionMigrateError("prepared source root changed; prepare again")
@@ -696,43 +714,60 @@ def _read_prepared_source(state: _PreparedState) -> None:
 
 def _artifact_fingerprint(built: _OperationBuild) -> str:
     artifact, source = built.artifact, built.artifact.source
-    return _digest(
-        {
-            "source": {
-                "format": source.source_format.value,
-                "path": str(source.source_path),
-                "sha256": source.source_sha256,
-                "session_id": source.session_id,
-                "cli_version": source.cli_version,
-                "cwd": str(source.cwd),
-                "started_at": source.started_at,
-                "title": source.title,
-                "model": source.model,
-                "model_provider": source.model_provider,
-                "records": source.raw_record_count,
-                "events": source.event_counts(),
-                "payload_fingerprint": _source_payload_fingerprint(source),
-            },
-            "target": {
-                "format": artifact.target_format.value,
-                "session_id": artifact.session_id,
-                "cli_version": artifact.target_cli_version,
-                "cwd": str(artifact.cwd),
-                "timestamp": artifact.timestamp,
-                "records": artifact.native_record_count,
-                "sha256": artifact.target_sha256,
-                "dropped": artifact.dropped,
-                "warnings": artifact.warnings,
-                "title_plan": artifact.title_plan.to_dict() if artifact.title_plan else None,
-            },
-            "paths": {
-                "output": str(built.output),
-                "manifest": str(built.manifest),
-                "home": str(built.home),
-                "source_root": str(built.source_root),
-            },
+    value = {
+        "source": {
+            "format": source.source_format.value,
+            "path": str(source.source_path),
+            "sha256": source.source_sha256,
+            "session_id": source.session_id,
+            "cli_version": source.cli_version,
+            "cwd": str(source.cwd),
+            "started_at": source.started_at,
+            "title": source.title,
+            "model": source.model,
+            "model_provider": source.model_provider,
+            "records": source.raw_record_count,
+            "events": source.event_counts(),
+            "payload_fingerprint": _source_payload_fingerprint(source),
+        },
+        "target": {
+            "format": artifact.target_format.value,
+            "session_id": artifact.session_id,
+            "cli_version": artifact.target_cli_version,
+            "cwd": str(artifact.cwd),
+            "timestamp": artifact.timestamp,
+            "records": artifact.native_record_count,
+            "sha256": artifact.target_sha256,
+            "dropped": artifact.dropped,
+            "warnings": artifact.warnings,
+            "title_plan": artifact.title_plan.to_dict() if artifact.title_plan else None,
+        },
+        "paths": {
+            "output": str(built.output),
+            "manifest": str(built.manifest),
+            "home": str(built.home),
+            "source_root": str(built.source_root),
+        },
+    }
+    if built.runtime_context is not None:
+        from session_migrate.handoff_operations import validate_runtime_context
+
+        validate_runtime_context(built.runtime_context)
+        from session_migrate.lineage import _encode
+
+        value["runtime_metadata"] = {
+            "transformation": json.loads(_encode(built.artifact.transformation))
+            if built.artifact.transformation
+            else None,
+            "input_identity": json.loads(_encode(built.runtime_context.derived_input.identity))
+            if built.runtime_context.derived_input
+            else None,
+            "original_authority": built.runtime_context.authority.authority_sha256,
+            "return_link": json.loads(_encode(built.runtime_context.return_link))
+            if built.runtime_context.return_link
+            else None,
         }
-    )
+    return _digest(value)
 
 
 def _source_payload_fingerprint(source: Session) -> str:
@@ -785,7 +820,12 @@ def _client_epoch(path: Path | None) -> tuple | None:
 
 def _verify_prepared_options(state: _PreparedState) -> None:
     if state.projection is not None:
-        from session_migrate.projections import validate_prepared
+        if state.built.artifact.transformation is not None:
+            from session_migrate.derived_projection import (
+                validate_derived_projection as validate_prepared,
+            )
+        else:
+            from session_migrate.projections import validate_prepared
 
         try:
             validate_prepared(state.projection)
@@ -817,6 +857,8 @@ def _verify_prepared_options(state: _PreparedState) -> None:
                 state.target_environment,
                 state.source_environment,
                 state.profiles,
+                transformation=state.built.artifact.transformation,
+                return_link=state.built.artifact.return_link,
             )
         )
         != state.options_fingerprint
@@ -855,6 +897,7 @@ def prepare_operation(
     max_source_bytes: int | None = None,
     profile_context: Mapping[str, str] | None = None,
     migration_state_home: Path | None = None,
+    catalog_opener: Callable[[Path], Catalog] | None = None,
 ) -> PreparedOperation:
     """Resolve and serialize once, then preflight without installing output/metadata."""
     token = cancellation or CancellationToken()
@@ -870,6 +913,7 @@ def prepare_operation(
             max_source_bytes=max_source_bytes,
             profile_context=profile_context,
             migration_state_home=migration_state_home,
+            catalog_opener=catalog_opener,
         )
     finally:
         token.close()
@@ -886,6 +930,8 @@ def _prepare_operation(
     max_source_bytes: int | None = None,
     profile_context: Mapping[str, str] | None = None,
     migration_state_home: Path | None = None,
+    catalog_opener: Callable[[Path], Catalog] | None = None,
+    runtime_context=None,
 ) -> PreparedOperation:
     """Resolve and serialize once, then preflight without installing output/metadata."""
     try:
@@ -916,7 +962,15 @@ def _prepare_operation(
         _notify(progress, ProgressStage.LOADING)
         request = replace(request, session_id=request.session_id or str(uuid.uuid4()), dry_run=True)
         built = _build_operation(
-            request, target, source, progress, token, max_source_bytes, observe_target=True
+            request,
+            target,
+            source,
+            progress,
+            token,
+            max_source_bytes,
+            observe_target=True,
+            catalog_opener=catalog_opener,
+            runtime_context=runtime_context,
         )
         if built.source_root is not None and built.artifact.source.source_format in {
             AgentFormat.OPENCODE,
@@ -928,7 +982,14 @@ def _prepare_operation(
         built = _pin_clients(built, target, source)
         root = _source_root(built, source)
         witness = _source_witness(built.artifact.source, root)
-        options = _public_options(built.request, target, source, context)
+        options = _public_options(
+            built.request,
+            target,
+            source,
+            context,
+            transformation=built.artifact.transformation,
+            return_link=built.artifact.return_link,
+        )
         destination_before = _target_root(built, target)
         root_existed_before_probe = (
             destination_before.exists() if destination_before is not None else None
@@ -968,6 +1029,7 @@ def _prepare_operation(
             max_source_bytes,
             state_home,
         )
+        state = replace(state, catalog_opener=catalog_opener)
         projection, projection_versions, projection_context = _prepare_lineage_projection(state)
         state = replace(
             state,
@@ -995,7 +1057,7 @@ def _prepare_operation(
             "schema_version": 1,
             "migration_version": __version__,
             "proposal_id": proposal_id,
-            "mode": "full",
+            "mode": "summary" if built.artifact.transformation is not None else "full",
             "operation": request.command.value,
             "source": {
                 "format": built.artifact.source.source_format.value,
@@ -1088,6 +1150,11 @@ def _prepare_operation(
                 "client_revisions": state.client_revisions,
             },
         }
+        if built.artifact.transformation is not None or built.artifact.return_link is not None:
+            from session_migrate.lineage import _encode
+
+            metadata["transformation"] = json.loads(_encode(built.artifact.transformation))
+            metadata["return_link"] = json.loads(_encode(built.artifact.return_link))
         return PreparedOperation(state, TransferProposal(proposal_id, _canonical_json(metadata)))
     except OperationCancelledError:
         _notify(progress, ProgressStage.CANCELLED)
@@ -1262,6 +1329,20 @@ def _client_identifier(value: str | None) -> str | None:
 
 
 def _prepare_lineage_projection(state: _PreparedState):
+    if state.built.artifact.transformation is not None:
+        from session_migrate.derived_projection import prepare_derived_projection
+
+        runtime = state.built.runtime_context
+        prepared = prepare_derived_projection(
+            runtime.authority,
+            runtime.derived_input,
+            runtime.transformation,
+            state.built.portable_emission,
+            artifact_path=state.built.output
+            if isinstance(state.built.output, Path)
+            else Path(state.built.manifest),
+        )
+        return prepared, prepared.versions, None
     if state.built.request.command == OperationKind.CONVERT or state.built.source_snapshot is None:
         return None, None, None
     from session_migrate.projection_policies import ProjectionPolicy
@@ -1361,6 +1442,11 @@ def _canonical_snapshot_sha(observation, versions):
 
 
 def _source_identity(state):
+    if state.built.runtime_context is not None:
+        from session_migrate.handoff_operations import validate_runtime_context
+
+        validate_runtime_context(state.built.runtime_context, fresh=True)
+        return state.built.runtime_context.authority.identity
     if state.built.request.command != OperationKind.TRANSFER or state.built.source_snapshot is None:
         return None
     session = state.built.artifact.source
@@ -1405,8 +1491,11 @@ def _ready_record(state, operation_id):
         source_observation is not None
         and _effective_source_coverage(source_observation) is not Coverage.UNKNOWN
     )
+    derived = state.built.artifact.transformation is not None
     target_known = (
-        target_observation is not None and projection.expectation_coverage is not Coverage.UNKNOWN
+        (target_observation is not None and projection.expectation_coverage is not Coverage.UNKNOWN)
+        if not derived
+        else True
     )
     source = SourceMetadata(
         _source_identity(state),
@@ -1415,12 +1504,16 @@ def _ready_record(state, operation_id):
         _canonical_snapshot_sha(source_observation, versions) if source_known else None,
         source_observation.source_prefix if source_known else None,
     )
-    expected = ProjectionExpectation(
-        _canonical_snapshot_sha(target_observation, versions) if target_known else None,
-        (),
-        projection.expectation_coverage if projection is not None else Coverage.UNKNOWN,
-        target_observation.source_prefix if target_known else None,
-        projection.expected.relation.chain_sha256 if target_known else None,
+    expected = (
+        projection.expectation
+        if derived
+        else ProjectionExpectation(
+            _canonical_snapshot_sha(target_observation, versions) if target_known else None,
+            (),
+            projection.expectation_coverage if projection is not None else Coverage.UNKNOWN,
+            target_observation.source_prefix if target_known else None,
+            projection.expected.relation.chain_sha256 if target_known else None,
+        )
     )
     return OperationRecord(
         operation_id,
@@ -1432,6 +1525,8 @@ def _ready_record(state, operation_id):
         versions,
         expected,
         _planned_references(state),
+        state.built.artifact.transformation,
+        state.built.artifact.return_link,
     )
 
 
@@ -1496,6 +1591,30 @@ def _completion_record(state, record, session):
     if identity is None:
         raise SessionMigrateError("Observed native namespace cannot be qualified.")
     source_cp = target_cp = None
+    if record.transformation is not None:
+        from session_migrate.derived_projection import verify_derived_projection
+
+        if snapshot is None or state.projection is None:
+            raise SessionMigrateError("Derived target observation is unavailable.")
+        proof, observed = verify_derived_projection(state.projection, snapshot)
+        source_observed = state.projection.source_observation
+        source_cp = _checkpoint(
+            source_observed,
+            record.source.identity,
+            record.source.artifact_sha256,
+            record.versions,
+            _effective_source_coverage(source_observed),
+        )
+        target_cp = _checkpoint(
+            observed,
+            identity,
+            snapshot.authority_sha256,
+            record.versions,
+            _effective_source_coverage(observed),
+        )
+        return CompletionRecord(
+            identity, state.artifact_sha256, source_cp, target_cp, _planned_references(state), proof
+        )
     if state.projection is not None:
         if snapshot is None:
             raise SessionMigrateError("Observed target capture is unavailable.")
@@ -1821,7 +1940,16 @@ def _quick_publication_guards(state):
 
 
 def _raise_reconcile(
-    state, operation_id, native_state, phase, reason, *, store=None, guard=None, session=None
+    state,
+    operation_id,
+    native_state,
+    phase,
+    reason,
+    *,
+    store=None,
+    guard=None,
+    session=None,
+    runtime_uncertain=False,
 ):
     try:
         references = _observed_references(state, session)
@@ -1840,7 +1968,113 @@ def _raise_reconcile(
     if store is not None and guard is not None:
         with suppress(Exception):
             receipt = store.needs_reconcile(receipt, guard)
+    if runtime_uncertain:
+        from session_migrate.handoff_operations import RuntimePersistenceUncertainError
+
+        raise RuntimePersistenceUncertainError(
+            receipt, target_namespace=_native_namespace(state)
+        ) from None
     raise OperationNeedsReconcileError(receipt, target_namespace=_native_namespace(state)) from None
+
+
+def _runtime_title_guard(state, record, title_identity, title_store, title, receipt_path):
+    if state.built.artifact.title_plan is None:
+        return ()
+    from session_migrate.reconciliation import _read_document
+
+    plan = state.built.artifact.title_plan
+    references = ()
+    if plan.policy is TitlePolicy.LOCAL_ALIAS:
+        alias = title_store.load(title_identity)
+        if alias.alias != plan.requested or alias.proposal_id != record.operation_id:
+            raise SessionMigrateError("Published local alias changed.")
+        alias_path = title_store.path_for(title_identity)
+        document, alias_sha = _read_document(alias_path)
+        if document != alias.to_dict():
+            raise SessionMigrateError("Published local alias changed while reading.")
+        references = (
+            EvidenceReference("receipt", "verified", "available", str(alias_path), alias_sha),
+        )
+    binding = TitleReceiptBinding(
+        state.built.artifact.target_format,
+        state.built.artifact.target_sha256,
+        identity=title_identity,
+        output_path=None,
+        session_id=state.built.artifact.session_id,
+        manifest_path=state.built.manifest,
+        proposal_id=record.operation_id,
+    )
+    expected = title.to_dict()
+    expected["binding"] = binding.to_dict()
+    document, receipt_sha = _read_document(receipt_path)
+    if document != expected:
+        raise SessionMigrateError("Published title receipt changed.")
+    return references + (
+        EvidenceReference("receipt", "verified", "available", str(receipt_path), receipt_sha),
+    )
+
+
+def _complete_runtime_operation(
+    state,
+    record,
+    completion,
+    store,
+    guard,
+    namespace,
+    title_identity,
+    title_store,
+    title,
+    receipt_path,
+):
+    from session_migrate.handoff_operations import _held_coordinator
+    from session_migrate.lineage import LineageError, _encode
+    from session_migrate.native_snapshots import check_source_identity
+
+    def fresh_guard():
+        try:
+            with _held_coordinator(store, guard, record, state.built.runtime_context):
+                for _ in range(2):
+                    _verify_prepared_options(state)
+                    _read_prepared_source(state)
+                    state.observed_captures.clear()
+                    state.observed_export_proofs.clear()
+                    current_session = _verify_installed_identity(state)
+                    current = _completion_record(state, record, current_session)
+                    references = _observed_references(
+                        state, current_session
+                    ) + _runtime_title_guard(
+                        state, record, title_identity, title_store, title, receipt_path
+                    )
+                    if replace(current, references=references) != completion:
+                        raise SessionMigrateError("Runtime completion evidence changed.")
+                    _verify_published_namespace(state, title_identity, namespace)
+                # Metadata reads above cannot replace either whole native capture.
+                _read_prepared_source(state)
+                state.observed_captures.clear()
+                state.observed_export_proofs.clear()
+                current_session = _verify_installed_identity(state)
+                if (
+                    replace(
+                        _completion_record(state, record, current_session),
+                        references=completion.references,
+                    )
+                    != completion
+                ):
+                    raise SessionMigrateError("Runtime native proof changed after metadata I/O.")
+                _quick_publication_guards(state)
+                if state.observed_captures and state.observed_captures[-1].identity is not None:
+                    check_source_identity(state.observed_captures[-1])
+        except (SessionMigrateError, OSError, ValueError, TypeError, AttributeError):
+            raise LineageError("proof_mismatch") from None
+
+    return store.complete_reconciled(
+        record.operation_id,
+        hashlib.sha256(_encode(record)).hexdigest(),
+        OperationState.VERIFYING,
+        completion,
+        guard,
+        external_guard=fresh_guard,
+    )
 
 
 def _commit_native_operation(prepared, token, progress):
@@ -1861,8 +2095,17 @@ def _commit_native_operation(prepared, token, progress):
         LineageStore.preflight_metadata(record)
         recording = True
         store = _open_lineage_store(state)
-        with store.lock_operation(operation_id, record.target_namespace) as guard:
+        additional = (
+            (record.source.identity.namespace,)
+            if state.built.runtime_context is not None and record.source.identity is not None
+            else ()
+        )
+        with store.lock_operation(
+            operation_id, record.target_namespace, additional_namespaces=additional
+        ) as guard:
             try:
+                if state.built.runtime_context is not None:
+                    _prepublication_guards(state, preflight=False)
                 store.ready(record, guard)
                 ready = True
                 token.check()
@@ -1955,7 +2198,28 @@ def _commit_native_operation(prepared, token, progress):
 
                     check_source_identity(state.observed_captures[-1])
                 completion = replace(completion, references=references)
-                lineage_receipt = store.complete(operation_id, completion, guard)
+                if state.built.runtime_context is None:
+                    lineage_receipt = store.complete(operation_id, completion, guard)
+                else:
+                    completion = replace(
+                        completion,
+                        references=completion.references
+                        + _runtime_title_guard(
+                            state, record, title_identity, title_store, title, receipt_path
+                        ),
+                    )
+                    lineage_receipt = _complete_runtime_operation(
+                        state,
+                        record,
+                        completion,
+                        store,
+                        guard,
+                        namespace,
+                        title_identity,
+                        title_store,
+                        title,
+                        receipt_path,
+                    )
                 result = content_free_result(
                     built.artifact,
                     output_path=built.output,
@@ -1992,7 +2256,7 @@ def _commit_native_operation(prepared, token, progress):
                     guard=guard,
                     session=session,
                 )
-            except Exception:
+            except Exception as error:
                 if ready and not gate_closed:
                     with suppress(Exception):
                         store.fail_ready(operation_id, guard)
@@ -2008,6 +2272,13 @@ def _commit_native_operation(prepared, token, progress):
                     store=store,
                     guard=guard,
                     session=session,
+                    runtime_uncertain=(
+                        state.built.runtime_context is not None
+                        and (
+                            store._guarded_persist_renamed
+                            or getattr(error, "code", None) == "persistence_uncertain"
+                        )
+                    ),
                 )
     except (OperationCancelledError, OperationNeedsReconcileError):
         raise
@@ -2301,6 +2572,8 @@ class _OperationBuild:
     dry_run: bool
     source_snapshot: NativeSnapshot | None = None
     source_export_proof: Any = None
+    runtime_context: Any = None
+    portable_emission: Any = None
 
 
 def _resolve_source(
@@ -2310,6 +2583,8 @@ def _resolve_source(
     expected_root: Path | None = None,
     on_capture: Callable[[NativeSnapshot], None] | None = None,
     on_native_observation: Callable[[Any], None] | None = None,
+    catalog_opener: Callable[[Path], Catalog] | None = None,
+    readonly_catalog: bool = False,
 ) -> tuple[Session, TargetFormat, Path | None]:
     if request.command != OperationKind.TRANSFER and (
         request.path is None or request.target_format is None
@@ -2331,7 +2606,11 @@ def _resolve_source(
                 raise SessionMigrateError(
                     "--source-home/--source-cwd do not apply with catalog selection"
                 )
-            with Catalog(request.catalog or _catalog_default(source_environ)) as catalog:
+            catalog_path = request.catalog or _catalog_default(source_environ)
+            opener = (
+                Catalog.open_readonly_existing if readonly_catalog else (catalog_opener or Catalog)
+            )
+            with opener(catalog_path) as catalog:
                 catalog_id = request.catalog_id
                 if request.title:
                     title = request.title.strip()
@@ -2527,7 +2806,13 @@ def _build_operation(
     cancellation: CancellationToken | None,
     max_source_bytes: int | None,
     observe_target: bool = False,
+    catalog_opener: Callable[[Path], Catalog] | None = None,
+    runtime_context=None,
 ) -> _OperationBuild:
+    if runtime_context is not None:
+        from session_migrate.handoff_operations import validate_runtime_context
+
+        validate_runtime_context(runtime_context, fresh=True)
     captures = []
     export_proofs = []
     session, target_format, source_root = _resolve_source(
@@ -2540,6 +2825,8 @@ def _build_operation(
         on_native_observation=export_proofs.append
         if observe_target and request.command != OperationKind.CONVERT
         else None,
+        catalog_opener=catalog_opener,
+        readonly_catalog=runtime_context is not None,
     )
     target_cli_version = request.target_cli_version
     if cancellation is not None:
@@ -2581,20 +2868,87 @@ def _build_operation(
             if target_cli_version != expected:
                 raise SessionMigrateError("target client version differs from prepared options")
     _notify(progress, ProgressStage.CONVERTING)
-    artifact = convert_session(
-        session,
-        ConversionOptions(
-            target_format=target_format,
-            session_id=request.session_id,
-            cwd=request.cwd,
-            target_cli_version=target_cli_version,
-            model_provider=request.model_provider,
-            model=request.model,
-            target_title=request.target_title,
-            title_policy=request.title_policy,
-        ),
-        environ=environ,
-    )
+    if runtime_context is not None and runtime_context.derived_input is not None:
+        from session_migrate.conversion import EmitContext, _utc_now, emit_portable
+        from session_migrate.handoff_operations import validate_runtime_context
+        from session_migrate.titles import plan_target_title
+
+        validate_runtime_context(runtime_context, fresh=True)
+        if (
+            request.cwd is None
+            or request.target_cli_version is None
+            or request.model_provider is None
+            or request.model is None
+        ):
+            raise SessionMigrateError("Summary requires explicit CWD, version, model and provider.")
+        if session.source_sha256 != runtime_context.authority.authority_sha256:
+            raise SessionMigrateError("Summary native authority changed.")
+        title_plan = (
+            plan_target_title(
+                target_format,
+                requested=request.target_title,
+                cli_version=target_cli_version,
+                policy=request.title_policy,
+                source_title=None,
+            )
+            if request.target_title is not None
+            else None
+        )
+        target_id = request.session_id
+        if target_format is TargetFormat.OPENCODE:
+            from session_migrate.formats import opencode
+
+            target_id = opencode.session_id_from_uuid(target_id)
+        emit_context = EmitContext(
+            target_format,
+            target_id,
+            request.cwd.resolve(),
+            target_cli_version,
+            _utc_now(),
+            request.model_provider,
+            request.model,
+            title_plan.native_effective if title_plan is not None else None,
+        )
+        emission = emit_portable(runtime_context.derived_input.events, emit_context)
+        artifact = ConversionArtifact(
+            session,
+            target_format,
+            target_id,
+            emit_context.cwd,
+            target_cli_version,
+            emit_context.timestamp,
+            emission.native_bytes,
+            emission.native_record_count,
+            dict(emission.dropped),
+            (
+                {
+                    "code": "derived_handoff",
+                    "message": "Historical transcript omitted; reviewed USER handoff.",
+                },
+            ),
+            title_plan,
+            runtime_context.transformation,
+            runtime_context.authority.identity,
+            runtime_context.return_link,
+        )
+    else:
+        emission = None
+        artifact = convert_session(
+            session,
+            ConversionOptions(
+                target_format=target_format,
+                session_id=request.session_id,
+                cwd=request.cwd,
+                target_cli_version=target_cli_version,
+                model_provider=request.model_provider,
+                model=request.model,
+                target_title=request.target_title,
+                title_policy=request.title_policy,
+            ),
+            environ=environ,
+        )
+        if runtime_context is not None:
+            artifact = replace(artifact, return_link=runtime_context.return_link)
     home: Path | None = None
     if request.command == "convert":
         output_path = request.output
@@ -2640,6 +2994,8 @@ def _build_operation(
         dry_run,
         captures[0] if captures else None,
         export_proofs[0] if export_proofs else None,
+        runtime_context,
+        emission,
     )
 
 

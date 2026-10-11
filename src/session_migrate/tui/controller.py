@@ -15,6 +15,7 @@ from typing import Any
 from session_migrate.catalog import Catalog
 from session_migrate.continuity import (
     ContinuityAssessmentV1,
+    ContinuityAssessmentV2,
     ContinuitySelector,
     LineageInspectionV1,
     assess_continuity,
@@ -89,7 +90,7 @@ class OperationPage:
 @dataclass(frozen=True, slots=True, repr=False)
 class ContinuityDetail:
     inspection: LineageInspectionV1
-    assessment: ContinuityAssessmentV1 | None = None
+    assessment: ContinuityAssessmentV1 | ContinuityAssessmentV2 | None = None
     profile_context: str | None = None
     context_reason: str | None = None
 
@@ -570,6 +571,38 @@ class Controller:
             )
             for root in roots
         )
+
+    def open_handoff(self, source_profile_id, native_id, *, profiles_file=None):
+        """Called on the dedicated handoff thread, which owns its driver until close."""
+        from session_migrate.handoff_cli import HandoffWorkflow
+
+        profiles = self.continuity_profiles(profiles_file)
+        matches = [profile for profile in profiles if profile.id == source_profile_id]
+        if len(matches) != 1:
+            raise SessionMigrateError("current_profile_unavailable")
+        source = matches[0]
+        ref = SessionRef(
+            source.format, source.root, native_id, source.id, profile_fingerprint=source.fingerprint
+        )
+        catalog = Catalog.open_readonly_existing(self.catalog)
+        try:
+            observer = EndpointObserver(
+                catalog,
+                profiles,
+                base_environ=self._continuity_environment,
+                byte_limit=self.source_bytes,
+            )
+            return HandoffWorkflow(
+                catalog,
+                observer,
+                source,
+                ref,
+                self._continuity_path().parent,
+                self._continuity_environment,
+            )
+        except Exception:
+            catalog.close()
+            raise
 
     def list_operations(self, *, offset=0, limit=50, cancel_event=None) -> OperationPage:
         if (

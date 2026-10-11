@@ -12,9 +12,10 @@ import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
 
@@ -58,7 +59,15 @@ from session_migrate.jsonl import (
     file_snapshot,
     write_private_atomic,
 )
-from session_migrate.model import AgentFormat, Session, TargetFormat
+from session_migrate.model import (
+    AgentFormat,
+    Event,
+    EventKind,
+    Provenance,
+    Role,
+    Session,
+    TargetFormat,
+)
 from session_migrate.titles import TitlePlan, TitlePolicy, plan_target_title, validate_title
 
 OPENCODE_HOME_UNSUPPORTED = (
@@ -70,6 +79,191 @@ KILO_HOME_UNSUPPORTED = (
 )
 OPENCODE_COMMAND_TIMEOUT_SECONDS = 30
 OPENCODE_EXPORT_TIMEOUT_SECONDS = 120
+# The accepted document limit excludes the fixed user-handoff label.
+MAX_PORTABLE_USER_BYTES = 1024 * 1024 + len(
+    b"User-provided handoff; historical transcript omitted\n\n"
+)
+MAX_PORTABLE_USER_EVENTS = 1024
+MAX_PORTABLE_NATIVE_BYTES = 16 * 1024 * 1024
+
+
+def _portable_context_text(value: object, maximum: int) -> bool:
+    if (
+        type(value) is not str
+        or not value.strip()
+        or any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)
+    ):
+        return False
+    try:
+        return len(value.encode("utf-8")) <= maximum
+    except UnicodeError:
+        return False
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class EmitContext:
+    """Explicit destination metadata; no source identity, history or native proof."""
+
+    target_format: TargetFormat
+    session_id: str
+    cwd: Path
+    target_cli_version: str
+    timestamp: str
+    model_provider: str
+    model: str
+    target_title: str | None = None
+
+    def __post_init__(self) -> None:
+        versions = {
+            TargetFormat.CLAUDE: frozenset({claude.PINNED_CLAUDE_VERSION}),
+            TargetFormat.CODEX: frozenset({codex.PINNED_CODEX_VERSION}),
+            TargetFormat.OPENCODE: opencode_v2.VALIDATED_VERSIONS,
+        }
+        if (
+            type(self.target_format) is not TargetFormat
+            or self.target_format not in versions
+            or type(self.target_cli_version) is not str
+            or self.target_cli_version not in versions[self.target_format]
+            or type(self.cwd) is not type(Path())
+            or not self.cwd.is_absolute()
+            or ".." in self.cwd.parts
+            or not _portable_context_text(str(self.cwd), 4096)
+            or not _portable_context_text(self.timestamp, 64)
+            or valid_rfc3339(self.timestamp) is None
+            or not _portable_context_text(self.model_provider, 256)
+            or not _portable_context_text(self.model, 256)
+            or type(self.session_id) is not str
+        ):
+            raise SessionMigrateError("Portable target context is invalid or unsupported.")
+        try:
+            if self.target_format is TargetFormat.OPENCODE:
+                valid_id = self.session_id.startswith("ses_") and (
+                    uuid.UUID(hex=self.session_id[4:]).hex == self.session_id[4:]
+                )
+            else:
+                valid_id = str(uuid.UUID(self.session_id)) == self.session_id
+        except (ValueError, TypeError, AttributeError):
+            valid_id = False
+        if not valid_id:
+            raise SessionMigrateError("Portable target identity is invalid.")
+        if self.target_title is not None:
+            if type(self.target_title) is not str:
+                raise SessionMigrateError("Portable target title must be a plain string.")
+            validate_title(self.target_title)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class PortableEmission:
+    """Immutable native bytes/loss metadata; never a source or projection certificate."""
+
+    context: EmitContext
+    native_bytes: bytes = field(repr=False)
+    native_record_count: int
+    losses: tuple[tuple[str, int], ...]
+
+    @property
+    def target_sha256(self) -> str:
+        return hashlib.sha256(self.native_bytes).hexdigest()
+
+    @property
+    def dropped(self) -> Mapping[str, int]:
+        return MappingProxyType(dict(self.losses))
+
+
+def _portable_user_timeline(events: tuple[Event, ...]) -> tuple[Event, ...]:
+    if type(events) is not tuple or not 0 < len(events) <= MAX_PORTABLE_USER_EVENTS:
+        raise SessionMigrateError("Portable handoff requires a bounded immutable USER timeline.")
+    total = 0
+    captured = []
+    for index, event in enumerate(events):
+        if (
+            type(event) is not Event
+            or event.kind is not EventKind.MESSAGE
+            or event.role is not Role.USER
+            or type(event.text) is not str
+            or not event.text.strip()
+            or event.timestamp is not None
+            or event.tool_name is not None
+            or event.tool_call_id is not None
+            or type(event.provenance) is not Provenance
+            or type(event.provenance.record_index) is not int
+            or event.provenance.record_index != index
+            or type(event.provenance.record_type) is not str
+            or event.provenance.record_type != "user_handoff"
+            or event.provenance.source_id is not None
+            or event.provenance.block_index is not None
+            or type(event.payload) is not dict
+        ):
+            raise SessionMigrateError("Portable handoff contains unsupported event metadata.")
+        if event.payload and event.payload != {
+            "content_blocks": [{"type": "text", "text": event.text}]
+        }:
+            raise SessionMigrateError("Portable handoff contains unsupported content blocks.")
+        try:
+            total += len(event.text.encode("utf-8"))
+        except UnicodeError:
+            raise SessionMigrateError("Portable handoff text is not valid UTF-8.") from None
+        if total > MAX_PORTABLE_USER_BYTES:
+            raise SessionMigrateError("Portable handoff exceeds its explicit byte limit.")
+        # Isolate the emitter from the caller's mutable Event.payload dictionary.
+        captured.append(
+            Event(
+                EventKind.MESSAGE,
+                Provenance(index, "user_handoff"),
+                role=Role.USER,
+                text=event.text,
+            )
+        )
+    return tuple(captured)
+
+
+def emit_portable(events: tuple[Event, ...], context: EmitContext) -> PortableEmission:
+    """Emit reviewed USER data through existing native schemas, without a fake Session."""
+    if type(context) is not EmitContext:
+        raise SessionMigrateError("An explicit portable target context is required.")
+    context.__post_init__()
+    timeline = _portable_user_timeline(events)
+    kwargs = {
+        "session_id": context.session_id,
+        "cwd": context.cwd,
+        "cli_version": context.target_cli_version,
+        "timestamp": context.timestamp,
+    }
+    if context.target_format is TargetFormat.CLAUDE:
+        native_bytes, dropped = claude.serialize_events(
+            timeline, **kwargs, model=context.model, title=context.target_title
+        )
+        # A USER-only Claude history has no assistant model/provider fields.
+        dropped["target:model_unpersisted"] = 1
+        dropped["target:provider_unpersisted"] = 1
+    elif context.target_format is TargetFormat.CODEX:
+        native_bytes, dropped = codex.serialize_events(
+            timeline, **kwargs, model_provider=context.model_provider
+        )
+        dropped["target:model_unpersisted"] = 1
+        if context.target_title is not None:
+            dropped["target:title_unpersisted"] = 1
+    else:
+        native_bytes, dropped = opencode.serialize_events(
+            timeline,
+            **kwargs,
+            provider_id=context.model_provider,
+            model_id=context.model,
+            title=context.target_title,
+        )
+        # Public v2 exports have a schema/model reference, not a client-version field.
+        dropped["target:cli_version_unpersisted"] = 1
+        if context.target_title is None:
+            dropped["target:title_synthesized"] = 1
+    if not native_bytes or len(native_bytes) > MAX_PORTABLE_NATIVE_BYTES:
+        raise SessionMigrateError("Portable native output exceeds its byte limit or is empty.")
+    _validate_native_bytes(native_bytes, context.target_format, context.session_id)
+    return PortableEmission(
+        context,
+        native_bytes,
+        _native_record_count(native_bytes, context.target_format),
+        tuple(sorted(dropped.items())),
+    )
 
 
 class _NativeExportProof:
@@ -159,12 +353,15 @@ class ConversionArtifact:
     dropped: dict[str, int]
     warnings: tuple[dict[str, Any], ...]
     title_plan: TitlePlan | None = None
+    transformation: Any = None
+    authority_identity: Any = None
+    return_link: Any = None
 
     @property
     def effective_target_title(self) -> str | None:
         if self.title_plan is not None and self.title_plan.policy == TitlePolicy.NATIVE:
             return self.title_plan.native_effective
-        return self.source.title
+        return None if self.transformation is not None else self.source.title
 
     @property
     def target_sha256(self) -> str:
@@ -174,7 +371,7 @@ class ConversionArtifact:
         target_location = (
             str(output_path.resolve()) if isinstance(output_path, Path) else output_path
         )
-        return {
+        document = {
             "schema_version": 2,
             "created_at": _utc_now(),
             "migration_version": __version__,
@@ -200,6 +397,191 @@ class ConversionArtifact:
             "dropped_events": self.dropped,
             "warnings": list(self.warnings),
         }
+        if self.transformation is not None:
+            from session_migrate.lineage import QualifiedIdentity, TransformationV1, _encode
+
+            if (
+                type(self.transformation) is not TransformationV1
+                or type(self.authority_identity) is not QualifiedIdentity
+            ):
+                raise SessionMigrateError("Derived artifact authority metadata is unavailable.")
+            document = {
+                "schema_version": 3,
+                "created_at": document["created_at"],
+                "migration_version": document["migration_version"],
+                "authority_source": {
+                    **document["source"],
+                    "identity": json.loads(_encode(self.authority_identity)),
+                },
+                "conversion_input": json.loads(_encode(self.transformation.input)),
+                "transformation": json.loads(_encode(self.transformation)),
+                "return_link": json.loads(_encode(self.return_link)) if self.return_link else None,
+                "target": document["target"],
+                "dropped_events": document["dropped_events"],
+                "warnings": document["warnings"],
+            }
+            decode_derived_manifest(
+                json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+            )
+        return document
+
+
+def decode_derived_manifest(payload: bytes) -> dict[str, Any]:
+    """Closed summary manifest v3; content documents never belong in this wire."""
+    from session_migrate.lineage import (
+        MAX_METADATA_BYTES,
+        DerivedInputIdentityV1,
+        QualifiedIdentity,
+        ReturnLinkV1,
+        TransformationV1,
+        _decode,
+    )
+
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError
+            result[key] = value
+        return result
+
+    def typed(kind, value):
+        return _decode(
+            kind,
+            json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode(),
+        )
+
+    def text_field(value, maximum, *, nullable=False):
+        return (nullable and value is None) or (
+            type(value) is str
+            and 0 < len(value.encode("utf-8")) <= maximum
+            and not any(ord(c) < 32 or ord(c) == 127 for c in value)
+        )
+
+    def counts(value):
+        return (
+            type(value) is dict
+            and len(value) <= 128
+            and all(
+                text_field(key, 256) and type(count) is int and 0 <= count <= 2**31 - 1
+                for key, count in value.items()
+            )
+        )
+
+    try:
+        if type(payload) is not bytes or not 0 < len(payload) <= MAX_METADATA_BYTES:
+            raise ValueError
+        document = json.loads(
+            payload,
+            object_pairs_hook=pairs,
+            parse_constant=lambda _: (_ for _ in ()).throw(ValueError()),
+        )
+        if (
+            type(document) is not dict
+            or set(document)
+            != {
+                "schema_version",
+                "created_at",
+                "migration_version",
+                "authority_source",
+                "conversion_input",
+                "transformation",
+                "return_link",
+                "target",
+                "dropped_events",
+                "warnings",
+            }
+            or type(document["schema_version"]) is not int
+            or document["schema_version"] != 3
+        ):
+            raise ValueError
+        source, target = document["authority_source"], document["target"]
+        if (
+            type(source) is not dict
+            or set(source)
+            != {
+                "format",
+                "path",
+                "sha256",
+                "session_id",
+                "cli_version",
+                "records",
+                "events",
+                "identity",
+            }
+            or type(target) is not dict
+            or set(target)
+            != {
+                "format",
+                "path",
+                "sha256",
+                "session_id",
+                "cli_version",
+                "cwd",
+                "timestamp",
+                "records",
+            }
+        ):
+            raise ValueError
+        identity = typed(QualifiedIdentity, source["identity"])
+        transformed = typed(TransformationV1, document["transformation"])
+        input_identity = typed(DerivedInputIdentityV1, document["conversion_input"])
+        link = (
+            typed(ReturnLinkV1, document["return_link"])
+            if document["return_link"] is not None
+            else None
+        )
+        if (
+            input_identity != transformed.input
+            or source["format"] != identity.namespace.format
+            or source["session_id"] != identity.namespace.native_id
+            or (link is not None and link.parent_target_identity != identity)
+        ):
+            raise ValueError
+        for values in (source, target):
+            if (
+                type(values["records"]) is not int
+                or not 0 <= values["records"] <= 2**31 - 1
+                or type(values["sha256"]) is not str
+                or len(values["sha256"]) != 64
+                or any(c not in "0123456789abcdef" for c in values["sha256"])
+            ):
+                raise ValueError
+            for key in ("format", "path", "session_id"):
+                if not text_field(values[key], 4096 if key == "path" else 128):
+                    raise ValueError
+        if (
+            not counts(source["events"])
+            or not counts(document["dropped_events"])
+            or type(document["warnings"]) is not list
+            or len(document["warnings"]) > 128
+            or not all(
+                type(warning) is dict
+                and set(warning) == {"code", "message"}
+                and text_field(warning["code"], 128)
+                and text_field(warning["message"], 4096)
+                for warning in document["warnings"]
+            )
+            or not text_field(document["migration_version"], 64)
+            or not text_field(source["cli_version"], 64, nullable=True)
+            or not text_field(target["cli_version"], 64)
+            or not text_field(target["cwd"], 4096)
+            or not (
+                Path(source["path"]).is_absolute()
+                or (
+                    source["format"] == "opencode"
+                    and source["path"] == f"opencode:{source['session_id']}"
+                )
+            )
+            or not Path(target["cwd"]).is_absolute()
+            or target["format"] not in {"claude", "codex", "opencode"}
+            or valid_rfc3339(document["created_at"]) is None
+            or valid_rfc3339(target["timestamp"]) is None
+        ):
+            raise ValueError
+        return document
+    except (SessionMigrateError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        raise SessionMigrateError("Derived manifest is invalid or unsupported.") from None
 
 
 def load_session(path: Path, source_format: AgentFormat | None = None) -> Session:

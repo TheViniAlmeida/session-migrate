@@ -37,12 +37,14 @@ from session_migrate.errors import SessionMigrateError
 from session_migrate.lineage import (
     CompletionReceipt,
     Coverage,
+    DerivationBindingV1,
     LineageStore,
     OperationState,
     PolicyVersions,
     QualifiedIdentity,
     RecoveryOperation,
     RecoveryView,
+    ReturnLinkV1,
     _encode,
 )
 from session_migrate.model import TargetFormat
@@ -222,6 +224,32 @@ class ContinuityAssessmentV1:
 
     @property
     def update_available(self) -> bool:
+        return False
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ContinuityAssessmentV2:
+    schema_version: int
+    baseline: ContinuityAssessmentV1
+    derivation: DerivationBindingV1
+    return_link: ReturnLinkV1 | None
+
+    def __post_init__(self):
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != 2
+            or type(self.baseline) is not ContinuityAssessmentV1
+            or type(self.derivation) is not DerivationBindingV1
+            or (self.return_link is not None and type(self.return_link) is not ReturnLinkV1)
+        ):
+            raise ContinuityError()
+        self.baseline.__post_init__()
+        self.derivation.__post_init__()
+        if self.return_link is not None:
+            self.return_link.__post_init__()
+
+    @property
+    def update_available(self):
         return False
 
 
@@ -427,7 +455,7 @@ def assess_continuity(
     selector: ContinuitySelector,
     observer: EndpointObserver,
     store_path: Path,
-) -> ContinuityAssessmentV1:
+) -> ContinuityAssessmentV1 | ContinuityAssessmentV2:
     """Observe twice per endpoint and recheck the ledger; never mutate either."""
     if type(selector) is not ContinuitySelector or not isinstance(store_path, Path):
         raise ContinuityError()
@@ -497,6 +525,8 @@ def assess_continuity(
     if op is None:
         return result(ContinuityStatus.UNTRACKED, inspection.reason)
     operation_id = op.record.operation_id
+    if op.record.transformation is not None:
+        return _assess_derived(selector, observer, store_path, view, op)
     source_cp_sha, target_cp_sha, receipt_sha = (
         _sha(op.source_checkpoint),
         _sha(op.target_checkpoint),
@@ -733,3 +763,130 @@ def assess_continuity(
             "observation_unproven",
             ("observation_unproven",),
         )
+
+
+def _assess_derived(selector, observer, store_path, view, op):
+    """Observe derived endpoints without invoking the full-history baseline oracle."""
+    from session_migrate.reconciliation import _observe_pair, _stable
+
+    record, receipt = op.record, op.receipt
+    derivation = DerivationBindingV1(
+        1, record.source.identity, record.transformation.input, _sha(record.transformation)
+    )
+    effects = set()
+    observations = None
+    started = finished = None
+
+    def result(reason, status=ContinuityStatus.UNTRACKED):
+        source, target = observations if observations is not None else (None, None)
+        base = ContinuityAssessmentV1(
+            1,
+            status,
+            reason,
+            record.operation_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            source.authority_sha256 if source else None,
+            target.authority_sha256 if target else None,
+            ("native_boundary_unproven",),
+            ("inspect",),
+            tuple(sorted(effects)),
+            started,
+            finished,
+            source.identity if source else None,
+            target.identity if target else None,
+            _sha(op.source_checkpoint),
+            _sha(op.target_checkpoint),
+            _sha(receipt),
+            record.versions,
+            CanonicalPolicy().sha256,
+            source.observation.coverage if source else None,
+            target.observation.coverage if target else None,
+            source.observation.fidelity if source else None,
+            target.observation.fidelity if target else None,
+            source.profile_binding_kind if source else None,
+            target.profile_binding_kind if target else None,
+            source.current_profile_fingerprint if source else None,
+            target.current_profile_fingerprint if target else None,
+        )
+        return ContinuityAssessmentV2(2, base, derivation, record.return_link)
+
+    if op.durable_state is not OperationState.COMPLETED:
+        return result("derived_operation_pending", ContinuityStatus.NEEDS_RECONCILE)
+    try:
+        if (
+            type(receipt) is not CompletionReceipt
+            or receipt.derivation != derivation
+            or receipt.return_link != record.return_link
+            or receipt.continuity_reason != "derived_handoff"
+            or op.source_checkpoint is None
+            or op.target_checkpoint is None
+            or receipt.source_checkpoint_sha256 != _sha(op.source_checkpoint)
+            or receipt.target_checkpoint_sha256 != _sha(op.target_checkpoint)
+            or receipt.target_identity != op.target_checkpoint.identity
+            or receipt.input_artifact_sha256 != record.target_input_sha256
+            or op.source_checkpoint.identity != record.source.identity
+            or op.source_checkpoint.artifact_sha256 != record.source.artifact_sha256
+            or op.target_checkpoint.snapshot_sha256 != record.expected_projection.snapshot_sha256
+            or op.target_checkpoint.prefix_witness != record.expected_projection.prefix_witness
+        ):
+            return result("derived_binding_changed", ContinuityStatus.LINEAGE_BROKEN)
+        edges = [edge for edge in view.edges if edge.operation_id == record.operation_id]
+        if (
+            len(edges) != 1
+            or edges[0].derivation != derivation
+            or edges[0].return_link != record.return_link
+            or edges[0].source_identity != record.source.identity
+            or edges[0].target_identity != receipt.target_identity
+            or edges[0].source_checkpoint_sha256 != _sha(op.source_checkpoint)
+            or edges[0].target_checkpoint_sha256 != _sha(op.target_checkpoint)
+        ):
+            return result("derived_binding_changed", ContinuityStatus.LINEAGE_BROKEN)
+        if record.return_link is not None:
+            from session_migrate.handoff_operations import _verified_parent
+
+            latest_parent_view, parent = _verified_parent(
+                store_path, record.return_link.parent_operation_id
+            )
+            if (
+                latest_parent_view.store_uuid != view.store_uuid
+                or _sha(parent.receipt) != record.return_link.parent_receipt_sha256
+                or parent.receipt.target_identity != record.source.identity
+            ):
+                return result("derived_parent_changed", ContinuityStatus.LINEAGE_BROKEN)
+        validate_observer(observer)
+        refs = (
+            (selector.pair.source, selector.pair.target)
+            if selector.pair
+            else (
+                ref_for_identity(observer, record.source.identity),
+                ref_for_identity(observer, receipt.target_identity),
+            )
+        )
+        clients = (record.versions.source_client, record.versions.target_client)
+        started = monotonic_ns()
+        first = _observe_pair(observer, refs, clients, CanonicalPolicy(), effects)
+        second = _observe_pair(observer, refs, clients, CanonicalPolicy(), effects)
+        _stable(first, second)
+        observations = second
+        finished = monotonic_ns()
+        latest = LineageStore.inspect_existing(store_path)
+        if latest is None or _view_fingerprint(latest) != _view_fingerprint(view):
+            return result("derived_ledger_changed", ContinuityStatus.NEEDS_RECONCILE)
+        if (
+            second[0].identity != record.source.identity
+            or second[1].identity != receipt.target_identity
+        ):
+            return result("derived_identity_changed", ContinuityStatus.LINEAGE_BROKEN)
+        if second[0].authority_sha256 != record.source.artifact_sha256:
+            return result("derived_source_changed")
+        if second[1].authority_sha256 != op.target_checkpoint.artifact_sha256:
+            return result("derived_target_changed")
+        return result("derived_handoff_not_full_history")
+    except (SessionMigrateError, OSError, ValueError, TypeError, AttributeError) as error:
+        effects.update(getattr(error, "native_read_effects", ()))
+        finished = monotonic_ns() if started is not None else None
+        return result("derived_observation_unproven")

@@ -3,9 +3,12 @@
 Status: implementação em andamento. Spec/plano revisão 1, 09/10/2026; progresso atualizado em 10/10/2026.
 F2A, F2B e F2C integradas em `next`; o hotfix de cancelamento pós-publicação
 está concluído. F3 está integrada e instalada. F4A, a API privada do ledger, está integrada;
-F4B está integrada com observação independente e intent durável. F4C implementa
-assessment, recuperação explícita e adoção, com revisão antes da publicação.
-A fase 4 continua em andamento.
+F4B está integrada com observação independente e intent durável. F4C está integrada
+com assessment, recuperação explícita e adoção. A fase 4 foi publicada pela PR11
+após revisão e validação. F5A implementa handoff literal, resumo revisado e retorno
+para uma nova sessão; o gate de pacote/publicação está em execução. Full return
+OpenCode permanece bloqueado; summary tem prova USER restrita com contexto
+PARTIAL. F5B depende de prova de exclusão ou CAS do cliente nativo.
 Os demais marcos seguem os gates abaixo.
 
 Fonte normativa: [spec](../specs/interactive-migration.md), revisão 1.

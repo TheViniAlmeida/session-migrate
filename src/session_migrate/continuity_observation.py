@@ -436,3 +436,22 @@ def validate_endpoint(
         execution_context=state.execution_context,
     )
     _require(identity == endpoint.identity, "identity_unproven")
+
+
+def _borrow_validated_capture(endpoint, *, observer, ref, consumer):
+    """Lend one already issued capture internally, never a public snapshot DTO."""
+    validate_endpoint(endpoint, observer=observer, ref=ref)
+    state = _OBSERVATIONS[endpoint]
+    result = consumer(state.snapshot, state.session.cli_version)
+    validate_endpoint(endpoint, observer=observer, ref=ref)
+    return result
+
+
+def _original_authority(endpoint, observer, ref):
+    """Accessor for the actual issued C1 capture/session, never a caller DTO."""
+    validate_endpoint(endpoint, observer=observer, ref=ref)
+    from session_migrate.handoff_types import _issue_original_authority
+
+    authority = _issue_original_authority(endpoint, observer, ref)
+    validate_endpoint(endpoint, observer=observer, ref=ref)
+    return authority
