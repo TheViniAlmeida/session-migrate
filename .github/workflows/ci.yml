@@ -45,6 +45,24 @@ jobs:
           uv run --locked --extra tui pytest tests/test_tui.py tests/test_operation_cancellation.py tests/test_f5a_tui.py -q --junitxml=tui-results.xml
           uv run --locked --extra tui python -c "import xml.etree.ElementTree as E; assert not E.parse('tui-results.xml').findall('.//skipped'), 'TUI tests must not skip'"
 
+  web:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+      - run: uv sync --locked --extra web
+      - name: Dashboard API and native runtime tests (skips fail)
+        run: |
+          uv run --locked --extra web pytest tests/test_web*.py tests/test_usage*.py -q --junitxml=web-results.xml
+          uv run --locked --extra web python scripts/assert_junit_no_skips.py web-results.xml
+
   tui-native:
     name: Native keyboard migration (OpenCode 2.0.23)
     runs-on: ubuntu-latest

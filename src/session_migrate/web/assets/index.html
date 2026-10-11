@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>SessionMigrate</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/dashboard.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to workspace</a>
+  <aside class="sidebar" aria-label="Workspace navigation">
+    <a class="brand" href="/" aria-label="SessionMigrate home"><span class="brand-mark" aria-hidden="true">↗</span>SessionMigrate</a>
+    <p class="eyebrow">YOUR SESSIONS, CONNECTED</p>
+    <nav>
+      <button class="nav-item active" data-view="migrate" aria-current="page">Transfer</button>
+      <button class="nav-item" data-view="usage">Usage &amp; context</button>
+      <button class="nav-item" data-view="operations">Operations</button>
+    </nav>
+    <div class="connection-card">
+      <span id="connection-state" class="status-label">Disconnected</span>
+      <label class="file-button" for="launch-file">Connect using launch file</label>
+      <input id="launch-file" type="file" accept="application/json,.json">
+      <button id="logout" class="quiet-button" disabled>Disconnect</button>
+      <p>Your connection lasts only for this run.</p>
+    </div>
+    <p class="sidebar-foot">Choose a session. Review the change. Carry your work forward.</p>
+  </aside>
+  <main id="main" tabindex="-1">
+    <header class="page-header">
+      <div><p class="eyebrow">SESSION WORKSPACE</p><h1 id="view-title">Carry your context forward.</h1><p id="view-description">Select a source, choose a destination, and review before transferring.</p></div>
+      <span class="local-badge">Local workspace</span>
+    </header>
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <section id="migrate-view" class="view" aria-label="Transfer a session">
+      <div class="transfer-grid">
+        <section class="panel source-panel">
+          <div class="panel-heading"><span class="step">01</span><div><h2>Source session</h2><p>Pick up where you left off.</p></div></div>
+          <label for="source-profile">Harness &amp; profile</label><select id="source-profile" disabled><option value="">Connect to load profiles</option></select>
+          <div class="list-toolbar"><h3>Sessions</h3><button id="refresh-sessions" class="quiet-button" disabled>Refresh</button></div>
+          <ul id="sessions" class="session-list" aria-label="Available sessions"><li class="empty-state">Your sessions will appear here after connecting.</li></ul>
+          <button id="more-sessions" class="quiet-button" hidden>Load more sessions</button>
+        </section>
+        <section class="panel preview-panel">
+          <div class="panel-heading"><span class="step">02</span><div><h2>Session preview</h2><p>Check the conversation you are carrying.</p></div></div>
+          <div id="selected-session" class="selection-label">No session selected</div>
+          <pre id="preview" class="preview" tabindex="0">Select a session to see its preview.</pre>
+          <p id="preview-note" class="subtle">Preview content is shown as literal text.</p>
+        </section>
+        <section class="panel destination-panel">
+          <div class="panel-heading"><span class="step">03</span><div><h2>Destination</h2><p>A new place for your next step.</p></div></div>
+          <form id="transfer-form">
+            <label for="transfer-mode">Transfer mode</label><select id="transfer-mode" disabled><option value="full">Full conversation</option><option value="summary" disabled>Editable handoff</option><option value="return_new_full" disabled>Return as a new session · full</option><option value="return_new_summary" disabled>Return as a new session · handoff</option></select>
+            <div id="handoff-options" hidden><label for="handoff-model">Destination model</label><input id="handoff-model" maxlength="256" autocomplete="off"><label for="handoff-provider">Model provider</label><input id="handoff-provider" maxlength="256" autocomplete="off"><label for="handoff-version">Destination client version</label><input id="handoff-version" maxlength="256" autocomplete="off"><label for="handoff-first">First event (zero-based)</label><input id="handoff-first" type="number" min="0" max="100000" value="0"><label for="handoff-last">Last event (inclusive)</label><input id="handoff-last" type="number" min="0" max="100000" value="0"><label for="handoff-parent">Parent transfer</label><select id="handoff-parent"><option value="">Choose a completed transfer</option></select><button id="load-handoff-parents" type="button" class="quiet-button">Load parent transfers</button><p class="subtle">Choose the current session you worked on. A return creates a new destination session.</p></div>
+            <label for="target-profile">Harness &amp; profile</label><select id="target-profile" required disabled><option value="">Choose destination</option></select>
+            <label for="target-project">Project</label><select id="target-project" disabled><option value="">Use session project</option></select>
+            <label for="target-title">Session name <span class="subtle">optional</span></label><input id="target-title" maxlength="1024" autocomplete="off" placeholder="Name this session" disabled>
+            <label for="title-policy">Name handling</label><select id="title-policy" disabled><option value="native">Native session title</option><option value="local_alias">Local alias</option></select>
+            <p class="subtle">Title support and any conversion losses are checked in the review.</p>
+            <button id="prepare-transfer" class="primary-button" type="submit" disabled>Review transfer <span aria-hidden="true">→</span></button>
+          </form>
+          <div id="adoption-controls" hidden><h3>Record a current baseline</h3><label for="adopt-target-session">Existing destination session</label><select id="adopt-target-session" disabled><option value="">Choose an existing session</option></select><button id="preview-adoption" class="quiet-button" disabled>Preview destination session</button><pre id="adoption-preview" class="preview" tabindex="0" hidden></pre><p class="subtle">This records the current relation. It does not import messages or prove past history.</p><button id="prepare-adoption" class="quiet-button" disabled>Review baseline</button></div>
+          <div id="handoff-editor" hidden><h3>Edit your handoff</h3><label for="handoff-document">Complete handoff text</label><textarea id="handoff-document" rows="14" spellcheck="false"></textarea><p class="subtle">Review the entire text. It is transferred as user-provided context; it is not a full-history migration.</p><button id="accept-handoff" type="button" class="primary-button">Review this handoff</button><button id="discard-handoff" type="button" class="quiet-button">Discard handoff</button></div>
+          <div id="proposal" class="proposal" hidden><h3 id="proposal-heading">Review this transfer</h3><pre id="proposal-details" class="metadata" tabindex="0"></pre><p id="proposal-expiry" class="subtle"></p><button id="confirm-transfer" class="primary-button" disabled>Confirm transfer</button><button id="discard-review" class="quiet-button">Start a new review</button></div>
+          <div id="job" class="job" hidden><h3>Transfer status</h3><p id="job-state"></p><pre id="job-details" class="metadata" tabindex="0"></pre><button id="cancel-job" class="quiet-button" disabled>Cancel</button></div>
+        </section>
+      </div>
+    </section>
+    <section id="usage-view" class="view" aria-label="Session usage" hidden>
+      <div class="panel"><div class="panel-heading"><span class="step">↗</span><div><h2>Usage of the selected session</h2><p>Recorded observations, with their provenance.</p></div></div><p id="usage-selection" class="selection-label">Select a source session first.</p><button id="refresh-usage" class="quiet-button" disabled>Refresh usage</button><div id="usage-context" class="metric-grid"></div><div class="table-scroll"><table><caption>Recorded token observations</caption><thead><tr><th scope="col">Scope</th><th scope="col">Model</th><th scope="col">Input</th><th scope="col">Output</th><th scope="col">Cache read</th><th scope="col">Reasoning</th><th scope="col">Origin</th></tr></thead><tbody id="usage-rows"><tr><td colspan="7" class="empty-state">No usage loaded.</td></tr></tbody></table></div><p id="usage-note" class="subtle">Missing counters, context windows and costs are unknown.</p><button id="more-usage" class="quiet-button" hidden>Load more observations</button></div>
+    </section>
+    <section id="operations-view" class="view" aria-label="Operation history" hidden>
+      <div class="panel"><div class="panel-heading"><span class="step">↔</span><div><h2>Operations</h2><p>Inspect durable records and continuity.</p></div></div><button id="refresh-operations" class="quiet-button" disabled>Refresh operations</button><ul id="operations" class="operation-list"><li class="empty-state">Connect to inspect operations.</li></ul><button id="more-operations" class="quiet-button" hidden>Load more operations</button><pre id="operation-details" class="metadata" tabindex="0" hidden></pre></div>
+    </section>
+  </main>
+</body>
+</html>

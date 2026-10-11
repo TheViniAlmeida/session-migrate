@@ -739,6 +739,13 @@ def _json_value(value: object, depth: int = 0) -> object:
     return value
 
 
+def _validate_cancel_expectations(record_sha256, store_uuid):
+    _require((record_sha256 is None) == (store_uuid is None))
+    if record_sha256 is not None:
+        _hash(record_sha256)
+        _require(type(store_uuid) is str and bool(_UUID.fullmatch(store_uuid)))
+
+
 def _encode(value: object, maximum: int = MAX_METADATA_BYTES) -> bytes:
     try:
         result = json.dumps(
@@ -1866,15 +1873,44 @@ class LineageStore:
 
         return self._mutate(receipt.operation_id, guard, transition)
 
-    def cancel_ready(self, operation_id: str, guard: OperationGuard) -> None:
-        self._finish_unpublished(operation_id, guard, OperationState.CANCELLED)
+    def cancel_ready(
+        self,
+        operation_id: str,
+        guard: OperationGuard,
+        *,
+        expected_record_sha256=None,
+        expected_store_uuid=None,
+    ) -> None:
+        self._finish_unpublished(
+            operation_id,
+            guard,
+            OperationState.CANCELLED,
+            expected_record_sha256=expected_record_sha256,
+            expected_store_uuid=expected_store_uuid,
+        )
 
     def fail_ready(self, operation_id: str, guard: OperationGuard) -> None:
         self._finish_unpublished(operation_id, guard, OperationState.FAILED)
 
-    def _finish_unpublished(self, operation_id, guard, target_state):
+    def _finish_unpublished(
+        self,
+        operation_id,
+        guard,
+        target_state,
+        *,
+        expected_record_sha256=None,
+        expected_store_uuid=None,
+    ):
+        _validate_cancel_expectations(expected_record_sha256, expected_store_uuid)
+
         def transition(connection):
-            state, native, _, _ = self._row(connection, operation_id)
+            state, native, _, record = self._row(connection, operation_id)
+            if expected_record_sha256 is not None:
+                _require(
+                    self._store_uuid == expected_store_uuid
+                    and hashlib.sha256(_encode(record)).hexdigest() == expected_record_sha256,
+                    "proof_mismatch",
+                )
             _require(
                 state is OperationState.READY and native is NativeState.NATIVE_NOT_STARTED,
                 "invalid_transition",

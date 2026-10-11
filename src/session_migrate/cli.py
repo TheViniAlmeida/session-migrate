@@ -46,6 +46,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+    from session_migrate.web.launch import add_web_command
+
+    add_web_command(subparsers, _expanded_path)
     from session_migrate.lineage_cli import add_readonly_commands
 
     add_readonly_commands(subparsers)
@@ -291,6 +294,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "web":
+            from session_migrate.web.launch import run_web
+
+            return run_web(args)
         if args.command in {"handoff", "return-new"}:
             from session_migrate.handoff_cli import run_handoff_command
 

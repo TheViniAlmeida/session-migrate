@@ -29,6 +29,22 @@ async def idle(screen, pilot):
     raise AssertionError("bounded handoff task did not finish")
 
 
+async def open_handoff(app, pilot):
+    # Pilot's idle message queue does not drain the app's profile-reader result.
+    for _ in range(400):
+        await pilot.pause(0.015)
+        if app.pending is None and app.preview_request is None and app.screen.is_mounted:
+            break
+    else:
+        raise AssertionError("bounded main task did not finish before handoff")
+    await pilot.press("ctrl+h")
+    for _ in range(400):
+        if isinstance(app.screen, HandoffScreen) and app.screen.is_mounted:
+            return app.screen
+        await pilot.pause(0.015)
+    raise AssertionError("keyboard handoff screen did not mount")
+
+
 def configure(screen, tmp_path, profile_file, source_id, *, parent=None):
     values = dict(
         profiles=str(profile_file),
@@ -71,6 +87,52 @@ def controller_fixture(tmp_path, monkeypatch, *, returning=False):
 
 
 @pytest.mark.parametrize("returning", [False, True])
+def test_keyboard_handoff_waits_for_actual_initial_profile_read(tmp_path, monkeypatch, returning):
+    controller, profiles, _, _, _, _ = controller_fixture(
+        tmp_path, monkeypatch, returning=returning
+    )
+    entered, release = threading.Event(), threading.Event()
+    actual_profiles, actual_status = controller.profiles, MigrationApp.status
+    notices = []
+
+    def held_profiles(storage=None):
+        result = actual_profiles(storage)
+        entered.set()
+        assert release.wait(10)
+        return result
+
+    def status(app, value):
+        notices.append(value)
+        return actual_status(app, value)
+
+    monkeypatch.setattr(controller, "profiles", held_profiles)
+    monkeypatch.setattr(MigrationApp, "status", status)
+
+    async def run():
+        app = MigrationApp(controller, profiles_file=profiles)
+        async with app.run_test(size=(110, 45)) as pilot:
+            for _ in range(400):
+                await pilot.pause(0.015)
+                if entered.is_set():
+                    break
+            assert entered.is_set() and app.screen.is_mounted
+            assert app.pending == "profiles"
+            await pilot.press("ctrl+h")
+            assert not isinstance(app.screen, HandoffScreen)
+            assert app.pending == "profiles"
+            assert "Wait for the current task before opening handoff review." in notices
+            release.set()
+            screen = await open_handoff(app, pilot)
+            assert app.pending is None and app.preview_request is None
+            assert screen.query_one("#handoff-profiles", Input).value == str(profiles)
+
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("returning", [False, True])
 def test_actual_summary_and_return_ui_review_confirm_exact_private_handles(
     tmp_path, monkeypatch, returning
 ):
@@ -81,9 +143,7 @@ def test_actual_summary_and_return_ui_review_confirm_exact_private_handles(
     async def run():
         app = MigrationApp(controller, profiles_file=profiles)
         async with app.run_test(size=(110, 45)) as pilot:
-            await pilot.pause()
-            await pilot.press("ctrl+h")
-            screen = app.screen
+            screen = await open_handoff(app, pilot)
             assert isinstance(screen, HandoffScreen)
             configure(screen, tmp_path, profiles, source_id, parent=parent)
             await idle(screen, pilot)
@@ -117,9 +177,7 @@ def test_same_process_export_edit_sha_ui_preserves_entire_document(tmp_path, mon
     async def run():
         app = MigrationApp(controller, profiles_file=profiles)
         async with app.run_test(size=(100, 40)) as pilot:
-            await pilot.pause()
-            await pilot.press("ctrl+h")
-            screen = app.screen
+            screen = await open_handoff(app, pilot)
             configure(screen, tmp_path, profiles, source_id)
             await idle(screen, pilot)
             await press(screen, pilot, "capture")
@@ -158,9 +216,7 @@ def test_postpublication_back_quit_input_keep_same_receipt_and_no_kill(tmp_path,
     async def run():
         app = MigrationApp(controller, profiles_file=profiles)
         async with app.run_test(size=(100, 40)) as pilot:
-            await pilot.pause()
-            await pilot.press("ctrl+h")
-            screen = app.screen
+            screen = await open_handoff(app, pilot)
             configure(screen, tmp_path, profiles, source_id)
             await idle(screen, pilot)
             await press(screen, pilot, "capture")
@@ -216,8 +272,7 @@ def test_handoff_screen_does_not_invalidate_main_prepared_draft(tmp_path, monkey
         async with app.run_test(size=(100, 40)) as pilot:
             await pilot.pause()
             app.draft = draft
-            await pilot.press("ctrl+h")
-            screen = app.screen
+            screen = await open_handoff(app, pilot)
             configure(screen, tmp_path, profiles, source_id)
             await idle(screen, pilot)
             await press(screen, pilot, "capture")
@@ -237,9 +292,7 @@ def test_full_return_ui_prepares_without_manufactured_handoff(tmp_path, monkeypa
     async def run():
         app = MigrationApp(controller, profiles_file=profiles)
         async with app.run_test(size=(100, 40)) as pilot:
-            await pilot.pause()
-            await pilot.press("ctrl+h")
-            screen = app.screen
+            screen = await open_handoff(app, pilot)
             configure(screen, tmp_path, profiles, source_id, parent=parent)
             screen.query_one("#handoff-mode", Select).value = "full"
             await idle(screen, pilot)
@@ -285,9 +338,7 @@ def test_back_during_actual_capture_abandons_result_and_closes_own_driver(tmp_pa
     async def run():
         app = MigrationApp(controller, profiles_file=profiles)
         async with app.run_test(size=(100, 40)) as pilot:
-            await pilot.pause()
-            await pilot.press("ctrl+h")
-            screen = app.screen
+            screen = await open_handoff(app, pilot)
             configure(screen, tmp_path, profiles, source_id)
             await idle(screen, pilot)
             screen.query_one("#handoff-capture", Button).focus()
@@ -328,9 +379,7 @@ def test_actual_text_edited_while_accepting_cannot_review_old_document(tmp_path,
     async def run():
         app = MigrationApp(controller, profiles_file=profiles)
         async with app.run_test(size=(100, 40)) as pilot:
-            await pilot.pause()
-            await pilot.press("ctrl+h")
-            screen = app.screen
+            screen = await open_handoff(app, pilot)
             configure(screen, tmp_path, profiles, source_id)
             await idle(screen, pilot)
             await press(screen, pilot, "capture")

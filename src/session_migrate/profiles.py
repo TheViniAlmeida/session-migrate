@@ -759,12 +759,21 @@ def prepare_profile_operation(
     cancellation: CancellationToken | None = None,
     prepublication_check: Callable[[], None] | None = None,
     max_source_bytes: int | None = None,
+    catalog_opener: Callable[[Path], Catalog] | None = None,
+    migration_state_home: Path | None = None,
 ) -> PreparedOperation:
     """Prepare one exact profile pair; every guard opens its own worker connection."""
     environment = dict(os.environ if base_environ is None else base_environ)
-    state_home = default_migration_state_home(environ=environment)
+    state_home = migration_state_home or default_migration_state_home(environ=environment)
     bound, target_values, source_values, guard, context = _prepared_profile_binding(
-        catalog, source_profile, ref, target_profile, request, environment, prepublication_check
+        catalog,
+        source_profile,
+        ref,
+        target_profile,
+        request,
+        environment,
+        prepublication_check,
+        catalog_opener=catalog_opener,
     )
     return prepare_operation(
         bound,
@@ -776,6 +785,7 @@ def prepare_profile_operation(
         max_source_bytes=max_source_bytes,
         migration_state_home=state_home,
         profile_context=context,
+        catalog_opener=catalog_opener,
     )
 
 
@@ -788,6 +798,7 @@ def _prepared_profile_binding(
     environment,
     prepublication_check,
     *,
+    catalog_opener=None,
     readonly_catalog=False,
 ):
     bound, target_values, source_values = _bind_profile_operation(
@@ -802,7 +813,7 @@ def _prepared_profile_binding(
             or target_profile.fingerprint != expected_target
         ):
             raise SessionMigrateError("prepared profile options changed; prepare again")
-        opener = Catalog.open_readonly_existing if readonly_catalog else Catalog
+        opener = Catalog.open_readonly_existing if readonly_catalog else (catalog_opener or Catalog)
         with opener(catalog_path) as current:
             rebound, target_current, source_current = _bind_profile_operation(
                 current, source_profile, ref, target_profile, request, environment

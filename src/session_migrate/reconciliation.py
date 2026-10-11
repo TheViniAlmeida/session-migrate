@@ -42,6 +42,7 @@ from session_migrate.lineage import (
     RecoveryOperation,
     _encode,
     _identifier,
+    _validate_cancel_expectations,
 )
 from session_migrate.model import AgentFormat
 from session_migrate.native_snapshots import SourceCaptureContext, capture_source
@@ -1374,9 +1375,16 @@ def _title_binding(title):
     )
 
 
-def cancel_recovered_ready(operation_id, *, store_path):
+def cancel_recovered_ready(
+    operation_id,
+    *,
+    store_path,
+    expected_record_sha256=None,
+    expected_store_uuid=None,
+):
     _identifier(operation_id)
     _path(store_path)
+    _validate_cancel_expectations(expected_record_sha256, expected_store_uuid)
     view = LineageStore.inspect_existing(store_path)
     operation = _operation(view, operation_id)
     _require(
@@ -1386,6 +1394,11 @@ def cancel_recovered_ready(operation_id, *, store_path):
         "not_cancelable",
     )
     record = operation.record
+    if expected_record_sha256 is not None:
+        _require(
+            view.store_uuid == expected_store_uuid and _sha(record) == expected_record_sha256,
+            "ledger_changed",
+        )
     with (
         LineageStore.open_existing(store_path) as store,
         store.lock_operation(operation_id, record.target_namespace) as guard,
@@ -1395,4 +1408,9 @@ def cancel_recovered_ready(operation_id, *, store_path):
             and _sha(_operation(store.recovery_view(), operation_id)) == _sha(operation),
             "ledger_changed",
         )
-        store.cancel_ready(operation_id, guard)
+        store.cancel_ready(
+            operation_id,
+            guard,
+            expected_record_sha256=expected_record_sha256,
+            expected_store_uuid=expected_store_uuid,
+        )

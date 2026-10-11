@@ -443,6 +443,8 @@ def _prepare_context_operation(
     base_environ=None,
     state_home=None,
     cancellation=None,
+    prepublication_check=None,
+    progress=None,
 ):
     from session_migrate.conversion import default_migration_state_home
     from session_migrate.operations import CancellationToken, _prepare_operation
@@ -494,6 +496,12 @@ def _prepare_context_operation(
         source_guard,
         readonly_catalog=True,
     )
+
+    def publication_guard():
+        profile_guard()
+        if prepublication_check is not None:
+            prepublication_check()
+
     token = cancellation or CancellationToken()
     token.claim()
     try:
@@ -502,7 +510,8 @@ def _prepare_context_operation(
             token,
             environ=target_env,
             source_environ=source_env,
-            prepublication_check=profile_guard,
+            prepublication_check=publication_guard,
+            progress=progress,
             profile_context=profiles,
             migration_state_home=state_home,
             runtime_context=context,
@@ -520,6 +529,8 @@ def prepare_summary(
     base_environ=None,
     state_home=None,
     cancellation=None,
+    prepublication_check=None,
+    progress=None,
 ):
     # Reviewed is consumed before target preflight, environment resolution or I/O.
     authority, derived_input, transformation = _consume_reviewed(reviewed)
@@ -540,6 +551,8 @@ def prepare_summary(
         base_environ=base,
         state_home=state_home,
         cancellation=cancellation,
+        prepublication_check=prepublication_check,
+        progress=progress,
     )
 
 
@@ -563,7 +576,16 @@ def _current_source_client(observer, profile, ref):
         raise HandoffOperationError("source_changed") from None
 
 
-def prepare_return_new(request, observer, state_home, *, base_environ=None, cancellation=None):
+def prepare_return_new(
+    request,
+    observer,
+    state_home,
+    *,
+    base_environ=None,
+    cancellation=None,
+    prepublication_check=None,
+    progress=None,
+):
     # Summary review is consumed before even reading the parent ledger.
     _require(type(request) is ReturnNewRequest)
     consumed = _consume_reviewed(request.reviewed) if request.reviewed is not None else None
@@ -636,6 +658,8 @@ def prepare_return_new(request, observer, state_home, *, base_environ=None, canc
         base_environ=base_environ,
         state_home=state_home,
         cancellation=cancellation,
+        prepublication_check=prepublication_check,
+        progress=progress,
     )
     if prepared._state.built.artifact.session_id in forbidden:
         prepared.discard()

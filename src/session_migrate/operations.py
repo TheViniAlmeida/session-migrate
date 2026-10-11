@@ -657,6 +657,7 @@ class _PreparedState:
     last_source_capture: list[NativeSnapshot] = field(
         default_factory=list, repr=False, compare=False
     )
+    catalog_opener: Callable[[Path], Catalog] | None = None
 
 
 def _title_preflight(state: _PreparedState) -> tuple[TitleAliasStore | None, AliasIdentity | None]:
@@ -695,6 +696,7 @@ def _read_prepared_source(state: _PreparedState) -> None:
         state.max_source_bytes,
         expected_root=state.source_root,
         on_capture=captures.append if state.built.source_snapshot is not None else None,
+        catalog_opener=state.catalog_opener,
         readonly_catalog=state.built.runtime_context is not None,
     )
     if root is not None and root.resolve() != state.source_root:
@@ -895,6 +897,7 @@ def prepare_operation(
     max_source_bytes: int | None = None,
     profile_context: Mapping[str, str] | None = None,
     migration_state_home: Path | None = None,
+    catalog_opener: Callable[[Path], Catalog] | None = None,
 ) -> PreparedOperation:
     """Resolve and serialize once, then preflight without installing output/metadata."""
     token = cancellation or CancellationToken()
@@ -910,6 +913,7 @@ def prepare_operation(
             max_source_bytes=max_source_bytes,
             profile_context=profile_context,
             migration_state_home=migration_state_home,
+            catalog_opener=catalog_opener,
         )
     finally:
         token.close()
@@ -926,6 +930,7 @@ def _prepare_operation(
     max_source_bytes: int | None = None,
     profile_context: Mapping[str, str] | None = None,
     migration_state_home: Path | None = None,
+    catalog_opener: Callable[[Path], Catalog] | None = None,
     runtime_context=None,
 ) -> PreparedOperation:
     """Resolve and serialize once, then preflight without installing output/metadata."""
@@ -964,6 +969,7 @@ def _prepare_operation(
             token,
             max_source_bytes,
             observe_target=True,
+            catalog_opener=catalog_opener,
             runtime_context=runtime_context,
         )
         if built.source_root is not None and built.artifact.source.source_format in {
@@ -1023,6 +1029,7 @@ def _prepare_operation(
             max_source_bytes,
             state_home,
         )
+        state = replace(state, catalog_opener=catalog_opener)
         projection, projection_versions, projection_context = _prepare_lineage_projection(state)
         state = replace(
             state,
@@ -2576,6 +2583,7 @@ def _resolve_source(
     expected_root: Path | None = None,
     on_capture: Callable[[NativeSnapshot], None] | None = None,
     on_native_observation: Callable[[Any], None] | None = None,
+    catalog_opener: Callable[[Path], Catalog] | None = None,
     readonly_catalog: bool = False,
 ) -> tuple[Session, TargetFormat, Path | None]:
     if request.command != OperationKind.TRANSFER and (
@@ -2599,7 +2607,9 @@ def _resolve_source(
                     "--source-home/--source-cwd do not apply with catalog selection"
                 )
             catalog_path = request.catalog or _catalog_default(source_environ)
-            opener = Catalog.open_readonly_existing if readonly_catalog else Catalog
+            opener = (
+                Catalog.open_readonly_existing if readonly_catalog else (catalog_opener or Catalog)
+            )
             with opener(catalog_path) as catalog:
                 catalog_id = request.catalog_id
                 if request.title:
@@ -2796,6 +2806,7 @@ def _build_operation(
     cancellation: CancellationToken | None,
     max_source_bytes: int | None,
     observe_target: bool = False,
+    catalog_opener: Callable[[Path], Catalog] | None = None,
     runtime_context=None,
 ) -> _OperationBuild:
     if runtime_context is not None:
@@ -2814,6 +2825,7 @@ def _build_operation(
         on_native_observation=export_proofs.append
         if observe_target and request.command != OperationKind.CONVERT
         else None,
+        catalog_opener=catalog_opener,
         readonly_catalog=runtime_context is not None,
     )
     target_cli_version = request.target_cli_version
