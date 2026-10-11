@@ -166,6 +166,7 @@ class RecoveryContext:
     target_profile: Profile | None = None
     manifest_path: Path | None = None
     policy: ProjectionPolicy = field(default_factory=ProjectionPolicy)
+    handoff_document: Path | None = None
 
     def __post_init__(self):
         _require(type(self.request) is OperationRequest, "invalid_request")
@@ -173,6 +174,8 @@ class RecoveryContext:
         _path(self.input_path)
         if self.manifest_path is not None:
             _path(self.manifest_path)
+        if self.handoff_document is not None:
+            _path(self.handoff_document)
         for name in ("source_environment", "target_environment"):
             values = dict(getattr(self, name))
             _require(
@@ -350,7 +353,7 @@ _HANDLES: WeakKeyDictionary[ReconciliationHandle, _State] = WeakKeyDictionary()
 def _context_binding(context):
     if context is None:
         return None
-    return {
+    binding = {
         "request": {
             f.name: str(v) if isinstance(v, Path) else v
             for f in fields(context.request)
@@ -366,6 +369,9 @@ def _context_binding(context):
         ],
         "policy": context.policy.sha256,
     }
+    if context.handoff_document is not None:
+        binding["handoff_document"] = str(context.handoff_document)
+    return binding
 
 
 def _state_binding(state):
@@ -485,7 +491,7 @@ def _stable(first, second):
     )
 
 
-def _read_document(path, *, private=True):
+def _read_document(path, *, private=True, maximum=MAX_TITLE_RECORD_BYTES):
     directory = (_private_directory if private else _directory)(path.parent, create=False)
     try:
         fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
@@ -500,8 +506,8 @@ def _read_document(path, *, private=True):
                 ),
                 "finalization_unavailable",
             )
-            _require(before.st_size <= MAX_TITLE_RECORD_BYTES, "finalization_unavailable")
-            data = stream.read(MAX_TITLE_RECORD_BYTES + 1)
+            _require(before.st_size <= maximum, "finalization_unavailable")
+            data = stream.read(maximum + 1)
             after = os.fstat(stream.fileno())
             named = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
 
@@ -517,8 +523,7 @@ def _read_document(path, *, private=True):
                 )
 
             _require(
-                len(data) <= MAX_TITLE_RECORD_BYTES
-                and witness(before) == witness(after) == witness(named),
+                len(data) <= maximum and witness(before) == witness(after) == witness(named),
                 "finalization_conflict",
             )
             _directory_current(path.parent, directory)
@@ -543,7 +548,11 @@ def _title_state(context, record, projection, target, *, observer, ref, issued_a
             requested=request.target_title,
             cli_version=record.versions.target_client,
             policy=request.title_policy,
-            source_title=projection.source_observation.session.title,
+            source_title=(
+                None
+                if record.transformation is not None
+                else projection.source_observation.session.title
+            ),
         )
     except SessionMigrateError:
         raise ReconciliationError("finalization_unavailable") from None
@@ -553,7 +562,22 @@ def _title_state(context, record, projection, target, *, observer, ref, issued_a
         and any(ref.kind == "manifest" and ref.path == str(manifest) for ref in record.references),
         "finalization_unavailable",
     )
-    document, manifest_sha = _read_document(manifest, private=False)
+    document, manifest_sha = _read_document(
+        manifest,
+        private=False,
+        maximum=128 * 1024 if record.transformation is not None else MAX_TITLE_RECORD_BYTES,
+    )
+    if record.transformation is not None:
+        from session_migrate.conversion import decode_derived_manifest
+
+        document = decode_derived_manifest(json.dumps(document).encode())
+        _require(
+            document["transformation"] == json.loads(_encode(record.transformation))
+            and document["conversion_input"] == json.loads(_encode(record.transformation.input))
+            and document["return_link"] == json.loads(_encode(record.return_link)),
+            "finalization_conflict",
+        )
+        document = {**document, "schema_version": 2, "source": document["authority_source"]}
     _require(
         document.get("schema_version") == 2
         and type(document.get("source")) is dict
@@ -642,7 +666,9 @@ def _title_state(context, record, projection, target, *, observer, ref, issued_a
     )
 
 
-def _proof(operation, context, observer, effects):
+def _proof(operation, context, observer, effects, *, store_path=None):
+    if operation.record.transformation is not None:
+        return _derived_recovery_proof(operation, context, observer, effects, store_path=store_path)
     started = monotonic_ns()
     record = operation.record
     validate_observer(observer)
@@ -671,6 +697,7 @@ def _proof(operation, context, observer, effects):
         policy=context.policy,
         observer=observer,
         on_read_effect=effects.add,
+        parent_store_path=store_path if record.return_link is not None else None,
     )
     projection = prepare_recovered_projection(source, artifact, record, recovered_context)
     source_ref = (
@@ -815,6 +842,280 @@ def _proof(operation, context, observer, effects):
     return completion, tuple(_endpoint_fingerprint(e) for e in third), title
 
 
+def _private_handoff_bytes(path):
+    """Existing private accepted document, integral FD read with A's safeguards."""
+    from session_migrate.handoff import _ancestry, _file_current, _private_file
+    from session_migrate.handoff_types import MAX_DOCUMENT_BYTES
+    from session_migrate.lineage import _PinnedNamespace
+
+    _require(path is not None, "context_unavailable")
+    namespace = _PinnedNamespace.open(path.parent)
+    descriptor = None
+    try:
+        namespace.check()
+        descriptor = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=namespace.root
+        )
+        info = os.fstat(descriptor)
+        _private_file(info)
+        _require(0 < info.st_size <= MAX_DOCUMENT_BYTES, "proof_unavailable")
+        chunks = []
+        remaining = info.st_size
+        from session_migrate.handoff import _info
+
+        witness = _info(info)
+        while remaining:
+            _file_current(namespace, path, descriptor, witness)
+            block = os.read(descriptor, min(remaining, 64 * 1024))
+            _require(bool(block), "proof_unavailable")
+            chunks.append(block)
+            remaining -= len(block)
+        _require(not os.read(descriptor, 1), "proof_unavailable")
+        _file_current(namespace, path, descriptor, witness)
+        return b"".join(chunks), (witness, _ancestry(namespace))
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        namespace.close()
+
+
+def _derived_recovery_proof(operation, context, observer, effects, *, store_path):
+    started = monotonic_ns()
+    from session_migrate.continuity_observation import (
+        _original_authority,
+        effective_profile_fingerprint,
+    )
+    from session_migrate.conversion import EmitContext, PortableEmission, decode_derived_manifest
+    from session_migrate.derived_projection import (
+        _schema_time,
+        prepare_derived_projection,
+        verify_derived_projection,
+    )
+    from session_migrate.handoff_operations import _validate_parent_binding
+    from session_migrate.handoff_types import _issue_user_input
+    from session_migrate.model import TargetFormat
+    from session_migrate.operations import _digest, _public_options, _source_witness
+    from session_migrate.profiles import SessionRef
+    from session_migrate.recovered_projections import _catalog_selection, _profiles
+
+    record = operation.record
+    _require(
+        context.handoff_document is not None and context.manifest_path is not None,
+        "context_unavailable",
+    )
+    validate_observer(observer)
+    source_ref = ref_for_identity(observer, record.source.identity)
+    matches = [
+        p
+        for p in observer._profiles
+        if p.format.value == record.target_namespace.format
+        and str(p.root) == record.target_namespace.canonical_root
+    ]
+    _require(len(matches) == 1, "proof_unavailable")
+    p = matches[0]
+    target_ref = SessionRef(
+        p.format, p.root, record.target_namespace.native_id, p.id, profile_fingerprint=p.fingerprint
+    )
+    _require(
+        effective_profile_fingerprint(observer, target_ref) == record.target_profile_fingerprint,
+        "proof_unavailable",
+    )
+    profiles = _profiles(context.source_profile, context.target_profile)
+    _require(
+        _digest(
+            _public_options(
+                context.request,
+                context.target_environment,
+                context.source_environment,
+                profiles,
+                transformation=record.transformation,
+                return_link=record.return_link,
+            )
+        )
+        == record.options_sha256,
+        "proof_unavailable",
+    )
+    _require(
+        context.request.session_id == record.target_namespace.native_id
+        or (
+            record.target_namespace.format == "opencode"
+            and record.target_namespace.native_id
+            == "ses_" + context.request.session_id.replace("-", "")
+        ),
+        "proof_unavailable",
+    )
+    selection = _catalog_selection(observer, context.request)
+    data, document_witness = _private_handoff_bytes(context.handoff_document)
+    derived_input = _issue_user_input(data)
+    _require(derived_input.identity == record.transformation.input, "proof_unavailable")
+    input_capture = capture_source(
+        SourceCaptureContext(AgentFormat(record.target_namespace.format), context.input_path)
+    )
+    _require(input_capture.authority_sha256 == record.target_input_sha256, "proof_unavailable")
+    manifest, manifest_sha = _read_document(
+        context.manifest_path, private=False, maximum=128 * 1024
+    )
+    manifest = decode_derived_manifest(json.dumps(manifest).encode())
+    _require(
+        any(
+            ref.kind == "manifest" and ref.path == str(context.manifest_path)
+            for ref in record.references
+        )
+        and manifest["transformation"] == json.loads(_encode(record.transformation))
+        and manifest["conversion_input"] == json.loads(_encode(record.transformation.input))
+        and manifest["return_link"] == json.loads(_encode(record.return_link))
+        and manifest["target"]["sha256"] == record.target_input_sha256
+        and manifest["target"]["format"] == record.target_namespace.format
+        and manifest["target"]["session_id"] == record.target_namespace.native_id
+        and manifest["target"]["cli_version"] == record.versions.target_client
+        and manifest["target"]["cwd"] == str(input_capture.parse().cwd)
+        and _schema_time(
+            manifest["target"]["timestamp"], TargetFormat(record.target_namespace.format)
+        )
+        == _schema_time(
+            input_capture.parse().started_at, TargetFormat(record.target_namespace.format)
+        )
+        and manifest["target"]["records"] == input_capture.parse().raw_record_count
+        and manifest["authority_source"]["sha256"] == record.source.artifact_sha256
+        and manifest["authority_source"]["identity"] == json.loads(_encode(record.source.identity))
+        and manifest["authority_source"]["path"] == str(context.source_path)
+        and manifest["authority_source"]["cli_version"] == record.versions.source_client,
+        "proof_unavailable",
+    )
+    refs = (source_ref, target_ref)
+    clients = (record.versions.source_client, record.versions.target_client)
+    first = _observe_pair(observer, refs, clients, context.policy.canonical_policy, effects)
+    second = _observe_pair(observer, refs, clients, context.policy.canonical_policy, effects)
+    _stable(first, second)
+    source, target = second
+    _require(
+        source.identity == record.source.identity
+        and source.authority_sha256 == record.source.artifact_sha256
+        and target.authority_sha256 == record.target_input_sha256,
+        "observation_changed",
+    )
+    authority = _original_authority(source, observer, source_ref)
+    _require(authority.snapshot.source_path == context.source_path, "proof_unavailable")
+    _require(
+        manifest["authority_source"]["records"] == authority.session.raw_record_count
+        and manifest["authority_source"]["events"] == authority.session.event_counts(),
+        "proof_unavailable",
+    )
+    _require(
+        _source_witness(authority.session, Path(source.identity.namespace.canonical_root))
+        == record.source.witness_sha256,
+        "proof_unavailable",
+    )
+    if record.return_link is not None:
+        _require(store_path is not None, "context_unavailable")
+        _validate_parent_binding(
+            store_path,
+            record.return_link,
+            source_identity=authority.identity,
+            operation_record=record,
+        )
+    options = context.request
+    emit_context = EmitContext(
+        TargetFormat(record.target_namespace.format),
+        record.target_namespace.native_id,
+        input_capture.parse().cwd,
+        record.versions.target_client,
+        manifest["target"]["timestamp"],
+        options.model_provider,
+        options.model,
+        options.target_title if options.title_policy is TitlePolicy.NATIVE else None,
+    )
+    emission = PortableEmission(
+        emit_context, input_capture.raw_bytes, input_capture.parse().raw_record_count, ()
+    )
+    projection = prepare_derived_projection(
+        authority, derived_input, record.transformation, emission, artifact_path=context.input_path
+    )
+    _require(
+        projection.expectation == record.expected_projection
+        and projection.versions == record.versions,
+        "proof_unavailable",
+    )
+    validate_endpoint(target, observer=observer, ref=target_ref, issued_after_ns=started)
+    actual_snapshot = _OBSERVATIONS[target].snapshot
+    validate_endpoint(target, observer=observer, ref=target_ref, issued_after_ns=started)
+    proof, target_observed = verify_derived_projection(projection, actual_snapshot)
+    title = _title_state(
+        context,
+        record,
+        projection,
+        target,
+        observer=observer,
+        ref=target_ref,
+        issued_after_ns=started,
+    )
+    third = _observe_pair(observer, refs, clients, context.policy.canonical_policy, effects)
+    _stable(second, third)
+    fresh_data, fresh_witness = _private_handoff_bytes(context.handoff_document)
+    _require(
+        fresh_data == data
+        and fresh_witness == document_witness
+        and _catalog_selection(observer, context.request)[4] == selection[4],
+        "observation_changed",
+    )
+    input_after = capture_source(
+        SourceCaptureContext(AgentFormat(record.target_namespace.format), context.input_path)
+    )
+    _, manifest_after_sha = _read_document(context.manifest_path, private=False, maximum=128 * 1024)
+    _require(
+        input_after.authority_sha256 == input_capture.authority_sha256
+        and manifest_after_sha == manifest_sha,
+        "observation_changed",
+    )
+    fourth = _observe_pair(observer, refs, clients, context.policy.canonical_policy, effects)
+    _stable(third, fourth)
+    authority.check()
+    source_cp = _checkpoint(
+        source.observation,
+        record.source.identity,
+        source.authority_sha256,
+        record.versions,
+        _effective_source_coverage(source.observation),
+    )
+    target_cp = _checkpoint(
+        target_observed,
+        target.identity,
+        target.authority_sha256,
+        record.versions,
+        _effective_source_coverage(target_observed),
+    )
+    references = (
+        EvidenceReference(
+            "artifact",
+            "verified",
+            "available",
+            str(context.input_path),
+            input_capture.authority_sha256,
+        ),
+        EvidenceReference(
+            "manifest", "verified", "available", str(context.manifest_path), manifest_sha
+        ),
+        EvidenceReference(
+            "artifact",
+            "verified",
+            "available",
+            str(context.handoff_document),
+            record.transformation.input.document_sha256,
+        ),
+    )
+    if title is not None and title[8] is not None:
+        references += (
+            EvidenceReference("receipt", "verified", "available", str(title[5]), title[8]),
+        )
+    return (
+        CompletionRecord(
+            target.identity, record.target_input_sha256, source_cp, target_cp, references, proof
+        ),
+        tuple(_endpoint_fingerprint(e) for e in fourth),
+        title,
+    )
+
+
 def prepare_reconciliation(operation_id, *, store_path, context=None, observer=None):
     _identifier(operation_id)
     _path(store_path)
@@ -880,7 +1181,7 @@ def prepare_reconciliation(operation_id, *, store_path, context=None, observer=N
             return result("blocked", "operation_not_recoverable")
         if type(context) is not RecoveryContext or type(observer) is not EndpointObserver:
             return result("blocked", "context_unavailable")
-        proof = _proof(operation, context, observer, effects)
+        proof = _proof(operation, context, observer, effects, store_path=store_path)
         latest = LineageStore.inspect_existing(store_path)
         _require(
             latest is not None
@@ -925,7 +1226,9 @@ def commit_reconciliation(handle):
                 )
                 if current.durable_state is OperationState.COMPLETED:
                     return current.receipt
-                proof = _proof(current, state.context, state.observer, set())
+                proof = _proof(
+                    current, state.context, state.observer, set(), store_path=state.store_path
+                )
                 _require(
                     proof[0] == state.proof[0]
                     and proof[1] == state.proof[1]
@@ -952,7 +1255,13 @@ def commit_reconciliation(handle):
                             proposal_id=record.operation_id,
                             target_verified=True,
                         )
-                        after_alias = _proof(current, state.context, state.observer, set())
+                        after_alias = _proof(
+                            current,
+                            state.context,
+                            state.observer,
+                            set(),
+                            store_path=state.store_path,
+                        )
                         _require(
                             after_alias[1] == proof[1]
                             and _title_binding(after_alias[2])[:6] == _title_binding(title)[:6],
@@ -965,7 +1274,9 @@ def commit_reconciliation(handle):
                             binding=binding,
                             alias_store=alias_store,
                         )
-                    proof = _proof(current, state.context, state.observer, set())
+                    proof = _proof(
+                        current, state.context, state.observer, set(), store_path=state.store_path
+                    )
                     _require(
                         proof[1] == state.proof[1]
                         and _title_binding(proof[2])[:6] == _title_binding(title)[:6],
@@ -983,7 +1294,25 @@ def commit_reconciliation(handle):
                     # caller hashes never become a persistence capability.
                     try:
                         _check_handle_state(handle, state)
-                        fresh = _proof(current, state.context, state.observer, set())
+                        if record.return_link is not None:
+                            from session_migrate.handoff_operations import _held_coordinator
+
+                            with _held_coordinator(store, guard, record):
+                                fresh = _proof(
+                                    current,
+                                    state.context,
+                                    state.observer,
+                                    set(),
+                                    store_path=state.store_path,
+                                )
+                        else:
+                            fresh = _proof(
+                                current,
+                                state.context,
+                                state.observer,
+                                set(),
+                                store_path=state.store_path,
+                            )
                         _require(
                             fresh[0] == proof[0]
                             and fresh[1] == proof[1]
@@ -1003,7 +1332,9 @@ def commit_reconciliation(handle):
                     external_guard=fresh_guard,
                 )
                 published = True
-                after = _proof(current, state.context, state.observer, set())
+                after = _proof(
+                    current, state.context, state.observer, set(), store_path=state.store_path
+                )
                 _require(
                     after[0] == proof[0]
                     and after[1] == proof[1]

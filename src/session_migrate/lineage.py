@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Union, get_args, get_origin, get_type_hints
 
 from session_migrate.errors import SessionMigrateError
-from session_migrate.model import AgentFormat
+from session_migrate.model import AgentFormat, EventKind
 from session_migrate.witnesses import (
     BoundaryKind,
     BoundaryWitness,
@@ -254,6 +254,129 @@ class PolicyVersions:
 
 
 @dataclass(frozen=True, slots=True, repr=False)
+class DerivedInputIdentityV1:
+    kind: str
+    document_sha256: str
+    event_sha256: str
+
+    def __post_init__(self):
+        _require(type(self.kind) is str and self.kind == "user_handoff")
+        _hash(self.document_sha256)
+        _hash(self.event_sha256)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class SelectionRangeV1:
+    first_event: int
+    last_event: int
+    block_index: int | None
+
+    def __post_init__(self):
+        _count(self.first_event)
+        _count(self.last_event)
+        _require(self.first_event <= self.last_event)
+        if self.block_index is not None:
+            _count(self.block_index)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class OmissionV1:
+    kind: str
+    count: int
+
+    def __post_init__(self):
+        _require(type(self.kind) is str and self.kind in {kind.value for kind in EventKind})
+        _count(self.count)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class TransformationV1:
+    schema_version: int
+    kind: str
+    policy: str
+    input: DerivedInputIdentityV1
+    selection: tuple[SelectionRangeV1, ...]
+    omissions: tuple[OmissionV1, ...]
+    provenance: str
+
+    def __post_init__(self):
+        _require(type(self.schema_version) is int and self.schema_version == 1)
+        _require(type(self.kind) is str and self.kind == "user_handoff")
+        _require(type(self.policy) is str and self.policy == "user-handoff-v1")
+        _require(type(self.input) is DerivedInputIdentityV1)
+        self.input.__post_init__()
+        _require(type(self.selection) is tuple and len(self.selection) <= MAX_UNITS)
+        for item in self.selection:
+            _require(type(item) is SelectionRangeV1)
+            item.__post_init__()
+        _require(type(self.omissions) is tuple and len(self.omissions) <= len(EventKind))
+        for item in self.omissions:
+            _require(type(item) is OmissionV1)
+            item.__post_init__()
+        _require(len({item.kind for item in self.omissions}) == len(self.omissions))
+        _require(
+            type(self.provenance) is str
+            and self.provenance
+            in (
+                "user_supplied",
+                "fake_model_reviewed",
+            )
+        )
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ReturnLinkV1:
+    schema_version: int
+    parent_operation_id: str
+    parent_receipt_sha256: str
+    parent_target_identity: QualifiedIdentity
+
+    def __post_init__(self):
+        _require(type(self.schema_version) is int and self.schema_version == 1)
+        _identifier(self.parent_operation_id)
+        _hash(self.parent_receipt_sha256)
+        _require(type(self.parent_target_identity) is QualifiedIdentity)
+        self.parent_target_identity.__post_init__()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class DerivationBindingV1:
+    schema_version: int
+    source_identity: QualifiedIdentity
+    input: DerivedInputIdentityV1
+    transformation_sha256: str
+
+    def __post_init__(self):
+        _require(type(self.schema_version) is int and self.schema_version == 1)
+        _require(type(self.source_identity) is QualifiedIdentity)
+        self.source_identity.__post_init__()
+        _require(type(self.input) is DerivedInputIdentityV1)
+        self.input.__post_init__()
+        _hash(self.transformation_sha256)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class DerivedVerificationV1:
+    schema_version: int
+    transformation_sha256: str
+    input_event_sha256: str
+    expected_target_snapshot_sha256: str
+    observed_target_authority_sha256: str
+    policy: str
+
+    def __post_init__(self):
+        _require(type(self.schema_version) is int and self.schema_version == 1)
+        for value in (
+            self.transformation_sha256,
+            self.input_event_sha256,
+            self.expected_target_snapshot_sha256,
+            self.observed_target_authority_sha256,
+        ):
+            _hash(value)
+        _require(type(self.policy) is str and self.policy == "user-handoff-v1")
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class SourceMetadata:
     """Prepared source authority; identity remains absent for portable inputs."""
 
@@ -312,6 +435,8 @@ class OperationRecord:
     versions: PolicyVersions
     expected_projection: ProjectionExpectation
     references: tuple[EvidenceReference, ...]
+    transformation: TransformationV1 | None = None
+    return_link: ReturnLinkV1 | None = None
 
     def __post_init__(self) -> None:
         _identifier(self.operation_id)
@@ -326,6 +451,17 @@ class OperationRecord:
         _hash(self.options_sha256)
         _hash(self.target_input_sha256)
         _references(self.references)
+        _require(self.transformation is None or type(self.transformation) is TransformationV1)
+        if self.transformation is not None:
+            self.transformation.__post_init__()
+            _require(self.source.identity is not None)
+        _require(self.return_link is None or type(self.return_link) is ReturnLinkV1)
+        if self.return_link is not None:
+            self.return_link.__post_init__()
+            _require(
+                self.return_link.parent_operation_id != self.operation_id
+                and self.return_link.parent_target_identity == self.source.identity
+            )
         _encode(self)
 
 
@@ -391,6 +527,7 @@ class CompletionRecord:
     source_checkpoint: CheckpointRecord | None
     target_checkpoint: CheckpointRecord | None
     references: tuple[EvidenceReference, ...]
+    derived_verification: DerivedVerificationV1 | None = None
 
     def __post_init__(self) -> None:
         _require(type(self.target_identity) is QualifiedIdentity)
@@ -398,6 +535,12 @@ class CompletionRecord:
         _require(self.source_checkpoint is None or type(self.source_checkpoint) is CheckpointRecord)
         _require(self.target_checkpoint is None or type(self.target_checkpoint) is CheckpointRecord)
         _references(self.references)
+        _require(
+            self.derived_verification is None
+            or type(self.derived_verification) is DerivedVerificationV1
+        )
+        if self.derived_verification is not None:
+            self.derived_verification.__post_init__()
         _encode(self, 2 * MAX_METADATA_BYTES + MAX_RECEIPT_BYTES)
 
 
@@ -411,6 +554,8 @@ class CompletionReceipt:
     target_checkpoint_sha256: str | None
     continuity_reason: str
     references: tuple[EvidenceReference, ...]
+    derivation: DerivationBindingV1 | None = None
+    return_link: ReturnLinkV1 | None = None
 
     def __post_init__(self) -> None:
         _require(type(self.schema_version) is int and self.schema_version == 1)
@@ -419,7 +564,29 @@ class CompletionReceipt:
         _hash(self.input_artifact_sha256)
         _hash(self.source_checkpoint_sha256, optional=True)
         _hash(self.target_checkpoint_sha256, optional=True)
-        _require(self.continuity_reason in ("tracked", "identity_untracked", "coverage_unverified"))
+        _require(
+            self.continuity_reason
+            in (
+                "tracked",
+                "identity_untracked",
+                "coverage_unverified",
+                "derived_handoff",
+            )
+        )
+        _require(self.derivation is None or type(self.derivation) is DerivationBindingV1)
+        _require((self.continuity_reason == "derived_handoff") == (self.derivation is not None))
+        if self.derivation is not None:
+            self.derivation.__post_init__()
+            _require(
+                self.source_checkpoint_sha256 is not None
+                and self.target_checkpoint_sha256 is not None
+            )
+        _require(self.return_link is None or type(self.return_link) is ReturnLinkV1)
+        if self.return_link is not None:
+            self.return_link.__post_init__()
+            _require(self.return_link.parent_operation_id != self.operation_id)
+            if self.derivation is not None:
+                _require(self.return_link.parent_target_identity == self.derivation.source_identity)
         _references(self.references)
         _encode(self, MAX_RECEIPT_BYTES)
 
@@ -467,6 +634,8 @@ class EdgeRecord:
     target_identity: QualifiedIdentity
     source_checkpoint_sha256: str
     target_checkpoint_sha256: str
+    derivation: DerivationBindingV1 | None = None
+    return_link: ReturnLinkV1 | None = None
 
     def __post_init__(self) -> None:
         _identifier(self.operation_id)
@@ -476,6 +645,21 @@ class EdgeRecord:
         )
         _hash(self.source_checkpoint_sha256)
         _hash(self.target_checkpoint_sha256)
+        _require(self.derivation is None or type(self.derivation) is DerivationBindingV1)
+        if self.derivation is not None:
+            self.derivation.__post_init__()
+            _require(self.derivation.source_identity == self.source_identity)
+        _require(self.return_link is None or type(self.return_link) is ReturnLinkV1)
+        if self.return_link is not None:
+            self.return_link.__post_init__()
+            _require(
+                self.return_link.parent_operation_id != self.operation_id
+                and self.return_link.parent_target_identity == self.source_identity
+            )
+
+    @property
+    def kind(self) -> str:
+        return "DERIVED" if self.derivation is not None else "FULL"
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -499,6 +683,13 @@ class RecoveryView:
 
 
 _RECORD_TYPES = (
+    DerivedInputIdentityV1,
+    SelectionRangeV1,
+    OmissionV1,
+    TransformationV1,
+    ReturnLinkV1,
+    DerivationBindingV1,
+    DerivedVerificationV1,
     RootWitness,
     NativeNamespace,
     QualifiedIdentity,
@@ -517,6 +708,10 @@ _RECORD_TYPES = (
     PrefixWitness,
 )
 _OPTIONAL_RECORD_FIELDS = {
+    OperationRecord: ("transformation", "return_link"),
+    CompletionRecord: ("derived_verification",),
+    CompletionReceipt: ("derivation", "return_link"),
+    EdgeRecord: ("derivation", "return_link"),
     SourceMetadata: ("prefix_witness",),
     ProjectionExpectation: ("prefix_witness", "relation_sha256"),
     CheckpointRecord: ("prefix_witness",),
@@ -622,6 +817,21 @@ def _decode(kind: object, payload: object, maximum: int = MAX_METADATA_BYTES):
 def _validated(kind: object, value: object, maximum: int = MAX_METADATA_BYTES):
     _require(type(value) is kind)
     return _decode(kind, _encode(value, maximum), maximum)
+
+
+def _stored_derived_verification(record, target):
+    """Reconstruct durable metadata for image validation, never runtime proof."""
+    if record.transformation is None:
+        return None
+    _require(type(target) is CheckpointRecord, "proof_mismatch")
+    return DerivedVerificationV1(
+        1,
+        hashlib.sha256(_encode(record.transformation)).hexdigest(),
+        record.transformation.input.event_sha256,
+        target.snapshot_sha256,
+        target.artifact_sha256,
+        record.transformation.policy,
+    )
 
 
 _SCHEMA = (
@@ -1262,6 +1472,7 @@ class LineageStore:
                     checkpoints.get("source"),
                     checkpoints.get("target"),
                     receipt.references,
+                    _stored_derived_verification(record, checkpoints.get("target")),
                 )
                 expected, edge = self._completion(record, done)
                 _require(receipt == expected and len(edges) == (1 if edge else 0), "invalid_image")
@@ -1707,7 +1918,45 @@ class LineageStore:
         target_hash = hashlib.sha256(_encode(target)).hexdigest() if target is not None else None
         reason = "identity_untracked" if record.source.identity is None else "coverage_unverified"
         edge = None
-        if (
+        derivation = None
+        if record.transformation is not None:
+            proof = done.derived_verification
+            _require(
+                type(proof) is DerivedVerificationV1
+                and source is not None
+                and source.identity is not None
+                and target is not None
+                and target.identity is not None,
+                "proof_mismatch",
+            )
+            proof.__post_init__()
+            transformation_sha = hashlib.sha256(_encode(record.transformation)).hexdigest()
+            _require(
+                proof.transformation_sha256 == transformation_sha
+                and proof.input_event_sha256 == record.transformation.input.event_sha256
+                and proof.policy == record.transformation.policy
+                and proof.expected_target_snapshot_sha256
+                == record.expected_projection.snapshot_sha256
+                and proof.expected_target_snapshot_sha256 == target.snapshot_sha256
+                and proof.observed_target_authority_sha256 == target.artifact_sha256,
+                "proof_mismatch",
+            )
+            derivation = DerivationBindingV1(
+                1, source.identity, record.transformation.input, transformation_sha
+            )
+            reason = "derived_handoff"
+            edge = EdgeRecord(
+                record.operation_id,
+                source.identity,
+                done.target_identity,
+                source_hash,
+                target_hash,
+                derivation,
+                record.return_link,
+            )
+        else:
+            _require(done.derived_verification is None, "proof_mismatch")
+        if record.transformation is None and (
             record.source.identity is not None
             and source is not None
             and target is not None
@@ -1721,6 +1970,8 @@ class LineageStore:
                 done.target_identity,
                 source_hash,
                 target_hash,
+                None,
+                record.return_link,
             )
         receipt = CompletionReceipt(
             1,
@@ -1731,6 +1982,8 @@ class LineageStore:
             target_hash,
             reason,
             done.references,
+            derivation,
+            record.return_link,
         )
         _encode(receipt, MAX_RECEIPT_BYTES)
         return receipt, edge
@@ -1846,6 +2099,7 @@ class LineageStore:
                     checkpoints.get("source"),
                     checkpoints.get("target"),
                     existing.references,
+                    _stored_derived_verification(record, checkpoints.get("target")),
                 )
                 _require(stored == done and existing == receipt, "proof_mismatch")
                 return existing

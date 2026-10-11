@@ -52,6 +52,9 @@ def build_parser() -> argparse.ArgumentParser:
     from session_migrate.recovery_cli import add_action_commands
 
     add_action_commands(subparsers, _add_operation_arguments)
+    from session_migrate.handoff_cli import add_handoff_commands
+
+    add_handoff_commands(subparsers)
 
     tui_parser = subparsers.add_parser("tui", help="interactive migration (optional tui extra)")
     tui_parser.add_argument(
@@ -288,6 +291,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command in {"handoff", "return-new"}:
+            from session_migrate.handoff_cli import run_handoff_command
+
+            return run_handoff_command(args, parser)
         if args.command in {"reconcile", "adopt"} or (
             args.command == "lineage" and args.lineage_command in {"cancel-ready", "baseline"}
         ):

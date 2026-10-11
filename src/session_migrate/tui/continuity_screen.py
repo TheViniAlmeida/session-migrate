@@ -12,7 +12,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Footer, Header, Input, OptionList
 from textual.widgets.option_list import Option
 
-from session_migrate.continuity import ContinuitySelector
+from session_migrate.continuity import ContinuityAssessmentV2, ContinuitySelector
 from session_migrate.errors import SessionMigrateError
 from session_migrate.lineage import CompletionReceipt, ReconcileReceipt
 from session_migrate.tui.controller import ContinuityDetail, Controller, OperationPage, Worker
@@ -84,6 +84,19 @@ def detail_text(detail: ContinuityDetail) -> str:
         lines.append("Continuity: unavailable (current profile context required)")
         lines.append(_REASON_LABELS.get(detail.context_reason, detail.context_reason))
     assessment = detail.assessment
+    if type(assessment) is ContinuityAssessmentV2:
+        lines.extend(
+            [
+                "Assessment schema: 2 — derived USER handoff, historical transcript omitted.",
+                f"Document SHA256: {assessment.derivation.input.document_sha256}",
+                f"Derived event SHA256: {assessment.derivation.input.event_sha256}",
+                "Return parent: "
+                + (
+                    assessment.return_link.parent_operation_id if assessment.return_link else "none"
+                ),
+            ]
+        )
+        assessment = assessment.baseline
     if assessment is not None:
         status = assessment.status.value
         lines.extend(

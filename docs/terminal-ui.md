@@ -202,3 +202,14 @@ and assessment only; reconciliation and adoption use separately confirmed
 core/CLI operations. A delta label does not enable update: native turn closure
 and external-client coordination remain unproven. See
 [continuity and recovery](continuity.md) for the exact limits.
+# F5A prototype review screen
+
+**Handoff / return-new** / **Ctrl+H** opens an independent screen for explicit
+event/block selection, complete literal document editing, private export/SHA
+acceptance and new-session preparation. It does not consume the clipped preview
+or invalidate the ordinary transfer's prepared handle. Current source/target
+profiles and a return parent are explicit. Confirmation consumes the actual
+private prepared handle once; after publication begins, Back/Quit/form changes
+keep waiting for its receipt. No editor, provider or resume command executes.
+See [offline handoff and return-new](handoff-return-new.md) for the prototype's
+release gates and native proof limitations.

@@ -41,6 +41,7 @@ class MigrationApp(App):
         ("escape", "back", "Back / cancel"),
         ("ctrl+q", "quit_safe", "Quit"),
         ("ctrl+o", "operations", "Operations"),
+        ("ctrl+h", "handoff", "Handoff / return-new"),
     ]
 
     def __init__(self, controller: Controller, *, profiles_file: Path | None = None):
@@ -70,6 +71,7 @@ class MigrationApp(App):
         yield Header()
         with Horizontal(id="app-navigation"):
             yield Button("Operations", id="operations")
+            yield Button("Handoff / return-new", id="handoff")
         yield Literal("Loading profiles…", id="status")
         with ContentSwitcher(initial="source", id="steps"):
             with VerticalScroll(id="source"):
@@ -405,6 +407,9 @@ class MigrationApp(App):
         self.status(" ".join(page.notices) or "Preview ready.")
 
     def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "handoff":
+            self.action_handoff()
+            return
         id = event.button.id
         if id == "operations":
             self.action_operations()
@@ -669,11 +674,26 @@ class MigrationApp(App):
             return
         self.push_screen(ContinuityScreen(self.controller, profiles_file=self.profiles_file))
 
+    def action_handoff(self):
+        from session_migrate.tui.handoff_screen import HandoffScreen
+
+        if isinstance(self.screen, HandoffScreen):
+            return
+        if self.pending or self.preview_request:
+            self.status("Wait for the current task before opening handoff review.")
+            return
+        self.push_screen(HandoffScreen(self.controller, profiles_file=self.profiles_file))
+
     def action_quit(self):
         # Also route inherited framework quit bindings through the publication guard.
         self.action_quit_safe()
 
     def action_quit_safe(self):
+        from session_migrate.tui.handoff_screen import HandoffScreen
+
+        if isinstance(self.screen, HandoffScreen):
+            self.screen.action_quit_safe()
+            return
         if self.pending == "commit":
             self.action_back()
             return

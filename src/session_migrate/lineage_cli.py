@@ -14,6 +14,7 @@ from pathlib import Path
 from session_migrate.catalog import Catalog, default_catalog_path
 from session_migrate.continuity import (
     ContinuityAssessmentV1,
+    ContinuityAssessmentV2,
     ContinuitySelector,
     ContinuityStatus,
     ExplicitPair,
@@ -144,12 +145,22 @@ def _metadata(value):
 
 
 def metadata_dict(value: LineageInspectionV1 | ContinuityAssessmentV1 | RecoveryOperation) -> dict:
-    if type(value) not in (LineageInspectionV1, ContinuityAssessmentV1, RecoveryOperation):
+    if type(value) not in (
+        LineageInspectionV1,
+        ContinuityAssessmentV1,
+        ContinuityAssessmentV2,
+        RecoveryOperation,
+    ):
         raise SessionMigrateError("readonly_metadata_invalid")
     result = _metadata(value)
     if type(value) is ContinuityAssessmentV1:
         # The core may describe future operations. The CLI advertises implemented actions only.
         result["actions"] = [action for action in result["actions"] if action == "inspect"]
+    if type(value) is ContinuityAssessmentV2:
+        result["baseline"]["actions"] = [
+            action for action in result["baseline"]["actions"] if action == "inspect"
+        ]
+        result["baseline"]["update_available"] = False
     result["update_available"] = False
     return result
 
@@ -320,18 +331,25 @@ def _assessment(args, environment, path: Path) -> dict:
             catalog, profiles, base_environ=environment, legacy_runtime_contexts=contexts
         )
         result = metadata_dict(assess_continuity(selector, observer, path))
+        baseline = result.get("baseline", result)
         for side in ("source", "target"):
             matches = [
                 p
                 for p in profiles
-                if p.fingerprint == result[f"{side}_current_profile_fingerprint"]
+                if p.fingerprint == baseline[f"{side}_current_profile_fingerprint"]
             ]
-            result[f"{side}_profile_id"] = matches[0].id if len(matches) == 1 else None
-            result[f"{side}_profile_name"] = matches[0].name if len(matches) == 1 else None
+            baseline[f"{side}_profile_id"] = matches[0].id if len(matches) == 1 else None
+            baseline[f"{side}_profile_name"] = matches[0].name if len(matches) == 1 else None
         return result
 
 
 def _print_human(result: dict) -> None:
+    if result.get("schema_version") == 2 and "baseline" in result:
+        print("assessment_schema: 2 (derived USER handoff; full history omitted)")
+        print("derivation: " + json.dumps(result["derivation"], sort_keys=True))
+        print("return_link: " + json.dumps(result["return_link"], sort_keys=True))
+        _print_human(result["baseline"])
+        return
     for key in ("status", "reason", "operation_id", "total", "limit", "offset"):
         if key in result:
             print(f"{key}: {result[key] if result[key] is not None else '-'}")

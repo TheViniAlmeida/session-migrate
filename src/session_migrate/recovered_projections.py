@@ -116,6 +116,8 @@ class RecoveredProjectionContext:
     _witness_sha256: str
     _options: ConversionOptions
     _selection: _RecoverySelection | None
+    _parent_store_path: Path | None
+    _parent_binding: tuple[str, str] | None
     _seal: object
 
     def __init__(self):
@@ -574,6 +576,7 @@ def _context_binding(context):
                 dict(context._target_environment),
                 dict(context._source_environment),
                 profiles,
+                return_link=context._record.return_link,
             ),
             "request_dry_run": context._request.dry_run,
             "source_profile": context._source_profile.to_dict()
@@ -589,6 +592,14 @@ def _context_binding(context):
             "selection": _selection_binding(context._selection)
             if context._selection is not None
             else None,
+            **(
+                {
+                    "parent_store_path": str(context._parent_store_path),
+                    "parent_binding": context._parent_binding,
+                }
+                if context._record.return_link is not None
+                else {}
+            ),
         }
     )
 
@@ -603,6 +614,23 @@ def _validate_context(context):
     context._policy.__post_init__()
     context.projection_context.__post_init__()
     context._record.__post_init__()
+    if context._record.return_link is not None:
+        from session_migrate.handoff_operations import _validate_parent_binding
+
+        _require(
+            context._parent_store_path is not None and context._parent_binding is not None,
+            "context_unavailable",
+        )
+        _validate_parent_binding(
+            context._parent_store_path,
+            context._record.return_link,
+            expected_store_uuid=context._parent_binding[0],
+            expected_record_sha=context._parent_binding[1],
+            source_identity=context._record.source.identity,
+            operation_record=context._record,
+        )
+        _require_existing_capture(context._source)
+        _require_existing_capture(context._input)
     if context._selection is not None:
         _require(context._selection._request is context._request, "binding_changed")
         _validate_selection(context._selection)
@@ -654,6 +682,7 @@ def _issue_recovery_context(
     policy: ProjectionPolicy | None = None,
     observer: EndpointObserver | None = None,
     on_read_effect=None,
+    parent_store_path: Path | None = None,
 ) -> RecoveredProjectionContext:
     """Reconciliation-driver seam; no caller hash, native export or write effects.
 
@@ -668,6 +697,23 @@ def _issue_recovery_context(
         "context_unavailable",
     )
     record.__post_init__()
+    _require(record.transformation is None, "unsupported_policy")
+    parent_binding = None
+    if record.return_link is not None:
+        from session_migrate.handoff_operations import _validate_parent_binding
+
+        _require(
+            type(parent_store_path) is type(Path())
+            and parent_store_path.is_absolute()
+            and ".." not in parent_store_path.parts,
+            "context_unavailable",
+        )
+        parent_binding = _validate_parent_binding(
+            parent_store_path,
+            record.return_link,
+            source_identity=record.source.identity,
+            operation_record=record,
+        )
     _require(
         source_capture.source_format in _FORMATS and input_file_capture.source_format in _FORMATS,
         "proof_unavailable",
@@ -721,7 +767,15 @@ def _issue_recovery_context(
         _environment(target_environment),
     )
     _require(
-        _digest(_public_options(request, dict(target_env), dict(source_env), profiles))
+        _digest(
+            _public_options(
+                request,
+                dict(target_env),
+                dict(source_env),
+                profiles,
+                return_link=record.return_link,
+            )
+        )
         == record.options_sha256,
         "options_mismatch",
     )
@@ -861,6 +915,8 @@ def _issue_recovery_context(
             "_witness_sha256": witness,
             "_options": options,
             "_selection": selection,
+            "_parent_store_path": parent_store_path if record.return_link is not None else None,
+            "_parent_binding": parent_binding,
         },
     )
     _CONTEXTS[context] = _context_binding(context)
@@ -881,6 +937,7 @@ def _prepare_recovery_context(
     policy: ProjectionPolicy | None = None,
     observer: EndpointObserver | None = None,
     on_read_effect=None,
+    parent_store_path: Path | None = None,
 ) -> RecoveredProjectionContext:
     """Issue only validated context; loader/filesystem details stay private."""
     try:
@@ -896,6 +953,7 @@ def _prepare_recovery_context(
             policy=policy,
             observer=observer,
             on_read_effect=on_read_effect,
+            parent_store_path=parent_store_path,
         )
     except RecoveryProjectionError:
         raise

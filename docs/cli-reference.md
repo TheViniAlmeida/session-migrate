@@ -391,3 +391,16 @@ execute normally; they do not apply a previous proposal JSON.
 and current root-qualified profiles. They do not import, update or resume a
 session. See [continuity and recovery](continuity.md) for selection, profile
 bindings, read effects, status meanings and explicit limits.
+# F5A prototype commands
+
+`handoff review`, `handoff export`, `handoff summary` and `return-new` use
+explicit current profiles and genuine process-local source/review/prepared
+handles. They never apply proposal JSON. Summary requires explicit event/block
+ranges and same-process private export/edit/SHA review. Default output is
+content-free metadata; only `--confirm` publishes a prepared new target.
+`reconcile import|transfer --handoff-document PATH` forwards only the path to
+the genuine derived recovery guard; it cannot manufacture authority.
+
+See [offline handoff and return-new](handoff-return-new.md) for syntax, private
+file bounds, exit codes and release/proof limitations. Existing full commands
+and their JSON are unchanged. Native CAS and in-place update are unavailable.

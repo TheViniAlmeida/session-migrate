@@ -780,7 +780,15 @@ def prepare_profile_operation(
 
 
 def _prepared_profile_binding(
-    catalog, source_profile, ref, target_profile, request, environment, prepublication_check
+    catalog,
+    source_profile,
+    ref,
+    target_profile,
+    request,
+    environment,
+    prepublication_check,
+    *,
+    readonly_catalog=False,
 ):
     bound, target_values, source_values = _bind_profile_operation(
         catalog, source_profile, ref, target_profile, request, environment
@@ -794,7 +802,8 @@ def _prepared_profile_binding(
             or target_profile.fingerprint != expected_target
         ):
             raise SessionMigrateError("prepared profile options changed; prepare again")
-        with Catalog(catalog_path) as current:
+        opener = Catalog.open_readonly_existing if readonly_catalog else Catalog
+        with opener(catalog_path) as current:
             rebound, target_current, source_current = _bind_profile_operation(
                 current, source_profile, ref, target_profile, request, environment
             )

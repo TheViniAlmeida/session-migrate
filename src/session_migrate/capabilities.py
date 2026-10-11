@@ -179,3 +179,14 @@ def list_capabilities(
         return tuple(_CAPABILITIES.values())
     selected = capabilities_for(agent_format).format
     return tuple(value for (format_, _), value in _CAPABILITIES.items() if format_ == selected)
+
+
+def handoff_emission_supported(agent_format: AgentFormat | str, *, cli_version: str) -> bool:
+    """Schema-level USER emission only; no native resume, closure or update claim."""
+    selected = capabilities_for(agent_format).format
+    versions = {
+        AgentFormat.CLAUDE: {"2.1.209"},
+        AgentFormat.CODEX: {"0.144.4"},
+        AgentFormat.OPENCODE: set(opencode_v2.VALIDATED_VERSIONS),
+    }
+    return type(cli_version) is str and cli_version in versions.get(selected, ())

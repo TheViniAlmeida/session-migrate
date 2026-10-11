@@ -1,3 +1,3 @@
 """Native coding-agent session discovery and migration."""
 
-__version__ = "0.12.0.dev7"
+__version__ = "0.12.0.dev8"
