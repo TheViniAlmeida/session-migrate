@@ -211,6 +211,8 @@ class OperationRequest:
     target_title: str | None = None
     title_policy: TitlePolicy | None = None
     require_native_title: bool = False
+    target_client: str | None = None
+    target_server: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command", OperationKind(self.command))
@@ -218,6 +220,30 @@ class OperationRequest:
             object.__setattr__(self, "source_format", AgentFormat(self.source_format))
         if self.target_format is not None:
             object.__setattr__(self, "target_format", TargetFormat(self.target_format))
+        if self.target_client is not None and self.target_client != "openchamber":
+            raise SessionMigrateError("target client is unsupported")
+        if self.target_server is not None and self.target_client != "openchamber":
+            raise SessionMigrateError("--target-server requires the OpenChamber destination")
+        if (
+            self.target_client is not None or self.target_server is not None
+        ) and self.target_format is not TargetFormat.OPENCODE:
+            raise SessionMigrateError("OpenChamber/server targets require OpenCode format")
+        if self.target_server is not None:
+            from session_migrate.openchamber import validated_server
+
+            object.__setattr__(self, "target_server", validated_server(self.target_server))
+        if (
+            self.target_client == "openchamber"
+            and self.command is not OperationKind.CONVERT
+            and self.target_server is None
+        ):
+            raise SessionMigrateError("OpenChamber requires its local OpenCode --target-server")
+        if (
+            self.target_client == "openchamber"
+            and self.command is OperationKind.CONVERT
+            and self.target_cli_version is None
+        ):
+            object.__setattr__(self, "target_cli_version", opencode_v2.VALIDATED_VERSION)
         if self.target_title is not None:
             validate_title(self.target_title)
         if self.title_policy is not None:
@@ -247,6 +273,9 @@ class OperationResult:
     dropped_events: dict[str, int]
     warnings: list[dict[str, Any]]
     lineage_receipt: CompletionReceipt | None = field(default=None, repr=False, compare=False)
+    target_client: str | None = None
+    target_server: str | None = None
+    backend_discovery_verified: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
 
@@ -254,6 +283,10 @@ class OperationResult:
             field.name: deepcopy(getattr(self, field.name))
             for field in fields(self)
             if field.name != "lineage_receipt"
+            and not (
+                field.name in {"target_client", "target_server", "backend_discovery_verified"}
+                and getattr(self, field.name) is None
+            )
         }
 
 
@@ -352,6 +385,17 @@ def _canonical_json(value: Any) -> str:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value).encode()).hexdigest()
+
+
+def _client_result(result: dict, request: OperationRequest, *, completed: bool = False) -> dict:
+    if request.target_client == "openchamber":
+        result = dict(result)
+        result["target_client"] = request.target_client
+        if request.target_server:
+            result["target_server"] = request.target_server
+            if completed and request.command is not OperationKind.CONVERT:
+                result["backend_discovery_verified"] = True
+    return result
 
 
 _PUBLIC_ENVIRONMENT = (
@@ -658,6 +702,7 @@ class _PreparedState:
         default_factory=list, repr=False, compare=False
     )
     catalog_opener: Callable[[Path], Catalog] | None = None
+    backend_binding: str | None = None
 
 
 def _title_preflight(state: _PreparedState) -> tuple[TitleAliasStore | None, AliasIdentity | None]:
@@ -819,6 +864,20 @@ def _client_epoch(path: Path | None) -> tuple | None:
 
 
 def _verify_prepared_options(state: _PreparedState) -> None:
+    if state.backend_binding is not None:
+        from session_migrate.openchamber import assert_backend_matches
+
+        observed = assert_backend_matches(
+            state.built.request.target_server,
+            state.target_environment,
+            state.built.artifact.target_cli_version,
+        )
+        if (
+            _canonical_json(observed) != state.backend_binding
+            or state.target_environment.get("SESSION_MIGRATE_OPENCODE_BINDING")
+            != state.backend_binding
+        ):
+            raise SessionMigrateError("prepared OpenChamber backend changed; prepare again")
     if state.projection is not None:
         if state.built.artifact.transformation is not None:
             from session_migrate.derived_projection import (
@@ -996,6 +1055,16 @@ def _prepare_operation(
         )
         token.check()
         _notify(progress, ProgressStage.PREFLIGHT)
+        backend_binding = None
+        if built.request.target_server and request.command is not OperationKind.CONVERT:
+            from session_migrate.openchamber import assert_backend_matches
+
+            backend_binding = _canonical_json(
+                assert_backend_matches(
+                    built.request.target_server, target, built.artifact.target_cli_version
+                )
+            )
+            target["SESSION_MIGRATE_OPENCODE_BINDING"] = backend_binding
         _install(
             built.request,
             built.artifact,
@@ -1029,7 +1098,7 @@ def _prepare_operation(
             max_source_bytes,
             state_home,
         )
-        state = replace(state, catalog_opener=catalog_opener)
+        state = replace(state, catalog_opener=catalog_opener, backend_binding=backend_binding)
         projection, projection_versions, projection_context = _prepare_lineage_projection(state)
         state = replace(
             state,
@@ -1155,6 +1224,12 @@ def _prepare_operation(
 
             metadata["transformation"] = json.loads(_encode(built.artifact.transformation))
             metadata["return_link"] = json.loads(_encode(built.artifact.return_link))
+        if built.request.target_client or built.request.target_server:
+            metadata["target"]["client"] = built.request.target_client or "opencode"
+            metadata["target"]["server"] = built.request.target_server
+            metadata["target"]["backend"] = (
+                json.loads(backend_binding) if backend_binding is not None else None
+            )
         return PreparedOperation(state, TransferProposal(proposal_id, _canonical_json(metadata)))
     except OperationCancelledError:
         _notify(progress, ProgressStage.CANCELLED)
@@ -1206,6 +1281,15 @@ def _verify_installed_identity(state: _PreparedState) -> Session:
         != normalized_source_id(AgentFormat(target), built.artifact.session_id)
     ):
         raise SessionMigrateError("installed target identity could not be verified")
+    if built.request.target_server:
+        from session_migrate.openchamber import verify_session_discovery
+
+        verify_session_discovery(
+            built.request.target_server,
+            built.artifact.session_id,
+            built.artifact.cwd,
+            state.target_environment,
+        )
     return session
 
 
@@ -1216,6 +1300,22 @@ def _observe_native_title(state: _PreparedState, session: Session) -> TitleRecei
     observed_version = detect_opencode_version(
         built.request.target_cli, environ=state.target_environment
     )
+    if built.request.target_server:
+        from session_migrate.openchamber import verify_session_discovery
+
+        selected = verify_session_discovery(
+            built.request.target_server,
+            built.artifact.session_id,
+            built.artifact.cwd,
+            state.target_environment,
+        )
+        if selected.get("title") != built.artifact.title_plan.requested or (
+            session.title != built.artifact.title_plan.requested
+        ):
+            raise SessionMigrateError("native title did not match the prepared title")
+        return TitleReceipt.verified_native(
+            built.artifact.title_plan, observed=session.title, cli_version=observed_version
+        )
     completed = conversion._run_opencode(
         [
             str(built.request.target_cli),
@@ -1846,6 +1946,7 @@ def _commit_operation(
         result = content_free_result(
             built.artifact, output_path=built.output, manifest_path=built.manifest, dry_run=False
         )
+        result = _client_result(result, built.request, completed=True)
         _notify(progress, ProgressStage.COMPLETED)
         return TransferReceipt(
             proposal,
@@ -2226,6 +2327,7 @@ def _commit_native_operation(prepared, token, progress):
                     manifest_path=built.manifest,
                     dry_run=False,
                 )
+                result = _client_result(result, built.request, completed=True)
                 _notify(progress, ProgressStage.COMPLETED)
                 return TransferReceipt(
                     proposal,
@@ -2476,6 +2578,14 @@ def _operation_context(
     if environ is None and not values.get("HOME"):
         values["HOME"] = str(Path.home())
     source_values = dict(values if source_environ is None else source_environ)
+    # A connected destination never redirects source discovery or another
+    # operation implicitly through inherited process state.
+    source_values.pop("SESSION_MIGRATE_OPENCODE_SERVER", None)
+    values.pop("SESSION_MIGRATE_OPENCODE_SERVER", None)
+    source_values.pop("SESSION_MIGRATE_OPENCODE_BINDING", None)
+    values.pop("SESSION_MIGRATE_OPENCODE_BINDING", None)
+    if request.target_server and request.command is not OperationKind.CONVERT:
+        values["SESSION_MIGRATE_OPENCODE_SERVER"] = request.target_server
     source_fields = {"path", "source_home", "source_cwd", "source_cli", "catalog"}
     paths = {
         field.name: expand_environment_path(
@@ -2558,7 +2668,7 @@ def _execute(
         environ,
         dry_run,
     )
-    return OperationResult(**result)
+    return OperationResult(**_client_result(result, request, completed=not dry_run))
 
 
 @dataclass(frozen=True, slots=True, repr=False)

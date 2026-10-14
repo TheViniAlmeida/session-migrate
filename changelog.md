@@ -8,6 +8,23 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
+## 14/10/2026 — DEV10
+
+- Adicionado destino explícito `openchamber` na CLI, TUI e perfis do dashboard,
+  reutilizando o formato OpenCode e o servidor conectado ao OpenChamber.
+- Importação e exportação conectadas via `--server`, com conferência local de
+  socket, PID, usuário, banco e versão antes de autenticar/publicar; mudança de
+  backend interrompe a operação. Não há fallback silencioso para standalone.
+- Colisão verificada pelo ID exato, descoberta paginada após importação e erros
+  posteriores tratados como resultado parcial que não deve ser reimportado.
+- Perfis antigos mantêm JSON e fingerprints; servidor e credenciais não são
+  aceitos como campos arbitrários da API web. Credenciais ficam em runtime.
+- Verificado título nativo no OpenCode 2.0.27 sem ampliar as provas de
+  handoff/retorno/update. Perfis OpenChamber nesta entrega são destinos apenas.
+- Identificada separadamente falha de listagem de sessões legadas com
+  metadados nulos no OpenCode 2.0.27. A presença no backend não é apresentada
+  como garantia de exibição na UI; nenhuma sessão antiga é reparada automaticamente.
+
 ## 11/10/2026
 
 - Adicionado este histórico datado das melhorias do fork, com referências às

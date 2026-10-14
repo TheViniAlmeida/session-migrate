@@ -81,6 +81,19 @@ its concurrency and recovery proofs.
 
 See the [fork changelog](changelog.md) for dated deliveries and validation details.
 
+To migrate into the local OpenCode server used by OpenChamber, select
+`--to openchamber` and its **OpenCode backend** origin:
+
+```bash
+smigrate transfer SESSION_UUID --from codex --to openchamber \
+  --target-server http://127.0.0.1:4096 --cwd "$PWD"
+```
+
+The terminal picker also offers OpenChamber as a destination. The web dashboard
+uses an explicitly configured OpenChamber destination profile. See
+[OpenChamber destinations](docs/openchamber.md) for authentication, backend
+verification, and the distinction between backend discovery and UI visibility.
+
 Or find an older session by its native title/name first:
 
 ```bash

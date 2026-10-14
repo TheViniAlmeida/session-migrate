@@ -292,6 +292,8 @@ class Controller:
         ]
 
     def bind_source(self, selected: Profile) -> Profile:
+        if selected.client == "openchamber":
+            raise SessionMigrateError("OpenChamber profiles are destinations only")
         with Catalog(self.catalog) as catalog:
             roots = [
                 root

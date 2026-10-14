@@ -402,6 +402,8 @@ class WorkspaceBackend:
     def _prepare(self, parameters, *, service_action="transfer", **callbacks):
         if service_action != "transfer":
             return self._prepare_service(service_action, parameters, **callbacks)
+        if "target_server" in parameters or "target_client" in parameters:
+            raise BackendError("field_invalid")
         selected, source_profile = self._selected(parameters.get("source_session_id"))
         target_profile = self._profile(parameters.get("target_profile_id"))
         project_id = parameters.get("project_id")
@@ -830,7 +832,12 @@ class WorkspaceBackend:
             return {
                 "schema_version": 1,
                 "profiles": [
-                    {"id": key, "name": profile.name, "format": profile.format.value}
+                    {
+                        "id": key,
+                        "name": profile.name,
+                        "format": profile.format.value,
+                        **({"client": profile.client} if profile.client is not None else {}),
+                    }
                     for key, profile in self.profiles.items()
                 ],
                 "projects": [{"id": key, "name": value[0]} for key, value in self.projects.items()],

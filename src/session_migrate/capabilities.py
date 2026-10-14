@@ -48,6 +48,7 @@ class TitleCapability:
 _NATIVE_TITLE_PROOFS = {
     (AgentFormat.OPENCODE, "v2", "2.0.22"): "opencode-2.0.22-public-list-cold-export",
     (AgentFormat.OPENCODE, "v2", "2.0.23"): "opencode-2.0.23-public-list-cold-export",
+    (AgentFormat.OPENCODE, "v2", "2.0.27"): "opencode-2.0.27-public-list-cold-export",
 }
 
 
