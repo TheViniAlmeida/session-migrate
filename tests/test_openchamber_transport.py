@@ -169,7 +169,7 @@ def test_custom_database_override_cannot_change_root_or_filename(tmp_path: Path)
             openchamber._expected_database({**environment, "OPENCODE_DB": override})
 
 
-def test_proc_listener_scan_matches_only_literal_loopback_socket(
+def test_proc_listener_scan_detects_ambiguous_exact_and_wildcard_sockets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     original = Path.read_text
@@ -184,7 +184,22 @@ def test_proc_listener_scan_matches_only_literal_loopback_socket(
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "read_text", read_text)
-    assert openchamber._listening_socket_inodes("http://localhost:4096") == {"777"}
+    assert openchamber._listening_socket_inodes("http://localhost:4096") == {"777", "888"}
+
+
+def test_sole_wildcard_listener_serves_the_same_literal_loopback_origin(monkeypatch):
+    original = Path.read_text
+
+    def read_text(path, *args, **kwargs):
+        if str(path) == "/proc/net/tcp":
+            return (
+                "sl local_address rem_address st tx_queue tr tm uid timeout inode\n"
+                "0: 00000000:1000 00000000:0000 0A 0:0 00:0 0 0 0 888\n"
+            )
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    assert openchamber._listening_socket_inodes("http://localhost:4096") == {"888"}
 
 
 def test_unverified_listener_blocks_http_before_auth(

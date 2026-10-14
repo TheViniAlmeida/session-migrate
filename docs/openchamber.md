@@ -21,8 +21,12 @@ SessionMigrate does not install, restart, or reconfigure either server.
 The initial implementation supports local Linux backends owned by the current
 user. The server origin must be HTTP on `127.0.0.1` or `[::1]`, with an explicit
 port; `localhost` is normalized to `127.0.0.1` for both HTTP and CLI calls.
-Redirects, wildcard listeners, different owners, ambiguous listeners and a
+Redirects, different owners, ambiguous listeners and a
 custom `OPENCODE_DB` outside the default selected database are rejected.
+
+An existing wildcard-bound server may be reached through its literal loopback
+origin, provided it is the sole proven listener; the migrator never changes
+its binding or exposes another port.
 
 Before sending authentication, the migrator checks the local listening socket,
 its owning process and that process's open descriptor for the selected
@@ -82,8 +86,9 @@ backend; it is not a browser-rendering guarantee.
 
 The frontend can still fail if its global session list returns an error, a
 project filter excludes the directory, or it points at another backend. During
-validation with OpenChamber 2.2.0/OpenCode 2.0.27, legacy session metadata with
-null agent/model fields caused large lists to return HTTP 500, independently of
+validation with OpenChamber 2.2.0/OpenCode 2.0.27, legacy session permission rules using
+v1 keys (`permission`, `pattern`, `action`) caused large lists to return HTTP
+500 when decoded against the v2 schema (`action`, `resource`, `effect`), independently of
 the newly imported session. SessionMigrate does not silently repair other
 sessions or treat such failures as missing data. Inspect the backend error
 before copying the session again.
