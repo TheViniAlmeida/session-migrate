@@ -426,7 +426,11 @@ def _operation_request(args: argparse.Namespace, command: str) -> OperationReque
         command=OperationKind(command),
         path=getattr(args, "path", None),
         source_format=AgentFormat(source_name) if source_name else None,
-        target_format=TargetFormat(args.to) if args.to else None,
+        target_format=(
+            TargetFormat("opencode" if args.to == "openchamber" else args.to) if args.to else None
+        ),
+        target_client="openchamber" if args.to == "openchamber" else None,
+        target_server=getattr(args, "target_server", None),
         output=getattr(args, "output", None),
         home=getattr(args, "home", None),
         source_home=getattr(args, "source_home", None),
@@ -480,7 +484,7 @@ def _add_operation_arguments(parser: argparse.ArgumentParser, command: str) -> N
         )
     parser.add_argument(
         "--to",
-        choices=tuple(TargetFormat),
+        choices=tuple(TargetFormat) + ("openchamber",),
         required=command != "transfer",
         help="target format (transfer defaults only between Claude/Codex)",
     )
@@ -540,6 +544,10 @@ def _add_conversion_arguments(
             "OpenCode, Kilo, Antigravity, or Cursor executable for native import "
             "(otherwise resolve the pinned CLI from its normal location/PATH)"
         ),
+    )
+    parser.add_argument(
+        "--target-server",
+        help="local OpenCode backend URL used by OpenChamber (required for import/transfer)",
     )
     parser.add_argument(
         "--model-provider",

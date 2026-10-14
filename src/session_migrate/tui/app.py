@@ -145,7 +145,8 @@ class MigrationApp(App):
                 yield Literal("4. Destination — creates a new session")
                 yield Select([], prompt="Known target profile (optional)", id="target-profile")
                 yield Select(
-                    [(format.value, format.value) for format in AgentFormat],
+                    [(format.value, format.value) for format in AgentFormat]
+                    + [("OpenChamber (OpenCode backend)", "openchamber")],
                     value="codex",
                     allow_blank=False,
                     id="target-format",
@@ -159,6 +160,10 @@ class MigrationApp(App):
                 yield Input(placeholder="Native CLI when required", id="target-cli")
                 yield Input(placeholder="XDG_CONFIG_HOME (optional)", id="target-config")
                 yield Input(placeholder="XDG_DATA_HOME (optional)", id="target-data")
+                yield Input(
+                    placeholder="Local OpenCode backend URL (OpenChamber only; http://127.0.0.1:port)",
+                    id="target-server",
+                )
                 yield Input(placeholder="Project CWD (absolute)", id="cwd")
                 yield Input(
                     placeholder="Target CLI version (OpenCode selects transfer schema)", id="schema"
@@ -252,14 +257,19 @@ class MigrationApp(App):
                 overrides[key] = value
             else:
                 overrides.pop(key, None)
-        return {
+        selected_format = self.query_one(f"#{direction}-format", Select).value
+        result = {
             "id": previous.id if previous else f"{direction}-ephemeral",
             "name": self.value(f"{direction}-name") or direction,
-            "format": self.query_one(f"#{direction}-format", Select).value,
+            "format": "opencode" if selected_format == "openchamber" else selected_format,
             "root": Path(self.value(f"{direction}-root")),
             "cli": Path(self.value(f"{direction}-cli")) if self.value(f"{direction}-cli") else None,
             "environ": overrides,
         }
+        if direction == "target" and selected_format == "openchamber":
+            result["client"] = "openchamber"
+            result["server"] = self.value("target-server") or None
+        return result
 
     def on_select_changed(self, event: Select.Changed):
         if self._form_loading:
@@ -277,7 +287,13 @@ class MigrationApp(App):
 
     def fill_profile(self, direction: str, profile: Profile):
         self._form_loading = True
-        self.query_one(f"#{direction}-format", Select).value = profile.format.value
+        self.query_one(f"#{direction}-format", Select).value = (
+            "openchamber"
+            if direction == "target" and profile.client == "openchamber"
+            else profile.format.value
+        )
+        if direction == "target":
+            self.query_one("#target-server", Input).value = profile.server or ""
         for suffix, value in (
             ("root", profile.root),
             ("name", profile.name),
@@ -292,7 +308,7 @@ class MigrationApp(App):
     def on_input_changed(self, event: Input.Changed):
         if not self._form_loading:
             self.on_edit()
-            if event.input.id in {"target-title", "schema"}:
+            if event.input.id in {"target-title", "schema", "target-server"}:
                 self.show_capabilities()
 
     def on_checkbox_changed(self, event: Checkbox.Changed):
@@ -319,6 +335,9 @@ class MigrationApp(App):
         format = self.query_one("#target-format", Select).value
         if format is Select.NULL:
             return
+        openchamber = format == "openchamber"
+        if openchamber:
+            format = "opencode"
         info = capabilities_for(format)
         schemas = ", ".join(
             item.schema for item in list_capabilities(format) if item.target_supported
@@ -333,6 +352,10 @@ class MigrationApp(App):
         problem = None
         try:
             title = self.target_title()
+            if openchamber:
+                from session_migrate.openchamber import validated_server
+
+                validated_server(self.value("target-server"))
             if alias and required:
                 problem = "Local alias and required native title are incompatible."
             elif (alias or required) and title is None:
@@ -351,6 +374,7 @@ class MigrationApp(App):
             f"Supported output: {schemas}. Media: {info.media_scope}\n"
             f"Naming policy: {capability.status}. {capability.reason}\n"
             "Prepare checks the effective client/version. New session only.\n"
+            f"{'OpenChamber uses the selected local OpenCode backend. ' if openchamber else ''}"
             f"{problem or ''}"
         )
 
@@ -545,15 +569,23 @@ class MigrationApp(App):
                     )
             elif result.kind == "profiles":
                 self.saved_profiles = result.value
-                choices = [
-                    (plain(f"{profile.name} — {profile.format} — {profile.root}"), profile.id)
-                    for profile in result.value
-                ]
                 for direction in ("source", "target"):
+                    choices = []
+                    for profile in result.value:
+                        if direction == "source" and profile.client == "openchamber":
+                            continue
+                        label = (
+                            "OpenChamber (OpenCode backend)"
+                            if profile.client == "openchamber"
+                            else profile.format.value
+                        )
+                        choices.append(
+                            (plain(f"{profile.name} — {label} — {profile.root}"), profile.id)
+                        )
                     self.query_one(f"#{direction}-profile", Select).set_options(choices)
                 self.status(
                     "Choose a source profile/root."
-                    if choices
+                    if any(profile.client != "openchamber" for profile in result.value)
                     else "No registered roots. Register a root with the catalog CLI, "
                     "or read a private profiles file."
                 )

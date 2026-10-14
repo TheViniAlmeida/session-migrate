@@ -108,7 +108,8 @@
     element.replaceChildren(first);
     for (const item of values) {
       const option = document.createElement("option"); option.value = item.id;
-      option.textContent = `${readable(item.name, "Unnamed profile")}${item.format ? ` · ${item.format}` : ""}`;
+      const destination = item.client === "openchamber" ? "OpenChamber (OpenCode backend)" : item.format;
+      option.textContent = `${readable(item.name, "Unnamed profile")}${destination ? ` · ${destination}` : ""}`;
       element.append(option);
     }
   };
@@ -157,7 +158,7 @@
       generation += 1;
       const profiles = await api("/api/profiles");
       capabilities = await api("/api/capabilities");
-      optionsFor(byId("source-profile"), profiles.profiles, "Choose source");
+      optionsFor(byId("source-profile"), profiles.profiles.filter((profile) => profile.client !== "openchamber"), "Choose source");
       optionsFor(byId("target-profile"), profiles.profiles, "Choose destination");
       optionsFor(byId("target-project"), profiles.projects || [], "Use session project");
       byId("connection-state").textContent = "Connected";

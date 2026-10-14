@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from session_migrate.native_snapshots import NativeSnapshot
 
 
-from session_migrate import __version__
+from session_migrate import __version__, openchamber
 from session_migrate.errors import (
     FormatDetectionError,
     JsonlError,
@@ -2067,6 +2067,10 @@ def install_opencode_artifact(
         raise SessionMigrateError("official OpenCode import requires an OpenCode artifact")
     opencode.validate_native_bytes(artifact.native_bytes, artifact.session_id)
     values = dict(os.environ if environ is None else environ)
+    prepared_marker = values.pop("SESSION_MIGRATE_OPENCODE_BINDING", None)
+    prepared_binding = (
+        openchamber.parse_backend_binding(prepared_marker) if prepared_marker is not None else None
+    )
     values.setdefault("OPENCODE_DISABLE_AUTOUPDATE", "true")
     values.setdefault("OPENCODE_DISABLE_PRUNE", "true")
     if not opencode.supported_version(artifact.target_cli_version):
@@ -2075,6 +2079,15 @@ def install_opencode_artifact(
         )
     cli = _resolve_opencode_cli(target_cli, values)
     observed_version = _opencode_version(cli, values)
+    server = values.get("SESSION_MIGRATE_OPENCODE_SERVER")
+    backend_binding = None
+    if prepared_binding is not None and not server:
+        raise SessionMigrateError("OpenCode prepared backend binding requires a server")
+    if server:
+        server = openchamber.validated_server(server)
+        backend_binding = openchamber.assert_backend_matches(server, values, observed_version)
+        if prepared_binding is not None and prepared_binding != backend_binding:
+            raise SessionMigrateError("OpenCode server identity changed since preparation")
     if not opencode.supported_version(observed_version):
         raise SessionMigrateError(
             f"OpenCode CLI version mismatch: unsupported observed version {observed_version}"
@@ -2083,7 +2096,12 @@ def install_opencode_artifact(
         raise SessionMigrateError(
             "OpenCode CLI version mismatch: artifact and CLI transfer schemas differ"
         )
-    if artifact.session_id in _opencode_session_ids(cli, values):
+    collision = (
+        openchamber.session_exists(server, artifact.session_id, values)
+        if server
+        else artifact.session_id in _opencode_session_ids(cli, values)
+    )
+    if collision:
         raise SessionMigrateError(
             "OpenCode session ID already exists; refusing to overwrite native session: "
             f"{artifact.session_id}"
@@ -2107,7 +2125,18 @@ def install_opencode_artifact(
         # a blind retry instead of risking a second native import.
         reservation_identity = write_private_atomic(manifest_path, b"")
         reservation_guard = _open_identity_guard(manifest_path, reservation_identity, writable=True)
-        if artifact.session_id in _opencode_session_ids(cli, values):
+        if (
+            server
+            and openchamber.assert_backend_matches(server, values, observed_version)
+            != backend_binding
+        ):
+            raise SessionMigrateError("OpenCode server identity changed before import")
+        collision = (
+            openchamber.session_exists(server, artifact.session_id, values)
+            if server
+            else artifact.session_id in _opencode_session_ids(cli, values)
+        )
+        if collision:
             raise SessionMigrateError(
                 "OpenCode session ID appeared during import preflight; refusing to continue: "
                 f"{artifact.session_id}"
@@ -2139,6 +2168,15 @@ def install_opencode_artifact(
                 exported = opencode.parse_import(Path(name) / "verify.json")
                 if exported.session_id != artifact.session_id:
                     raise SessionMigrateError("OpenCode imported a different session ID")
+            if server:
+                if (
+                    openchamber.assert_backend_matches(server, values, observed_version)
+                    != backend_binding
+                ):
+                    raise SessionMigrateError("OpenCode server identity changed after import")
+                openchamber.verify_session_discovery(
+                    server, artifact.session_id, artifact.cwd, values
+                )
         elif artifact.session_id not in _opencode_session_ids(cli, values):
             raise SessionMigrateError(
                 "OpenCode import returned success but the session was not discoverable afterward"
@@ -2499,10 +2537,16 @@ def detect_opencode_version(
     observed = _opencode_version(_resolve_opencode_cli(target_cli, values), values)
     if not opencode.supported_version(observed):
         raise SessionMigrateError(f"unsupported OpenCode CLI version: {observed}")
+    server = values.get("SESSION_MIGRATE_OPENCODE_SERVER")
+    if server:
+        openchamber.assert_backend_matches(server, values, observed)
     return observed
 
 
 def _opencode_session_ids(cli: Path, environ: Mapping[str, str]) -> set[str]:
+    server = environ.get("SESSION_MIGRATE_OPENCODE_SERVER")
+    if server:
+        return openchamber.list_session_ids(server, environ)
     flags = (
         ["--standalone", "--max-count", "1000000"]
         if opencode.is_v2(_opencode_version(cli, environ))
@@ -2533,6 +2577,10 @@ def _invoke_opencode_import(
     cli: Path, bundle_path: Path, environ: Mapping[str, str], *, cwd: Path | None = None
 ) -> None:
     if opencode.is_v2(_opencode_version(cli, environ)):
+        server = environ.get("SESSION_MIGRATE_OPENCODE_SERVER")
+        transport = (
+            ["--server", openchamber.validated_server(server)] if server else ["--standalone"]
+        )
         result = _run_opencode(
             [
                 str(cli),
@@ -2541,7 +2589,7 @@ def _invoke_opencode_import(
                 str(bundle_path),
                 "--directory",
                 str(cwd or Path.cwd()),
-                "--standalone",
+                *transport,
             ],
             environ,
         )
@@ -2565,15 +2613,17 @@ def _invoke_opencode_export(
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor: int | None = None
+    server = environ.get("SESSION_MIGRATE_OPENCODE_SERVER")
+    transport = ["--server", openchamber.validated_server(server)] if server else ["--standalone"]
     try:
         descriptor = os.open(bundle_path, flags, 0o600)
         completed = subprocess.run(
             (
-                [str(cli), "session", "export", session_id, "--standalone"]
+                [str(cli), "session", "export", session_id, *transport]
                 if opencode.is_v2(_opencode_version(cli, environ))
                 else [str(cli), "export", session_id, "--pure"]
             ),
-            env=dict(environ),
+            env=_opencode_process_environment(environ),
             check=False,
             stdout=descriptor,
             stderr=subprocess.PIPE,
@@ -2603,6 +2653,19 @@ def _invoke_opencode_export(
         raise SessionMigrateError("OpenCode export artifact is empty or exceeds the safety limit")
 
 
+def _opencode_process_environment(environ: Mapping[str, str]) -> dict[str, str]:
+    values = dict(environ)
+    if values.get("SESSION_MIGRATE_OPENCODE_SERVER"):
+        # The HTTP probe and CLI must reach the same proven local listener.
+        # Proxy variables must not redirect transcripts or authentication.
+        for key in list(values):
+            if key.lower() in {"http_proxy", "https_proxy", "all_proxy"}:
+                values.pop(key)
+        values["NO_PROXY"] = values["no_proxy"] = "127.0.0.1,localhost,::1"
+        values.pop("SESSION_MIGRATE_OPENCODE_BINDING", None)
+    return values
+
+
 def _run_opencode(
     command: list[str],
     environ: Mapping[str, str],
@@ -2612,7 +2675,7 @@ def _run_opencode(
     try:
         completed = subprocess.run(
             command,
-            env=dict(environ),
+            env=_opencode_process_environment(environ),
             check=False,
             capture_output=True,
             text=True,

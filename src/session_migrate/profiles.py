@@ -96,12 +96,24 @@ class Profile:
     root: Path
     cli: Path | None = None
     environ: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
+    client: str | None = None
+    server: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.id, str) or not _PROFILE_ID.fullmatch(self.id):
             raise SessionMigrateError("profile ID must be a bounded filename-safe identifier")
         _label(self.name, "name")
         object.__setattr__(self, "format", _format(self.format))
+        if self.client not in (None, "openchamber"):
+            raise SessionMigrateError("profile client is unsupported")
+        if self.client == "openchamber" and self.format != AgentFormat.OPENCODE:
+            raise SessionMigrateError("OpenChamber profiles require OpenCode format")
+        if self.server is not None:
+            if self.client != "openchamber":
+                raise SessionMigrateError("profile server requires OpenChamber client")
+            from session_migrate.openchamber import validated_server
+
+            object.__setattr__(self, "server", validated_server(self.server))
         object.__setattr__(self, "root", _path(self.root, "root").resolve())
         if self.cli is not None:
             object.__setattr__(self, "cli", _path(self.cli, "CLI"))
@@ -143,7 +155,7 @@ class Profile:
         return sha256(json.dumps(self.to_dict(), sort_keys=True).encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "id": self.id,
             "name": self.name,
             "format": self.format.value,
@@ -151,6 +163,11 @@ class Profile:
             "cli": str(self.cli) if self.cli else None,
             "environ": dict(self.environ),
         }
+        if self.client is not None:
+            result["client"] = self.client
+        if self.server is not None:
+            result["server"] = self.server
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +210,8 @@ def _validate_source_root(profile: Profile) -> None:
 
 
 def _root(catalog: Catalog, profile: Profile) -> CatalogRoot:
+    if profile.client == "openchamber":
+        raise SessionMigrateError("OpenChamber profiles are destinations only")
     _validate_source_root(profile)
     matches = [
         root
@@ -220,6 +239,8 @@ def _cli(profile: Profile, *, source: bool) -> Path | None:
 
 
 def _source_environment(profile: Profile, base: Mapping[str, str] | None) -> dict[str, str]:
+    if profile.client == "openchamber":
+        raise SessionMigrateError("OpenChamber profiles are destinations only")
     values = profile.environment(base)
     if profile.format in _VIRTUAL_CLI:
         _cli(profile, source=True)
@@ -697,11 +718,19 @@ def _bind_profile_operation(
         )
     if request.source_format is not None and request.source_format != source_profile.format:
         raise SessionMigrateError("request source format does not match the selected profile")
+    if source_profile.client == "openchamber":
+        raise SessionMigrateError("OpenChamber profiles are destinations only")
     if (
         request.target_format is not None
         and request.target_format.value != target_profile.format.value
     ):
         raise SessionMigrateError("request target format does not match the selected profile")
+    if request.target_client is not None and request.target_client != target_profile.client:
+        raise SessionMigrateError("request target client does not match the selected profile")
+    if request.target_server is not None and request.target_server != target_profile.server:
+        raise SessionMigrateError("request target server does not match the selected profile")
+    if target_profile.client == "openchamber" and target_profile.server is None:
+        raise SessionMigrateError("OpenChamber destination requires a local OpenCode backend URL")
     entry = _resolve_entry(catalog, source_profile, ref)
     source = resolve_source(catalog, source_profile, ref)
     source_values = _source_environment(source_profile, base_environ)
@@ -738,6 +767,8 @@ def _bind_profile_operation(
         request,
         source_format=source.format,
         target_format=TargetFormat(target_profile.format),
+        target_client=target_profile.client,
+        target_server=target_profile.server,
         catalog=catalog.path,
         catalog_id=entry.catalog_id,
         source_cli=_cli(source_profile, source=True),
@@ -980,14 +1011,18 @@ class ProfileStore:
             raise SessionMigrateError("profile storage profiles must be a list")
         profiles = []
         for row in rows:
-            if not isinstance(row, dict) or set(row) != {
-                "id",
-                "name",
-                "format",
-                "root",
-                "cli",
-                "environ",
-            }:
+            if (
+                not isinstance(row, dict)
+                or not {
+                    "id",
+                    "name",
+                    "format",
+                    "root",
+                    "cli",
+                    "environ",
+                }.issubset(row)
+                or set(row) - {"id", "name", "format", "root", "cli", "environ", "client", "server"}
+            ):
                 raise SessionMigrateError("profile storage row schema is invalid")
             profiles.append(Profile(**row))
         if len({profile.id for profile in profiles}) != len(profiles) or len(
