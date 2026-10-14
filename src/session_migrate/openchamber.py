@@ -161,7 +161,11 @@ def _listening_socket_inodes(server: str) -> set[str]:
             port = int(local[1], 16)
         except ValueError:
             continue
-        if local[0].lower() == address and port == parsed.port and columns[9].isdecimal():
+        if (
+            local[0].lower() in {address, "0" * len(address)}
+            and port == parsed.port
+            and columns[9].isdecimal()
+        ):
             inodes.add(columns[9])
     return inodes
 
@@ -185,7 +189,7 @@ def _has_listening_socket(pid: int, server: str) -> bool:
 
 
 def _listener_identity(server: str, environ: Mapping[str, str]) -> tuple[int, str, Path, str]:
-    """Prove one same-UID process owns the exact loopback listener and selected DB."""
+    """Prove one same-UID process owns the local origin listener and selected DB."""
     database = _expected_database(environ)
     inodes = _listening_socket_inodes(server)
     if len(inodes) != 1:
