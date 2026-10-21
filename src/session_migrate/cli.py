@@ -533,7 +533,7 @@ def _add_conversion_arguments(
     parser.add_argument(
         "--target-cli-version",
         help=(
-            "target release; selects legacy or 2.0 transfer schema for OpenCode, "
+            "target release; selects legacy, 2.0 or 2.1 transfer schema for OpenCode, "
             "metadata only for other targets"
         ),
     )

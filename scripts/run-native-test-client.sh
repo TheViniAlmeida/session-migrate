@@ -99,7 +99,7 @@ case "$client" in
       'tests/test_opencode_kilo_corpus_native.py::test_exact_client_cold_import_export_and_continuation_preserve_prefix[opencode]'
     )
     ;;
-  opencode-v2)
+  opencode-v2|opencode-v21)
     tests=(
       tests/test_opencode_v2.py::test_native_v2_isolated_import_export_dry_run_and_collision
       tests/test_opencode_v2_native.py
@@ -108,6 +108,9 @@ case "$client" in
       tests/test_opencode_v2_review.py::test_stock_v2_accepts_and_cold_exports_review_sources_and_fixed_targets
       tests/test_profiles.py::test_profile_stock_opencode_two_stores_exact_native_id
     )
+    if [[ "$client" == opencode-v21 ]]; then
+      tests+=(tests/test_opencode_v21_native.py)
+    fi
     ;;
   openhands)
     tests=(

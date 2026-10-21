@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+import test_title_native
 from test_projections import claude_records, snapshot, tool_records
 
 from session_migrate.conversion import ConversionOptions, convert_session
@@ -12,7 +13,7 @@ from session_migrate.model import AgentFormat, TargetFormat
 from session_migrate.native_snapshots import NativeSnapshot, SourceCaptureContext
 from session_migrate.projections import ProjectionContext, prepare_projection, verify_projection
 
-pytest_plugins = ["test_title_native"]
+native_client = test_title_native.native_client
 
 
 @pytest.mark.parametrize(

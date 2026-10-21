@@ -23,6 +23,8 @@ from session_migrate.audit_adapters import (
 from session_migrate.errors import SessionMigrateError
 from session_migrate.formats import opencode as parser
 
+_CLIENTS = frozenset({"2.0.22", "2.0.23", "2.1.1"})
+
 MODEL = obj(
     {
         "id": scalar(ACCOUNTING, str),
@@ -155,11 +157,19 @@ def content(value: object) -> Rule:
     )
 
 
-def message(value: object) -> Rule:
+def message(value: object, *, schema_21: bool = False) -> Rule:
     if type(value) is not dict:
         return subtree(UNKNOWN)
     kind = value.get("type")
     common = {"type": DISCRIMINATOR, "id": ID, "time": CLOCK, "metadata": subtree(UNKNOWN)}
+    if schema_21:
+        # Provider-owned replay data is observed as unknown RAW, never portable
+        # message content or evidence of a resumable native checkpoint.
+        common["native"] = subtree(UNKNOWN)
+        if kind == "compaction":
+            common["metadata"] = obj(
+                {"keepID": scalar(STRUCTURE, str), "recent": scalar(LOSS, str)}
+            )
     if kind == "user":
         # OP2 requires this empty carrier for an inline-file-only user message.
         # It contributes no text atom; the user role and file atoms remain observed.
@@ -215,8 +225,9 @@ def message(value: object) -> Rule:
 def audit(value, snapshot, policy) -> AdapterResult:
     taxonomy = Taxonomy()
     client = policy.client_version
-    if client not in {"2.0.22", "2.0.23"}:
+    if client not in _CLIENTS:
         taxonomy.issue("unsupported_client_version", 0)
+    schema_21 = client == "2.1.1"
     info = value.get("info") if type(value) is dict else None
     info = info if type(info) is dict else {}
     grammar = obj(
@@ -242,7 +253,7 @@ def audit(value, snapshot, policy) -> AdapterResult:
                 },
                 required=("id", "projectID", "title", "location", "time", "cost", "tokens"),
             ),
-            "messages": array(dynamic(message)),
+            "messages": array(dynamic(lambda item: message(item, schema_21=schema_21))),
         },
         required=("info", "messages"),
     )
@@ -256,10 +267,17 @@ def audit(value, snapshot, policy) -> AdapterResult:
         mid = item.get("id")
         if type(mid) is not str or mid in seen:
             taxonomy.issue("invalid_graph", index)
-        else:
-            seen.add(mid)
         if item.get("type") == "compaction":
             taxonomy.issue("compaction_unproven", index)
+            metadata = item.get("metadata")
+            if schema_21 and type(metadata) is dict and "keepID" in metadata:
+                keep_id = metadata["keepID"]
+                # Even a valid backward reference does not establish closure.
+                # A missing/forward/self reference cannot retire earlier history.
+                if type(keep_id) is not str or keep_id not in seen:
+                    taxonomy.issue("invalid_graph", index)
+        if type(mid) is str:
+            seen.add(mid)
         for part in item.get("content", []) if type(item.get("content")) is list else []:
             if type(part) is dict and part.get("type") == "tool":
                 state = part.get("state")
@@ -286,6 +304,6 @@ def audit(value, snapshot, policy) -> AdapterResult:
         taxonomy,
         tuple(range(len(messages))),
         "opencode-session-transfer-v2",
-        client if client in {"2.0.22", "2.0.23"} else None,
+        client if client in _CLIENTS else None,
         session,
     )

@@ -149,7 +149,7 @@ def test_unknown_native_opencode_version_never_inherits_proof(source, monkeypatc
         )
 
 
-@pytest.mark.parametrize("version", ["2.0.22", "2.0.23"])
+@pytest.mark.parametrize("version", ["2.0.22", "2.0.23", "2.1.1"])
 def test_opencode_override_keeps_original_source_payload_hash_and_provenance(source, version):
     original = copy.deepcopy(asdict(source))
     original_bytes = source.source_path.read_bytes()

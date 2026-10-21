@@ -1,15 +1,34 @@
-# OpenCode 2.0 public session transfers
+# OpenCode 2.0/2.1 public session transfers
 
 OpenCode 1.17.20 uses `import/export --pure` and nested message/part bundles.
-OpenCode 2.0 uses `session import/export --standalone` and flat typed messages.
+OpenCode 2.0 and 2.1 use `session import/export --standalone` and flat typed messages.
 Native import detects the installed client and selects its transfer schema.
-Convert-only output remains legacy unless `--target-cli-version 2.0.22` or another accepted 2.0.x release is set.
+Convert-only output remains legacy unless `--target-cli-version 2.0.22` or another accepted 2.0.x/2.1.x release is set.
 Unsupported schema series fail closed. The `opencode v` version prefix and
 custom suffixes are accepted; unvalidated exact releases receive schema-aware
-warnings. Local native gates cover stock 2.0.22; the CI variant pins stock
-2.0.23. Accepting the 2.0 schema family does not establish native compatibility
-with every future patch or custom build. Unknown series such as 2.1 and 3.x
+warnings. Local native gates cover stock 2.0.22, 2.0.23 and 2.1.1; CI keeps separate
+2.0.23 and 2.1.1 variants. Accepting either schema family does not establish native compatibility
+with every future patch or custom build. Unknown series such as 2.2 and 3.x
 fail closed during native import/export.
+
+OpenCode 2.1 renames private provider replay fields to `native` and removes
+compaction `recent` in favor of `metadata.keepID` (or legacy
+`metadata.recent`). The reader handles both contracts. A valid kept-message
+reference includes the retained tail in the portable summary; a missing or
+invalid reference keeps the original transcript and treats the readable
+summary as an ordinary message, with an explicit omission notice. Provider
+compaction windows in `native.messages` are not portable summaries: the
+original readable transcript remains available and private replay values are
+never copied into portable text or loss notices. The 2.1 writer emits the new
+compaction shape; the 2.0 writer retains its previous output. Native install
+refuses a prepared artifact from a different schema series before importing.
+
+The 2.1.1 migration/title gates do not establish in-place update, provider
+checkpoint equivalence, handoff return eligibility or usage accounting for
+that release. Those capabilities retain their own conservative proof gates.
+
+Official contract: [2.1 release notes](https://opencode.ai/changelog) and
+[pinned 2.1.1 message schema](https://github.com/anomalyco/opencode/blob/ba546ec1598a70db2570e9c6258028d955ba8f58/packages/schema/src/session-message.ts).
 
 The v2 adapter preserves ordered user/assistant text, linked tool inputs and
 results, inline user/tool images, and readable completed compaction summaries.
@@ -60,7 +79,8 @@ fails import confirmation.
 PYTHONPATH=src python3 -m pytest -q tests/test_opencode_v2.py tests/test_opencode_v2_review.py tests/test_route_matrix.py
 ```
 
-The `opencode-v2` CI matrix entry installs **@opencode/cli@2.0.23** (the legacy
+The `opencode-v2` CI matrix entry installs **@opencode/cli@2.0.23** and
+`opencode-v21` installs **@opencode/cli@2.1.1** (the legacy
 package is opencode-ai), supplies `SESSION_MIGRATE_TEST_OPENCODE_V2`, and rejects
 skipped assigned tests. Native tests use synthetic transcripts, isolated HOME
 and XDG directories, an explicit credential-free config, and a deterministic
@@ -80,7 +100,7 @@ remain visible. A missing v2 title is represented as an untitled session.
 Message bodies are never queried or indexed. Kilo 7.5.0 continues to emit and
 accept only the legacy nested schema, even with a metadata version override.
 
-For a preinstalled stock 2.0.22 binary, no dependency installation is needed:
+For a preinstalled stock 2.0.22, 2.0.23 or 2.1.1 binary, no dependency installation is needed:
 
 ```sh
 SESSION_MIGRATE_TEST_OPENCODE_V2=/absolute/path/to/opencode \
@@ -90,3 +110,22 @@ SESSION_MIGRATE_TEST_OPENCODE_V2=/absolute/path/to/opencode \
 
 Native Windows acceptance and all historical client versions are not
 established by these Linux gates.
+
+## Fork validation on 21 October 2026
+
+The installed Linux x64 OpenCode 2.1.1 ELF matched the published npm package
+(SHA-256 `0e81c77fcc27b263708b133bbf9880cd641060c20e22d3dec8a79b9a8db90450`).
+Private HOME/XDG fixtures passed native import/export, collision/dry-run checks,
+and cold continuation through a deterministic loopback provider. Separate gates
+passed five title checks, five projection checks, five mixed/error/private replay
+checks, two 2.1 compaction round trips and ten keyboard/continuity checks.
+The 2.0.23 native import/export/continuation regression also passed (three tests).
+
+The full suite is not certified by these checks. A local full-suite attempt
+failed in pre-existing C2 recovery fixtures (`proof_unavailable`); the same
+recovery module failed against the unchanged `47b9ee2` baseline in an isolated
+snapshot (six failures, twelve passes). These failures were kept separate from
+the compatibility change. Native TUI fixtures now create their intermediate
+private directories explicitly, preventing the host's group-writable umask
+from making the migration ledger reject the test namespace. Assertions about
+successful publication and reconciliation remain unchanged.

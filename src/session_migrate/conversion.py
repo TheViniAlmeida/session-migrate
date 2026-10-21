@@ -657,7 +657,8 @@ def load_opencode_session(
     if not opencode.supported_version(observed_version):
         raise SessionMigrateError(
             "OpenCode source CLI version mismatch: expected "
-            f"{opencode.PINNED_OPENCODE_VERSION} or supported 2.0.x, observed {observed_version}"
+            f"{opencode.PINNED_OPENCODE_VERSION} or supported 2.0.x/2.1.x, "
+            f"observed {observed_version}"
         )
     temporary_root = values.get("TMPDIR")
     with tempfile.TemporaryDirectory(
@@ -1072,10 +1073,11 @@ def convert_session(
     observed_target = target_version
     version_message = "target metadata version differs but the writer schema remains pinned"
     if target_format == TargetFormat.OPENCODE and opencode.is_v2(target_version):
-        pinned_target = opencode_v2.VALIDATED_VERSION
+        pinned_target = opencode_v2.validated_version(target_version)
         observed_target = opencode_v2.version(target_version)
+        series = ".".join(observed_target.split(".")[:2])
         version_message = (
-            "selected OpenCode 2.0 transfer schema; exact target release differs "
+            f"selected OpenCode {series} transfer schema; exact target release differs "
             "from the validated native integration release"
         )
     target_validated = observed_target == pinned_target or (
@@ -1150,7 +1152,7 @@ def convert_session(
             AgentFormat.DEVIN: devin.PINNED_DEVIN_VERSION,
         }[session.source_format]
         if session.source_format == AgentFormat.OPENCODE and opencode.is_v2(session.cli_version):
-            pinned_source = opencode_v2.VALIDATED_VERSION
+            pinned_source = opencode_v2.validated_version(session.cli_version)
         source_validated = session.cli_version == pinned_source or (
             session.source_format == AgentFormat.OPENCODE
             and opencode_v2.version(session.cli_version) in opencode_v2.VALIDATED_VERSIONS
@@ -2075,7 +2077,8 @@ def install_opencode_artifact(
     values.setdefault("OPENCODE_DISABLE_PRUNE", "true")
     if not opencode.supported_version(artifact.target_cli_version):
         raise SessionMigrateError(
-            "automatic OpenCode import requires target metadata version 1.17.20 or supported 2.0.x"
+            "automatic OpenCode import requires target metadata version 1.17.20 "
+            "or supported 2.0.x/2.1.x"
         )
     cli = _resolve_opencode_cli(target_cli, values)
     observed_version = _opencode_version(cli, values)
@@ -2092,7 +2095,17 @@ def install_opencode_artifact(
         raise SessionMigrateError(
             f"OpenCode CLI version mismatch: unsupported observed version {observed_version}"
         )
-    if opencode.is_v2(artifact.target_cli_version) != opencode.is_v2(observed_version):
+    artifact_series = (
+        ".".join(opencode_v2.version(artifact.target_cli_version).split(".")[:2])
+        if opencode.is_v2(artifact.target_cli_version)
+        else "legacy"
+    )
+    observed_series = (
+        ".".join(opencode_v2.version(observed_version).split(".")[:2])
+        if opencode.is_v2(observed_version)
+        else "legacy"
+    )
+    if artifact_series != observed_series:
         raise SessionMigrateError(
             "OpenCode CLI version mismatch: artifact and CLI transfer schemas differ"
         )

@@ -40,6 +40,10 @@ BIN_VARIABLE = "SESSION_MIGRATE_TEST_OPENCODE_V2"
 
 def environment(base: Path) -> dict[str, str]:
     home = base / "home"
+    # mkdir(parents=True) applies mode only to the leaf, leaving intermediate
+    # directories group-writable under umask 0002 and invalid for the ledger.
+    for directory in (base, home, home / ".local"):
+        directory.mkdir(mode=0o700, exist_ok=True)
     values = {
         "PATH": os.defpath,
         "LANG": "C.UTF-8",
@@ -78,8 +82,10 @@ def stock(tmp_path):
     proxy = tmp_path / "stock-opencode"
     proxy.symlink_to(binary)
     release = detect_opencode_version(proxy, environ=environment(tmp_path / "version-probe"))
-    if release not in {"2.0.22", "2.0.23"}:
-        raise pytest.UsageError("native TUI gate requires designated stock OpenCode 2.0.22/2.0.23")
+    if release not in {"2.0.22", "2.0.23", "2.1.1"}:
+        raise pytest.UsageError(
+            "native TUI gate requires designated stock OpenCode 2.0.22/2.0.23/2.1.1"
+        )
     return StockClient(proxy, release)
 
 
@@ -328,6 +334,7 @@ def title_stock(tmp_path):
     accepted = {
         "32cf5aa0a69a650e36277e3315d189835ddc79fb9aa1d0aef5025be5af5ad122",
         "a233de331f4438336e604d8e006fdab18e5911c4ece16de8e502eb61394c3586",
+        "0e81c77fcc27b263708b133bbf9880cd641060c20e22d3dec8a79b9a8db90450",
     }
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     if digest not in accepted:
@@ -368,7 +375,7 @@ def title_stock(tmp_path):
     )
     wrapper.chmod(0o700)
     release = detect_opencode_version(wrapper, environ=environment(tmp_path / "private-version"))
-    assert release in {"2.0.22", "2.0.23"}
+    assert release in {"2.0.22", "2.0.23", "2.1.1"}
     return StockClient(wrapper, release)
 
 

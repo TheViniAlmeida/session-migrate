@@ -43,7 +43,7 @@ def test_unknown_format_or_schema_fails_explicitly(format, schema):
         capabilities_for(format, schema=schema)
 
 
-@pytest.mark.parametrize("version", ["2.0.22", "2.0.23"])
+@pytest.mark.parametrize("version", ["2.0.22", "2.0.23", "2.1.1"])
 def test_title_proof_is_scoped_to_exact_opencode_client_and_schema(version):
     proved = title_capability_for("opencode", cli_version=version)
     assert proved.status == "native_verified"

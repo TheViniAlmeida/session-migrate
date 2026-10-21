@@ -8,6 +8,23 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
+## 21/10/2026 — DEV12
+
+- Adicionado suporte ao OpenCode 2.1.1 em origem e destino, com seleção do
+  contrato 2.0/2.1 pelo cliente e bloqueio de séries desconhecidas.
+- Adaptada a leitura de `native`, `metadata.keepID` e `metadata.recent`.
+  Compactações com referência ausente preservam o histórico; janelas privadas
+  de replay não são promovidas a resumos portáteis.
+- Mantida a escrita antiga de 2.0; o contrato 2.1 não emite `recent` legado.
+  Artefatos preparados para outra série são recusados antes da importação.
+- Adicionado gate de título nativo exato 2.1.1 e auditoria conservativa da nova
+  gramática. Resultados parciais e dados desconhecidos continuam explícitos.
+- Validados importação/exportação/retomada nativas, títulos, ferramentas,
+  compactações 2.1 e dez testes da TUI/continuidade com dados sintéticos.
+- CI mantém OpenCode 2.0.23 e acrescenta 2.1.1, inclusive no fluxo TUI.
+  Atualização no mesmo ID, elegibilidade de retorno/handoff e accounting
+  continuam sujeitos às provas específicas já existentes.
+
 ## 14/10/2026 — DEV11
 
 - Compatível com servidor existente ligado a wildcard, acessado somente por

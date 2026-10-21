@@ -5,6 +5,7 @@ import json
 import pytest
 
 pytest.importorskip("textual", reason="native composition fixtures require tui extra")
+import test_tui_native
 from test_tui_native import setup_case
 
 from session_migrate.canonical import CanonicalPolicy
@@ -25,7 +26,7 @@ from session_migrate.model import AgentFormat, TargetFormat
 from session_migrate.operations import OperationKind, OperationRequest, commit_operation
 from session_migrate.profiles import Profile, SessionRef, prepare_profile_operation
 
-pytest_plugins = ["test_tui_native"]
+title_stock = test_tui_native.title_stock
 
 
 @pytest.mark.parametrize(
