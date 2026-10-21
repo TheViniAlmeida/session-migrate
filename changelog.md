@@ -25,6 +25,17 @@ publicação no PyPI nem atualização automática das instalações existentes.
   Atualização no mesmo ID, elegibilidade de retorno/handoff e accounting
   continuam sujeitos às provas específicas já existentes.
 
+- Instalada a DEV12 primeiro no operador e depois na instalação compartilhada;
+  **85 testes passaram em cada instalação**, sem skips, usando o código empacotado.
+- Validadas sete contas: 42 verificações CLI, sete imports de core/TUI/web e
+  14 versões efetivas. Backups conferidos; 15 dependências, shared pip e links
+  globais preservados, com revisão independente pós-instalação aprovada.
+- Na instalação, foram conferidos o template real do PipScriptMaker,
+  os hashes e permissões dos launchers e a vinculação à QA antes da ativação.
+  O estágio interrompido foi concluído sem reinstalar pacotes.
+- Integrada a [PR #16](https://github.com/TheViniAlmeida/session-migrate/pull/16)
+  após revisão independente e **32 checks de CI aprovados**.
+
 ## 14/10/2026 — DEV11
 
 - Compatível com servidor existente ligado a wildcard, acessado somente por
