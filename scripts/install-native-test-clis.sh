@@ -50,12 +50,31 @@ want() {
 
 if want claude; then
   npm_cli claude '@anthropic-ai/claude-code@2.1.209' \
-    SESSION_MIGRATE_CLAUDE_BIN node_modules/.bin/claude
+    SESSION_MIGRATE_CLAUDE_BIN \
+    node_modules/@anthropic-ai/claude-code-linux-x64/claude
+fi
+if want claude-current; then
+  npm_cli claude-current '@anthropic-ai/claude-code@2.1.306' \
+    SESSION_MIGRATE_LATEST_CLAUDE_BIN \
+    node_modules/@anthropic-ai/claude-code-linux-x64/claude
+  claude_current_sha256=520bc6c1f40af466bd03a278b5ae1af1a2938bc7de5b9e5cb15526da20d71cfe
+  verify "$claude_current_sha256" \
+    "$native_root/npm/claude-current/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+  record SESSION_MIGRATE_LATEST_CLAUDE_SHA256 "$claude_current_sha256"
 fi
 if want codex; then
   npm_cli codex '@openai/codex@0.144.4' \
     SESSION_MIGRATE_CODEX_BIN \
     node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+fi
+if want codex-current; then
+  npm_cli codex-current '@openai/codex@0.163.0' \
+    SESSION_MIGRATE_LATEST_CODEX_BIN \
+    node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+  codex_current_sha256=399ff69c431c066e40de318fba45c2b07f45a76b19939d247ee4828fc70c4215
+  verify "$codex_current_sha256" \
+    "$native_root/npm/codex-current/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+  record SESSION_MIGRATE_LATEST_CODEX_SHA256 "$codex_current_sha256"
 fi
 if want copilot; then
   npm_cli copilot '@github/copilot@1.0.70' \

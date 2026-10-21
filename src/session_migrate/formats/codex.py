@@ -18,6 +18,13 @@ from session_migrate.jsonl import JsonlRecord, encode_jsonl, iter_jsonl_bytes, r
 from session_migrate.model import AgentFormat, Event, EventKind, Provenance, Role, Session
 
 PINNED_CODEX_VERSION = "0.144.4"
+VALIDATED_LEGACY_VERSIONS = frozenset({"0.144.4", "0.163.0"})
+VALIDATED_PAGINATED_VERSIONS = frozenset({"0.153.4", "0.163.0"})
+VALIDATED_TARGET_VERSIONS = frozenset({"0.144.4", "0.163.0"})
+
+# Harness-owned metadata classifies content entries independently of their text.
+# Latest Codex also appends these entries when resuming an older legacy rollout.
+PROVIDER_CONTEXT_CONTENT_KINDS = frozenset({"environments.environment_context"})
 
 # Codex 0.147+ paginated rollouts persist canonical TurnItems in
 # event_msg/item_completed records. Provider response_item messages are not an
@@ -378,6 +385,17 @@ def _paginated_user_message_events(
                     )
                 )
         elif block_type == "image":
+            image_url = string(block.get("image_url"))
+            if not image_url:
+                result.append(
+                    _opaque_completed_item(
+                        "UserMessage",
+                        timestamp,
+                        block_provenance,
+                        "image_file_id" if "file_id" in block else "missing_image_url",
+                    )
+                )
+                continue
             result.append(
                 Event(
                     kind=EventKind.CONTEXT,
@@ -385,7 +403,7 @@ def _paginated_user_message_events(
                     timestamp=timestamp,
                     payload={
                         "block_type": "image",
-                        "image_url": string(block.get("image_url")),
+                        "image_url": image_url,
                     },
                     provenance=block_provenance,
                 )
@@ -642,6 +660,24 @@ def rollout_relative_path(session_id: str, timestamp: str) -> Path:
     )
 
 
+def _message_content_kinds(payload: dict[str, Any]) -> tuple[str, ...] | None:
+    """Return aligned harness classifications; () rejects a malformed declaration."""
+
+    metadata = object_value(payload.get("internal_chat_message_metadata_passthrough"))
+    kinds = metadata.get("content_item_kinds")
+    if kinds is None:
+        return None
+    content = payload.get("content")
+    if (
+        not isinstance(kinds, list)
+        or not isinstance(content, list)
+        or len(kinds) != len(content)
+        or any(not isinstance(kind, str) for kind in kinds)
+    ):
+        return ()
+    return tuple(kinds)
+
+
 def _response_item_events(
     payload: dict[str, Any],
     timestamp: str | None,
@@ -669,12 +705,38 @@ def _response_item_events(
         content = payload.get("content")
         if not isinstance(content, list):
             return result
+        content_kinds = _message_content_kinds(payload)
+        if content and content_kinds == ():
+            return [
+                Event(
+                    kind=EventKind.OPAQUE,
+                    timestamp=timestamp,
+                    payload={"reason": "invalid_content_item_kinds"},
+                    provenance=provenance,
+                )
+            ]
         for block_index, block in enumerate(content):
             block_provenance = Provenance(
                 provenance.record_index,
                 provenance.record_type,
                 block_index=block_index,
             )
+            if (
+                content_kinds is not None
+                and content_kinds[block_index] in PROVIDER_CONTEXT_CONTENT_KINDS
+            ):
+                result.append(
+                    Event(
+                        kind=EventKind.OPAQUE,
+                        timestamp=timestamp,
+                        payload={
+                            "reason": "provider_context_message",
+                            "source_content_kind": content_kinds[block_index],
+                        },
+                        provenance=block_provenance,
+                    )
+                )
+                continue
             if not isinstance(block, dict):
                 result.append(Event(kind=EventKind.OPAQUE, provenance=block_provenance))
                 continue
@@ -693,6 +755,22 @@ def _response_item_events(
                     )
             elif block_type in {"input_image", "image"}:
                 image_url = string(block.get("image_url")) or string(block.get("url"))
+                if not image_url:
+                    result.append(
+                        Event(
+                            kind=EventKind.OPAQUE,
+                            role=role,
+                            timestamp=timestamp,
+                            payload={
+                                "source_block_type": block_type,
+                                "reason": "image_file_id"
+                                if "file_id" in block
+                                else "missing_image_url",
+                            },
+                            provenance=block_provenance,
+                        )
+                    )
+                    continue
                 result.append(
                     Event(
                         kind=EventKind.CONTEXT,

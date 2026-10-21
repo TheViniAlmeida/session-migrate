@@ -115,8 +115,8 @@ class EmitContext:
 
     def __post_init__(self) -> None:
         versions = {
-            TargetFormat.CLAUDE: frozenset({claude.PINNED_CLAUDE_VERSION}),
-            TargetFormat.CODEX: frozenset({codex.PINNED_CODEX_VERSION}),
+            TargetFormat.CLAUDE: claude.VALIDATED_CLAUDE_VERSIONS,
+            TargetFormat.CODEX: codex.VALIDATED_TARGET_VERSIONS,
             TargetFormat.OPENCODE: opencode_v2.VALIDATED_VERSIONS,
         }
         if (
@@ -1080,8 +1080,20 @@ def convert_session(
             f"selected OpenCode {series} transfer schema; exact target release differs "
             "from the validated native integration release"
         )
-    target_validated = observed_target == pinned_target or (
-        target_format == TargetFormat.OPENCODE and observed_target in opencode_v2.VALIDATED_VERSIONS
+    target_validated = (
+        (
+            target_format == TargetFormat.CLAUDE
+            and target_version in claude.VALIDATED_CLAUDE_VERSIONS
+        )
+        or (
+            target_format == TargetFormat.CODEX
+            and target_version in codex.VALIDATED_TARGET_VERSIONS
+        )
+        or observed_target == pinned_target
+        or (
+            target_format == TargetFormat.OPENCODE
+            and observed_target in opencode_v2.VALIDATED_VERSIONS
+        )
     )
     if not target_validated:
         warnings.append(
@@ -1153,9 +1165,21 @@ def convert_session(
         }[session.source_format]
         if session.source_format == AgentFormat.OPENCODE and opencode.is_v2(session.cli_version):
             pinned_source = opencode_v2.validated_version(session.cli_version)
-        source_validated = session.cli_version == pinned_source or (
-            session.source_format == AgentFormat.OPENCODE
-            and opencode_v2.version(session.cli_version) in opencode_v2.VALIDATED_VERSIONS
+        source_validated = (
+            (
+                session.source_format == AgentFormat.CLAUDE
+                and session.cli_version in claude.VALIDATED_CLAUDE_VERSIONS
+            )
+            or (
+                session.source_format == AgentFormat.CODEX
+                and session.cli_version
+                in codex.VALIDATED_LEGACY_VERSIONS | codex.VALIDATED_PAGINATED_VERSIONS
+            )
+            or session.cli_version == pinned_source
+            or (
+                session.source_format == AgentFormat.OPENCODE
+                and opencode_v2.version(session.cli_version) in opencode_v2.VALIDATED_VERSIONS
+            )
         )
         if not source_validated:
             warnings.append(

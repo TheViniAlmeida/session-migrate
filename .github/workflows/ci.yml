@@ -111,7 +111,9 @@ jobs:
         client:
           - antigravity
           - claude
+          - claude-current
           - codex
+          - codex-current
           - copilot
           - cursor
           - devin

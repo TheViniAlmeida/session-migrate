@@ -17,6 +17,7 @@ from weakref import WeakKeyDictionary
 
 from session_migrate.canonical import _json_bytes
 from session_migrate.conversion import ConversionArtifact, ConversionOptions
+from session_migrate.formats import claude, codex
 from session_migrate.lineage import Coverage, PolicyVersions
 from session_migrate.model import AgentFormat, Session, TargetFormat
 from session_migrate.native_snapshots import NativeSnapshot, SourceCaptureContext
@@ -34,8 +35,8 @@ if TYPE_CHECKING:
 _SEAL = object()
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _CLIENTS = {
-    TargetFormat.CLAUDE: {"2.1.209"},
-    TargetFormat.CODEX: {"0.144.4"},
+    TargetFormat.CLAUDE: claude.VALIDATED_CLAUDE_VERSIONS,
+    TargetFormat.CODEX: codex.VALIDATED_TARGET_VERSIONS,
     TargetFormat.OPENCODE: {"2.0.22", "2.0.23", "2.1.1"},
 }
 

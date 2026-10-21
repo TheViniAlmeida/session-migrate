@@ -12,6 +12,7 @@ set +a
 if [[ -n "${SESSION_MIGRATE_NATIVE_PATH:-}" ]]; then
   export PATH="$SESSION_MIGRATE_NATIVE_PATH:$PATH"
 fi
+isolate_network=0
 
 case "$client" in
   antigravity)
@@ -25,10 +26,32 @@ case "$client" in
       'tests/test_claude_codex_corpus_native.py::test_exact_client_resumes_fresh_writer_output[claude-SESSION_MIGRATE_CLAUDE_BIN-2.1.209-b882f4b8b27772f897540df50f24000206f43a9426e8f7d19bd065959b69e9dd]'
     )
     ;;
+  claude-current)
+    isolate_network=1
+    tests=(
+      'tests/test_claude_codex_latest_native.py::test_latest_stock_capture_and_cold_resume[claude]'
+      'tests/test_claude_codex_latest_native.py::test_latest_stock_cold_resumes_current_writer[historical-compacted-claude]'
+      'tests/test_claude_codex_latest_native.py::test_latest_stock_cold_resumes_current_writer[historical-tool-history-claude]'
+      'tests/test_claude_codex_latest_native.py::test_latest_stock_cold_resumes_current_writer[current-compacted-claude]'
+      'tests/test_claude_codex_latest_native.py::test_latest_stock_cold_resumes_current_writer[current-tool-history-claude]'
+      tests/test_claude_codex_latest_native.py::test_latest_claude_native_project_directory_override
+    )
+    ;;
   codex)
     tests=(
       tests/test_claude_codex_corpus_native.py::test_exact_codex_cold_reloads_sanitized_corpus_source
       'tests/test_claude_codex_corpus_native.py::test_exact_client_resumes_fresh_writer_output[codex-SESSION_MIGRATE_CODEX_BIN-0.144.4-2b3edc9cdfd1717fba3dbc92817205a8a2c7511d459e456d4817eeff6f78ed7a]'
+    )
+    ;;
+  codex-current)
+    isolate_network=1
+    tests=(
+      'tests/test_claude_codex_latest_native.py::test_latest_stock_capture_and_cold_resume[codex]'
+      'tests/test_claude_codex_latest_native.py::test_latest_stock_cold_resumes_current_writer[historical-compacted-codex]'
+      'tests/test_claude_codex_latest_native.py::test_latest_stock_cold_resumes_current_writer[historical-tool-history-codex]'
+      'tests/test_claude_codex_latest_native.py::test_latest_stock_cold_resumes_current_writer[current-compacted-codex]'
+      'tests/test_claude_codex_latest_native.py::test_latest_stock_cold_resumes_current_writer[current-tool-history-codex]'
+      tests/test_claude_codex_latest_native.py::test_latest_codex_app_server_reads_writer_history
     )
     ;;
   copilot)
@@ -147,5 +170,38 @@ esac
 
 report_file="$(mktemp "${TMPDIR:-/tmp}/session-migrate-native-junit.XXXXXX.xml")"
 trap 'rm -f -- "$report_file"' EXIT
-uv run pytest -q --junitxml="$report_file" "${tests[@]}"
-uv run python scripts/assert_junit_no_skips.py "$report_file"
+if [[ "$isolate_network" == 1 ]]; then
+  # Enter only a network namespace as root, then drop privileges before pytest.
+  # An outer bubblewrap user namespace can prevent the clients' inner sandbox.
+  # Dependencies and stock packages have already been installed.
+  uv_binary="$(command -v uv)"
+  runner_uid="$(id -u)"
+  runner_gid="$(id -g)"
+  if [[ "$runner_uid" == 0 ]]; then
+    printf 'Current native tests require a non-root invoking user.\n' >&2
+    exit 2
+  fi
+  native_environment=("HOME=$HOME" "PATH=$PATH")
+  for variable in \
+    SESSION_MIGRATE_LATEST_CLAUDE_BIN SESSION_MIGRATE_LATEST_CLAUDE_SHA256 \
+    SESSION_MIGRATE_LATEST_CODEX_BIN SESSION_MIGRATE_LATEST_CODEX_SHA256 \
+    UV_CACHE_DIR TMPDIR; do
+    if [[ -v "$variable" ]]; then
+      native_environment+=("$variable=${!variable}")
+    fi
+  done
+  sudo unshare --net -- /bin/sh -ec '
+    ip link set lo up
+    task_uid="$1"
+    task_gid="$2"
+    shift 2
+    exec setpriv --reuid "$task_uid" --regid "$task_gid" --clear-groups -- "$@"
+  ' sh "$runner_uid" "$runner_gid" \
+    /usr/bin/env -i "${native_environment[@]}" \
+    "$uv_binary" run --offline --locked pytest -q \
+    --junitxml="$report_file" "${tests[@]}"
+  uv run --offline --locked python scripts/assert_junit_no_skips.py "$report_file"
+else
+  uv run pytest -q --junitxml="$report_file" "${tests[@]}"
+  uv run python scripts/assert_junit_no_skips.py "$report_file"
+fi
