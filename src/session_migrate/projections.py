@@ -36,7 +36,7 @@ _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _CLIENTS = {
     TargetFormat.CLAUDE: {"2.1.209"},
     TargetFormat.CODEX: {"0.144.4"},
-    TargetFormat.OPENCODE: {"2.0.22", "2.0.23"},
+    TargetFormat.OPENCODE: {"2.0.22", "2.0.23", "2.1.1"},
 }
 
 
@@ -72,7 +72,7 @@ class SourceVersionContext:
     def __post_init__(self) -> None:
         require(self.source_format is AgentFormat.OPENCODE, "unsupported_policy")
         require(
-            type(self.source_client) is str and self.source_client in {"2.0.22", "2.0.23"},
+            type(self.source_client) is str and self.source_client in {"2.0.22", "2.0.23", "2.1.1"},
             "unsupported_policy",
         )
         require(isinstance(self.virtual_source_path, Path))
@@ -428,7 +428,9 @@ def prepare_projection(
             == Path(f"opencode:{parsed_source.session_id}"),
             "context_mismatch",
         )
-        require(parsed_source.cli_version in (None, "2.0.22", "2.0.23"), "context_mismatch")
+        require(
+            parsed_source.cli_version in (None, "2.0.22", "2.0.23", "2.1.1"), "context_mismatch"
+        )
         parsed_source = replace(
             parsed_source,
             source_path=source_context.virtual_source_path,

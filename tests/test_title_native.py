@@ -32,6 +32,7 @@ _FIXTURE = Path(__file__).parent / "fixtures/claude-2.1.209/basic.jsonl"
 _STOCK_SHA256 = {
     "2.0.22": "32cf5aa0a69a650e36277e3315d189835ddc79fb9aa1d0aef5025be5af5ad122",
     "2.0.23": "a233de331f4438336e604d8e006fdab18e5911c4ece16de8e502eb61394c3586",
+    "2.1.1": "0e81c77fcc27b263708b133bbf9880cd641060c20e22d3dec8a79b9a8db90450",
 }
 _TITLE = "Título nativo · Ação 🧪 日本語 — Ελληνικά"
 _MAX_COMMAND_BYTES = 4 * 1024 * 1024
@@ -56,7 +57,9 @@ class _NativeClient:
 def native_client(tmp_path: Path) -> _NativeClient:
     selected = os.environ.get("SESSION_MIGRATE_TEST_OPENCODE_V2")
     if not selected:
-        pytest.skip("set SESSION_MIGRATE_TEST_OPENCODE_V2 to the exact stock 2.0.22 or 2.0.23 ELF")
+        pytest.skip(
+            "set SESSION_MIGRATE_TEST_OPENCODE_V2 to the exact stock 2.0.22, 2.0.23 or 2.1.1 ELF"
+        )
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         pytest.skip("bubblewrap is required for the offline exact-title oracle")

@@ -105,7 +105,7 @@ def test_malformed_native_fields_rejected_before_projection(tmp_path, mutation):
         opencode.validate_native_bytes(json.dumps(bundle).encode(), bundle["info"]["id"])
 
 
-@pytest.mark.parametrize("release", ["2.0.22", "2.0.23"])
+@pytest.mark.parametrize("release", ["2.0.22", "2.0.23", "2.1.1"])
 @pytest.mark.parametrize(
     "blocks",
     [mixed_blocks(), [{"type": "text", "text": ""}, *mixed_blocks(), {"type": "text", "text": ""}]],
@@ -251,7 +251,7 @@ CONTROLS = [
     (
         "compaction",
         {"status": "running", "reason": "auto", "summary": "", "recent": ""},
-        ("status", "reason", "summary", "recent"),
+        ("status", "reason", "summary"),
     ),
     (
         "compaction",
@@ -277,6 +277,27 @@ def append_control(bundle, kind, fields):
     }
     bundle["messages"].append(control)
     return control
+
+
+@pytest.mark.parametrize("recent", ["missing", "", None, []])
+def test_compaction_recent_is_optional_but_typed(tmp_path, recent):
+    bundle = source_bundle(tmp_path)
+    control = append_control(
+        bundle, "compaction", {"status": "running", "reason": "auto", "summary": ""}
+    )
+    if recent != "missing":
+        control["recent"] = recent
+    data = json.dumps(bundle).encode()
+    path = tmp_path / "compaction.json"
+    path.write_bytes(data)
+    if recent is None or isinstance(recent, list):
+        with pytest.raises(SessionMigrateError):
+            opencode.validate_native_bytes(data, bundle["info"]["id"])
+        with pytest.raises(SessionMigrateError):
+            opencode.parse_session(path)
+    else:
+        opencode.validate_native_bytes(data, bundle["info"]["id"])
+        opencode.parse_session(path)
 
 
 @pytest.mark.parametrize("kind,fields,required", REQUIRED_CONTROLS)
@@ -507,7 +528,7 @@ def test_legacy_loss_oracle_counts_only_lost_segmentation_or_order(
 def test_stock_v2_accepts_and_cold_exports_review_sources_and_fixed_targets(tmp_path, case):
     binary = os.environ.get("SESSION_MIGRATE_TEST_OPENCODE_V2")
     if not binary:
-        pytest.skip("set SESSION_MIGRATE_TEST_OPENCODE_V2 to stock 2.0.22 or 2.0.23")
+        pytest.skip("set SESSION_MIGRATE_TEST_OPENCODE_V2 to stock 2.0.22, 2.0.23 or 2.1.1")
     env = {
         "PATH": "/usr/bin:/bin",
         "LANG": "C.UTF-8",
@@ -533,7 +554,8 @@ def test_stock_v2_accepts_and_cold_exports_review_sources_and_fixed_targets(tmp_
         assert result.returncode == 0, result.stderr
         return result.stdout
 
-    assert run("--version").strip().removeprefix("opencode v") in {"2.0.22", "2.0.23"}
+    release = run("--version").strip().removeprefix("opencode v")
+    assert release in {"2.0.22", "2.0.23", "2.1.1"}
     bundle = source_bundle(tmp_path)
     if case == "mixed":
         tool(bundle)["state"]["content"] = mixed_blocks()
@@ -589,14 +611,24 @@ def test_stock_v2_accepts_and_cold_exports_review_sources_and_fixed_targets(tmp_
             timeout=90,
         )
         assert rejected.returncode != 0
-        assert "SchemaError" in rejected.stderr
+        diagnostic = "Bad Request" if release == "2.1.1" else "SchemaError"
+        assert diagnostic in rejected.stderr
+        missing = subprocess.run(
+            [binary, "session", "export", bundle["info"]["id"], "--standalone"],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        assert missing.returncode != 0
         return
     run("session", "import", str(path), "--directory", str(tmp_path), "--standalone")
     accepted = json.loads(run("session", "export", bundle["info"]["id"], "--standalone"))
     assert tool(accepted)["state"] == tool(bundle)["state"]
     path.write_text(json.dumps(accepted))
     source = opencode.parse_session(path)
-    migrated = convert_session(source, options(tmp_path))
+    migrated = convert_session(source, options(tmp_path, release))
     path.write_bytes(migrated.native_bytes)
     run("session", "import", str(path), "--directory", str(tmp_path), "--standalone")
     exported = json.loads(run("session", "export", migrated.session_id, "--standalone"))
@@ -615,6 +647,11 @@ def test_stock_v2_accepts_and_cold_exports_review_sources_and_fixed_targets(tmp_
         assert migrated.dropped["opaque:opencode_v2_tool_error_response"] == 1
     else:
         assert not any(m["type"] == "compaction" for m in exported["messages"])
-        for reason in ("providerContext", "providerState", "compaction_empty_portable_summary"):
+        private_fields = ("native",) if release == "2.1.1" else ("providerContext", "providerState")
+        for reason in (
+            *private_fields,
+            "compaction_empty_portable_summary",
+            "compaction_native_window",
+        ):
             assert migrated.dropped[f"opaque:opencode_v2_{reason}"] == 1
         assert "SYNTHETIC_PRIVATE_CHECKPOINT" not in migrated.native_bytes.decode()

@@ -81,6 +81,10 @@ if want opencode-v2; then
   npm_cli opencode-v2 '@opencode/cli@2.0.23' \
     SESSION_MIGRATE_TEST_OPENCODE_V2 node_modules/@opencode/cli-linux-x64/bin/opencode
 fi
+if want opencode-v21; then
+  npm_cli opencode-v21 '@opencode/cli@2.1.1' \
+    SESSION_MIGRATE_TEST_OPENCODE_V2 node_modules/@opencode/cli-linux-x64/bin/opencode
+fi
 if want pi; then
   npm_cli pi '@earendil-works/pi-coding-agent@0.80.6' \
     SESSION_MIGRATE_PI_BIN node_modules/.bin/pi

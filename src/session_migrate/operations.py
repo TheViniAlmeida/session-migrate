@@ -1456,12 +1456,12 @@ def _prepare_lineage_projection(state: _PreparedState):
     known_sources = {
         AgentFormat.CLAUDE: {"2.1.209"},
         AgentFormat.CODEX: {"0.144.4", "0.153.4"},
-        AgentFormat.OPENCODE: {"2.0.22", "2.0.23"},
+        AgentFormat.OPENCODE: {"2.0.22", "2.0.23", "2.1.1"},
     }
     known_targets = {
         TargetFormat.CLAUDE: {"2.1.209"},
         TargetFormat.CODEX: {"0.144.4"},
-        TargetFormat.OPENCODE: {"2.0.22", "2.0.23"},
+        TargetFormat.OPENCODE: {"2.0.22", "2.0.23", "2.1.1"},
     }
     if artifact.source.cli_version not in known_sources.get(
         artifact.source.source_format, ()

@@ -64,9 +64,13 @@ jobs:
           uv run --locked --extra web python scripts/assert_junit_no_skips.py web-results.xml
 
   tui-native:
-    name: Native keyboard migration (OpenCode 2.0.23)
+    name: Native keyboard migration (${{ matrix.client }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [opencode-v2, opencode-v21]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -87,7 +91,7 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
       - name: Install designated stock OpenCode
-        run: ./scripts/install-native-test-clis.sh /tmp/session-migrate-tui-native opencode-v2
+        run: ./scripts/install-native-test-clis.sh /tmp/session-migrate-tui-native "${{ matrix.client }}"
       - name: Real keyboard/core migration gates (skips fail)
         run: |
           set -a
@@ -120,6 +124,7 @@ jobs:
           - omp
           - opencode
           - opencode-v2
+          - opencode-v21
           - openhands
           - pi
           - qwen

@@ -76,6 +76,10 @@ def test_streamed_tool_source_retains_partial_input_through_portable_target(tmp_
         ("2.0.22", "2.0.23", False),
         ("2.0.23", "2.0.23", False),
         ("opencode v2.0.23", "2.0.23", False),
+        ("2.1.1", "2.1.1", False),
+        ("opencode v2.1.1", "2.1.1", False),
+        ("2.1.2", "2.1.1", True),
+        ("2.1.1-gateway.custom", "2.1.1", True),
         ("2.0.24", "2.0.23", True),
         ("2.0.23-gateway.custom", "2.0.23", True),
     ],
@@ -99,7 +103,7 @@ def test_target_version_warning_matches_selected_schema(
     if warning_expected:
         assert warnings[0]["validated"] == validated
         assert warnings[0]["observed"] == release
-        assert "selected OpenCode 2.0 transfer schema" in warnings[0]["message"]
+        assert f"selected OpenCode {validated[:3]} transfer schema" in warnings[0]["message"]
         assert "remains pinned" not in warnings[0]["message"]
     native = json.loads(target.native_bytes)
     assert ("location" in native["info"]) is opencode.is_v2(release)
@@ -170,7 +174,7 @@ def test_cli_help_explains_opencode_schema_selection(capsys):
         build_parser().parse_args(["convert", "--help"])
     assert exc.value.code == 0
     help_text = " ".join(capsys.readouterr().out.split())
-    assert "selects legacy or 2.0 transfer schema for OpenCode" in help_text
+    assert "selects legacy, 2.0 or 2.1 transfer schema for OpenCode" in help_text
     assert "metadata version only; the writer schema remains pinned" not in help_text
 
 
@@ -289,7 +293,8 @@ def test_v2_private_provider_state_accounted(tmp_path):
         ("2.0.22", True),
         ("opencode v2.0.23", True),
         ("2.0.23-gateway.3648f00e", True),
-        ("2.1.0", False),
+        ("2.1.0", True),
+        ("2.2.0", False),
         ("3.0.0", False),
         ("9.9.9", False),
         ("1.17.20", True),
@@ -343,7 +348,7 @@ def test_native_v2_isolated_import_export_dry_run_and_collision(tmp_path):
     for value in [env["HOME"], *(env[k] for k in env if k.startswith("XDG_"))]:
         Path(value).mkdir()
     release = conversion._opencode_version(Path(native), env)
-    assert release in {"2.0.22", "2.0.23"}
+    assert release in {"2.0.22", "2.0.23", "2.1.1"}
     target = artifact(tmp_path, release)
     # Include a native completed compaction and linked tool output from the Codex fixture.
     value = json.loads(target.native_bytes)
@@ -657,3 +662,25 @@ def test_v2_tool_error_requires_structured_type(tmp_path):
     tool["state"] = {"status": "error", "input": {}, "error": {"message": "missing type"}}
     with pytest.raises(SessionMigrateError, match="invalid structured error"):
         opencode.validate_native_bytes(json.dumps(value).encode(), value["info"]["id"])
+
+
+@pytest.mark.parametrize(
+    "artifact_release, native_release", [("2.0.23", "2.1.1"), ("2.1.1", "2.0.23")]
+)
+def test_native_import_refuses_different_v2_schema_series(
+    tmp_path, monkeypatch, artifact_release, native_release
+):
+    target = artifact(tmp_path, artifact_release)
+    monkeypatch.setattr(conversion, "_resolve_opencode_cli", lambda *args: Path("opencode"))
+    monkeypatch.setattr(conversion, "_opencode_version", lambda *args: native_release)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("schema mismatch must stop before native import or collision queries")
+
+    monkeypatch.setattr(conversion, "_opencode_session_ids", unexpected)
+    monkeypatch.setattr(conversion, "_invoke_opencode_import", unexpected)
+    with pytest.raises(SessionMigrateError, match="transfer schemas differ"):
+        conversion.install_opencode_artifact(
+            target, manifest_path=tmp_path / "manifest.json", environ={}
+        )
+    assert not (tmp_path / "manifest.json").exists()

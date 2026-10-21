@@ -439,8 +439,8 @@ def test_profile_stock_opencode_two_stores_exact_native_id(tmp_path):
     from session_migrate.conversion import detect_opencode_version, install_opencode_artifact
 
     release = detect_opencode_version(executable, environ=base)
-    if release not in {"2.0.22", "2.0.23"}:
-        pytest.skip("native profile oracle requires stock OpenCode 2.0.22/2.0.23")
+    if release not in {"2.0.22", "2.0.23", "2.1.1"}:
+        pytest.skip("native profile oracle requires stock OpenCode 2.0.22/2.0.23/2.1.1")
     native_id = opencode.session_id_from_uuid(TARGET_ID)
     first = profile(tmp_path, format=AgentFormat.OPENCODE, id="first", cli=executable)
     second = profile(tmp_path, format=AgentFormat.OPENCODE, id="second", cli=executable)

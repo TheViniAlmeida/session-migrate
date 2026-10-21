@@ -1,4 +1,4 @@
-"""Public OpenCode 2.0 transfer schema support; no private database access.
+"""Public OpenCode 2.0/2.1 transfer schema support; no private database access.
 
 Legacy bundles are an internal portable projection only. Native v2 files always
 use SessionTransfer.Data (flat messages), not legacy message info/parts.
@@ -8,19 +8,25 @@ from __future__ import annotations
 
 import base64
 import copy
+import json
 import re
 from typing import Any
 
 from session_migrate.errors import SessionMigrateError
 
-_VERSION = re.compile(r"(?:opencode v)?(2\.0\.\d+(?:[-+][0-9A-Za-z.-]+)?)")
+_VERSION = re.compile(r"(?:opencode v)?(2\.[01]\.\d+(?:[-+][0-9A-Za-z.-]+)?)")
 VALIDATED_VERSION = "2.0.23"
-VALIDATED_VERSIONS = frozenset({"2.0.22", VALIDATED_VERSION})
+VALIDATED_VERSIONS = frozenset({"2.0.22", VALIDATED_VERSION, "2.1.1"})
 
 
 def version(value: str) -> str | None:
     match = _VERSION.fullmatch(value)
     return match.group(1) if match else None
+
+
+def validated_version(value: str) -> str:
+    release = version(value)
+    return "2.1.1" if release and release.startswith("2.1.") else VALIDATED_VERSION
 
 
 def is_bundle(value: dict[str, Any]) -> bool:
@@ -41,6 +47,8 @@ def from_legacy(
     tool_content: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     old = bundle["info"]
+    release = version(old.get("version", ""))
+    schema_21 = bool(release and release.startswith("2.1."))
     ref: dict[str, Any] = {}
     messages: list[dict[str, Any]] = []
     compact: set[str] = set()
@@ -71,7 +79,7 @@ def from_legacy(
                         "reason": "auto",
                         "model": ref,
                         "summary": "\n".join(p["text"] for p in parts if p["type"] == "text"),
-                        "recent": "",
+                        **({} if schema_21 else {"recent": ""}),
                     }
                 )
                 continue
@@ -150,6 +158,90 @@ def from_legacy(
     }
 
 
+def _is_native_compaction(message: dict[str, Any]) -> bool:
+    return "providerContext" in message or "messages" in message.get("native", {})
+
+
+def _kept_message_text(message: dict[str, Any]) -> str:
+    """Render portable kept context without copying provider-owned replay data.
+
+    Mirrors OpenCode's recent-text.ts labels, retaining full tool output rather
+    than its display truncation because this is the portable history boundary.
+    """
+    kind = message["type"]
+    if kind == "user":
+        parts = [
+            f"[Skill activated: {skill['name']}]\n{skill['text']}"
+            for skill in message.get("skills", [])
+            if "text" in skill
+        ]
+        parts.append(f"[User]: {message['text']}")
+        for attachment in message.get("files", []):
+            name = attachment.get("name") or attachment["source"].get("uri", "inline attachment")
+            parts.append(f"[Attached {attachment['mime']}: {name}]")
+        return "\n".join(parts)
+    if kind == "assistant":
+        parts = []
+        for content in message["content"]:
+            if content["type"] == "text":
+                parts.append(f"[Assistant]: {content['text']}")
+            elif content["type"] == "reasoning":
+                if content["text"]:
+                    parts.append(f"[Assistant reasoning]: {content['text']}")
+            else:
+                state = content["state"]
+                value = state["input"]
+                text = (
+                    value
+                    if isinstance(value, str)
+                    else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+                )
+                parts.append(f"[Assistant tool call]: {content['name']}({text})")
+                if state["status"] == "completed":
+                    output = "\n".join(
+                        block["text"]
+                        if block["type"] == "text"
+                        else f"[Attached {block['mime']}"
+                        + (f": {block['name']}" if "name" in block else "")
+                        + "]"
+                        for block in state["content"]
+                    )
+                    parts.append(f"[Tool result]: {output}")
+                elif state["status"] == "error":
+                    parts.append(f"[Tool error]: {state['error']['message']}")
+        return "\n".join(parts)
+    if kind == "location-switched":
+        directory = message["location"]["directory"]
+        return f"[User]: The working directory has been changed to {directory}."
+    if kind == "synthetic":
+        return f"[Synthetic context]: {message['text']}"
+    if kind == "skill":
+        return f"[Skill activated: {message['name']}]\n{message['text']}"
+    if kind == "shell" and message.get("metadata", {}).get("background") is not True:
+        return f"[Shell]: {message['command']}\n{message.get('output', {}).get('output', '')}"
+    return ""
+
+
+def _recent_context(messages: list[dict[str, Any]], index: int) -> tuple[str, bool]:
+    message = messages[index]
+    metadata = message.get("metadata", {})
+    if "keepID" in metadata:
+        keep_id = metadata["keepID"]
+        start = (
+            next((i for i, kept in enumerate(messages[:index]) if kept["id"] == keep_id), None)
+            if isinstance(keep_id, str)
+            else None
+        )
+        if start is not None:
+            return "\n\n".join(
+                text for kept in messages[start:index] if (text := _kept_message_text(kept))
+            ), False
+        # A missing referenced tail must not let a summary retire readable history.
+        return "", True
+    recent = metadata.get("recent", message.get("recent", ""))
+    return recent if isinstance(recent, str) else "", False
+
+
 def _to_legacy(bundle: dict[str, Any]) -> dict[str, Any]:
     """Validate the v2 portable content projection and reuse the mature reader."""
     from session_migrate.formats import opencode
@@ -182,7 +274,7 @@ def _to_legacy(bundle: dict[str, Any]) -> dict[str, Any]:
             "messageID": message_id,
         }
 
-    for message in messages:
+    for index, message in enumerate(messages):
         if not isinstance(message, dict):
             raise SessionMigrateError("OpenCode v2 session contains a malformed message")
         mid = message.get("id")
@@ -200,30 +292,34 @@ def _to_legacy(bundle: dict[str, Any]) -> dict[str, Any]:
         if kind == "compaction":
             if message.get("status") != "completed":
                 continue
+            if _is_native_compaction(message):
+                continue
+            recent, unresolved_keep = _recent_context(messages, index)
             # A provider-private checkpoint without portable text must not retire
             # earlier readable history when replayed in another harness.
-            if not message["summary"].strip() and not message["recent"].strip():
+            if not message["summary"].strip() and not recent.strip():
                 continue
             synthetic_id = mid + "_compaction"
-            output.append(
-                {
-                    "info": {
-                        "id": synthetic_id,
-                        "sessionID": info["id"],
-                        "role": "user",
-                        "time": clock,
-                        "agent": "build",
-                        "model": {"modelID": model["id"], "providerID": model["providerID"]},
-                    },
-                    "parts": [
-                        part(
-                            {"type": "compaction", "auto": message.get("reason") == "auto"},
-                            synthetic_id,
-                        )
-                    ],
-                }
-            )
-            latest_user = synthetic_id
+            if not unresolved_keep:
+                output.append(
+                    {
+                        "info": {
+                            "id": synthetic_id,
+                            "sessionID": info["id"],
+                            "role": "user",
+                            "time": clock,
+                            "agent": "build",
+                            "model": {"modelID": model["id"], "providerID": model["providerID"]},
+                        },
+                        "parts": [
+                            part(
+                                {"type": "compaction", "auto": message.get("reason") == "auto"},
+                                synthetic_id,
+                            )
+                        ],
+                    }
+                )
+                latest_user = synthetic_id
             kind = "assistant"
             message = {
                 **message,
@@ -233,14 +329,10 @@ def _to_legacy(bundle: dict[str, Any]) -> dict[str, Any]:
                     {
                         "type": "text",
                         "text": message.get("summary", "")
-                        + (
-                            "\n\nRecent context:\n" + message["recent"]
-                            if message.get("recent")
-                            else ""
-                        ),
+                        + ("\n\nRecent context:\n" + recent if recent else ""),
                     }
                 ],
-                "_summary": True,
+                "_summary": not unresolved_keep,
             }
         if kind not in {"user", "assistant"}:
             continue
@@ -391,6 +483,7 @@ _MESSAGE_FIELDS = {
         "finish",
         "rawFinish",
         "providerState",
+        "native",
         "cost",
         "tokens",
         "error",
@@ -404,6 +497,7 @@ _MESSAGE_FIELDS = {
         "model",
         "providerState",
         "providerContext",
+        "native",
         "cost",
         "tokens",
         "error",
@@ -451,15 +545,25 @@ def loss_events(bundle: dict[str, Any]) -> list[Any]:
             reasons.append(f"opencode_v2_{kind}_record")
         elif kind == "compaction" and message.get("status") != "completed":
             reasons.append(f"opencode_v2_compaction_{message.get('status')}")
-        elif (
-            kind == "compaction"
-            and not message["summary"].strip()
-            and not message["recent"].strip()
-        ):
-            reasons.append("opencode_v2_compaction_empty_portable_summary")
+        elif kind == "compaction":
+            recent, unresolved_keep = _recent_context(bundle["messages"], index)
+            if _is_native_compaction(message):
+                reasons.append("opencode_v2_compaction_native_window")
+            elif unresolved_keep:
+                reasons.append("opencode_v2_compaction_unresolved_keep_id")
+            if not message["summary"].strip() and not recent.strip():
+                reasons.append("opencode_v2_compaction_empty_portable_summary")
         if isinstance(message.get("model"), dict) and message["model"].get("variant"):
             reasons.append("opencode_v2_message_model_variant")
-        for name in ("providerState", "providerContext", "metadata", "snapshot", "retry", "error"):
+        for name in (
+            "providerState",
+            "providerContext",
+            "native",
+            "metadata",
+            "snapshot",
+            "retry",
+            "error",
+        ):
             if message.get(name):
                 reasons.append(f"opencode_v2_{name}")
         for name in ("agents", "skills"):
@@ -477,7 +581,7 @@ def loss_events(bundle: dict[str, Any]) -> list[Any]:
             reasons.append("opencode_v2_unknown_message_fields")
         for content in message["content"] if kind == "assistant" else []:
             allowed_content = (
-                {"type", "text", "state", "time"}
+                {"type", "text", "state", "native", "time"}
                 if content.get("type") != "tool"
                 else {
                     "type",
@@ -486,6 +590,7 @@ def loss_events(bundle: dict[str, Any]) -> list[Any]:
                     "executed",
                     "providerState",
                     "providerResultState",
+                    "native",
                     "state",
                     "time",
                 }
@@ -510,7 +615,7 @@ def loss_events(bundle: dict[str, Any]) -> list[Any]:
                 and content["state"].get("content")
             ):
                 reasons.append("opencode_v2_error_tool_content")
-            for name in ("state", "providerState", "providerResultState"):
+            for name in ("state", "providerState", "providerResultState", "native"):
                 if content.get(name) and (name != "state" or content.get("type") != "tool"):
                     reasons.append(f"opencode_v2_content_{name}")
         for reason in reasons:
@@ -763,7 +868,7 @@ def _validate_native(bundle: dict[str, Any]) -> None:
                     raise SessionMigrateError("OpenCode v2 has invalid shell output")
         if kind == "assistant":
             strings(m, (), ("rawFinish",))
-            object_fields(m, ("providerState", "snapshot", "retry"))
+            object_fields(m, ("providerState", "native", "snapshot", "retry"))
             if "snapshot" in m:
                 strings(m["snapshot"], (), ("start", "end"))
                 files = m["snapshot"].get("files", [])
@@ -785,7 +890,7 @@ def _validate_native(bundle: dict[str, Any]) -> None:
             for c in m["content"]:
                 if not isinstance(c, dict):
                     raise SessionMigrateError("OpenCode v2 has malformed assistant content")
-                object_fields(c, ("providerState", "providerResultState"))
+                object_fields(c, ("providerState", "providerResultState", "native"))
                 if c.get("type") != "tool":
                     enum(c.get("type"), ("text", "reasoning"))
                     strings(c, ("text",))
@@ -829,13 +934,12 @@ def _validate_native(bundle: dict[str, Any]) -> None:
                 raise SessionMigrateError("OpenCode v2 compaction has invalid status")
             if m.get("reason") not in {"auto", "manual"}:
                 raise SessionMigrateError("OpenCode v2 compaction has invalid reason")
-            if m["status"] in {"running", "completed"} and not all(
-                isinstance(m.get(k), str) for k in ("summary", "recent")
-            ):
+            if m["status"] in {"running", "completed"} and not isinstance(m.get("summary"), str):
                 raise SessionMigrateError("OpenCode v2 compaction has invalid summary")
+            strings(m, (), ("recent",))
             if m["status"] == "failed":
                 error(m.get("error"))
-            object_fields(m, ("providerState", "providerContext"))
+            object_fields(m, ("providerState", "providerContext", "native"))
             if "providerContext" in m:
                 context = m["providerContext"]
                 if context.get("version") != 1 or isinstance(context.get("version"), bool):
