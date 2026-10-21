@@ -8,6 +8,24 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
+## 21/10/2026 — DEV13
+
+- Adicionado suporte testado a Claude Code 2.1.303/2.1.306 e Codex 0.163.0,
+  preservando os contratos e as provas das versões anteriores.
+- Corrigido o leitor Codex para distinguir contexto interno tipado de mensagem
+  do usuário ao retomar histórico legacy com cliente recente; texto XML
+  legítimo do usuário permanece intacto.
+- Corrigida a seleção Claude que podia atravessar uma conversa de subagente
+  quando indicada por `last-prompt`; agora a operação recusa essa seleção.
+- Alinhadas versões aceitas em projeções, emissão USER e extração de uso.
+  Cache de escrita usa contador explícito e os escopos permanecem separados.
+- Imagens Codex referenciadas somente por `file_id` geram perda explícita.
+  Contextos privados e campos desconhecidos continuam sob auditoria conservativa.
+- Publicação Claude com namespace customizado é recusada antes da escrita,
+  pois a prova nativa não confirmou persistência retomável nesse modo.
+- Adicionados gates nativos separados para clientes atuais, sem flags de
+  bypass, em repositórios e diretórios descartáveis com provedor simulado.
+
 ## 21/10/2026 — DEV12
 
 - Adicionado suporte ao OpenCode 2.1.1 em origem e destino, com seleção do

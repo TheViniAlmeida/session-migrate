@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from importlib import import_module
 
 from session_migrate.errors import SessionMigrateError
-from session_migrate.formats import opencode_v2
+from session_migrate.formats import claude, codex, opencode_v2
 from session_migrate.model import AgentFormat
 
 
@@ -187,8 +187,8 @@ def handoff_emission_supported(agent_format: AgentFormat | str, *, cli_version: 
     """Schema-level USER emission only; no native resume, closure or update claim."""
     selected = capabilities_for(agent_format).format
     versions = {
-        AgentFormat.CLAUDE: {"2.1.209"},
-        AgentFormat.CODEX: {"0.144.4"},
+        AgentFormat.CLAUDE: claude.VALIDATED_CLAUDE_VERSIONS,
+        AgentFormat.CODEX: codex.VALIDATED_TARGET_VERSIONS,
         AgentFormat.OPENCODE: set(opencode_v2.VALIDATED_VERSIONS),
     }
     return type(cli_version) is str and cli_version in versions.get(selected, ())

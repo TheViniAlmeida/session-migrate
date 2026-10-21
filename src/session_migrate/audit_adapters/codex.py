@@ -38,6 +38,8 @@ def block(value: object) -> Rule:
                 "type": DISCRIMINATOR,
                 "text": scalar(LOSS, str) if value.get("text") == "" else S,
                 "text_elements": array(subtree(UNKNOWN)),
+                "annotations": subtree(LOSS),
+                "logprobs": subtree(LOSS),
             },
             required=("type", "text"),
         )
@@ -53,6 +55,7 @@ def block(value: object) -> Rule:
                 "type": DISCRIMINATOR,
                 "image_url": image_rule,
                 "url": url_rule,
+                "file_id": scalar(LOSS, str),
                 "detail": scalar(LOSS, str),
             },
             required=("type",),
@@ -85,7 +88,11 @@ def response(value: object) -> Rule:
     if type(value) is not dict:
         return subtree(UNKNOWN)
     kind = value.get("type")
-    common = {"type": DISCRIMINATOR, "id": ID}
+    common = {
+        "type": DISCRIMINATOR,
+        "id": ID,
+        "encrypted_content": scalar(LOSS, str),
+    }
     if kind == "message":
         return obj(
             {
@@ -93,6 +100,8 @@ def response(value: object) -> Rule:
                 "role": DISCRIMINATOR,
                 "content": array(dynamic(block)),
                 "phase": scalar(LOSS, str),
+                "status": scalar(LOSS, str),
+                "internal_chat_message_metadata_passthrough": subtree(UNKNOWN),
             },
             required=("type", "role", "content"),
         )
@@ -112,6 +121,7 @@ def response(value: object) -> Rule:
                 "namespace": scalar(SEMANTIC, str),
                 "arguments": arguments_rule,
                 "input": input_rule,
+                "status": scalar(LOSS, str),
             },
             required=("type", "name", "arguments" if "arguments" in value else "input"),
         )
@@ -165,6 +175,10 @@ def grammar(value: dict) -> Rule:
                 "originator": scalar(ACCOUNTING, str),
                 "cli_version": scalar(STRUCTURE, str),
                 "source": scalar(STRUCTURE, str),
+                "thread_source": scalar(STRUCTURE, str),
+                "runtime_workspace_roots": array(scalar(STRUCTURE, str)),
+                "context_window": obj({"window_id": ID}, required=("window_id",)),
+                "base_instructions": subtree(LOSS),
                 "model_provider": scalar(ACCOUNTING, str),
                 "history_mode": DISCRIMINATOR,
                 "history_base": subtree(UNKNOWN),
@@ -180,7 +194,15 @@ def grammar(value: dict) -> Rule:
             rule = obj({"type": DISCRIMINATOR, "message": S}, required=("type", "message"))
         elif event_type == "item_completed":
             rule = obj(
-                {"type": DISCRIMINATOR, "item": dynamic(completed)}, required=("type", "item")
+                {
+                    "type": DISCRIMINATOR,
+                    "item": dynamic(completed),
+                    "thread_id": ID,
+                    "turn_id": ID,
+                    "started_at_ms": scalar(COORDINATE, int),
+                    "completed_at_ms": scalar(COORDINATE, int),
+                },
+                required=("type", "item"),
             )
         elif event_type == "thread_name_updated":
             rule = obj(
@@ -209,6 +231,7 @@ def grammar(value: dict) -> Rule:
             "timestamp": scalar(COORDINATE, str),
             "ordinal": scalar(STRUCTURE, int),
             "payload": rule,
+            "metadata": subtree(UNKNOWN),
         },
         required=("type", "payload"),
     )
@@ -238,6 +261,8 @@ def _semantic_loss_issues(value: dict, taxonomy: Taxonomy, index: int) -> None:
             if type(candidate) is not dict:
                 continue
             if candidate.get("type") in {"input_image", "image"}:
+                if "file_id" in candidate:
+                    taxonomy.issue("image_file_id_loss", index)
                 if "detail" in candidate:
                     taxonomy.issue("image_detail_loss", index)
                 if "image_url" in candidate and "url" in candidate:
@@ -258,8 +283,9 @@ def audit(records, snapshot, policy) -> AdapterResult:
     client = meta.get("cli_version")
     if len(metas) != 1 or mode not in {"legacy", "paginated"}:
         taxonomy.issue("ambiguous_source_identity", 0)
-    supported = (mode == "legacy" and client == "0.144.4") or (
-        mode == "paginated" and client == "0.153.4"
+    supported = type(client) is str and (
+        (mode == "legacy" and client in parser.VALIDATED_LEGACY_VERSIONS)
+        or (mode == "paginated" and client in parser.VALIDATED_PAGINATED_VERSIONS)
     )
     if not supported or (policy.client_version is not None and policy.client_version != client):
         taxonomy.issue("unsupported_client_version", 0)
@@ -302,7 +328,19 @@ def audit(records, snapshot, policy) -> AdapterResult:
                 else:
                     content = payload.get("content")
                     if type(content) is list:
-                        for block_value in content:
+                        content_kinds = parser._message_content_kinds(payload)
+                        if content and content_kinds == ():
+                            taxonomy.issue("invalid_content_item_kinds", record.index)
+                            content = []
+                        for block_index, block_value in enumerate(content):
+                            if (
+                                content_kinds is not None
+                                and content_kinds[block_index]
+                                in parser.PROVIDER_CONTEXT_CONTENT_KINDS
+                            ):
+                                taxonomy.loss_records.add(record.index)
+                                taxonomy.issue("provider_body_known_loss", record.index)
+                                continue
                             if (
                                 type(block_value) is dict
                                 and block_value.get("type") in {"input_text", "output_text", "text"}

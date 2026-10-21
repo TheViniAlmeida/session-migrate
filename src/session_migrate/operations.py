@@ -67,7 +67,7 @@ from session_migrate.errors import (
     SessionMigrateError,
     SourceReadLimitError,
 )
-from session_migrate.formats import opencode_v2
+from session_migrate.formats import claude, codex, opencode_v2
 from session_migrate.lineage import (
     CheckpointRecord,
     CompletionReceipt,
@@ -1454,13 +1454,13 @@ def _prepare_lineage_projection(state: _PreparedState):
 
     artifact = state.built.artifact
     known_sources = {
-        AgentFormat.CLAUDE: {"2.1.209"},
-        AgentFormat.CODEX: {"0.144.4", "0.153.4"},
+        AgentFormat.CLAUDE: claude.VALIDATED_CLAUDE_VERSIONS,
+        AgentFormat.CODEX: codex.VALIDATED_LEGACY_VERSIONS | codex.VALIDATED_PAGINATED_VERSIONS,
         AgentFormat.OPENCODE: {"2.0.22", "2.0.23", "2.1.1"},
     }
     known_targets = {
-        TargetFormat.CLAUDE: {"2.1.209"},
-        TargetFormat.CODEX: {"0.144.4"},
+        TargetFormat.CLAUDE: claude.VALIDATED_CLAUDE_VERSIONS,
+        TargetFormat.CODEX: codex.VALIDATED_TARGET_VERSIONS,
         TargetFormat.OPENCODE: {"2.0.22", "2.0.23", "2.1.1"},
     }
     if artifact.source.cli_version not in known_sources.get(
@@ -2578,6 +2578,15 @@ def _operation_context(
     if environ is None and not values.get("HOME"):
         values["HOME"] = str(Path.home())
     source_values = dict(values if source_environ is None else source_environ)
+    if (
+        request.target_format is TargetFormat.CLAUDE
+        and request.command is not OperationKind.CONVERT
+        and values.get("CLAUDE_CODE_PROJECT_DIR_NAME")
+    ):
+        raise SessionMigrateError(
+            "Claude target custom project namespace is unsupported: "
+            "CLAUDE_CODE_PROJECT_DIR_NAME must be unset for verified publication."
+        )
     # A connected destination never redirects source discovery or another
     # operation implicitly through inherited process state.
     source_values.pop("SESSION_MIGRATE_OPENCODE_SERVER", None)

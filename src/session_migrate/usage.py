@@ -32,11 +32,21 @@ SEMANTICS_VERSION = "usage-raw-fields-v1"
 MAX_COUNTER = 2**63 - 1
 _SCHEMAS = {
     ("claude", "2.1.209"): "claude-jsonl-v1",
+    ("claude", "2.1.303"): "claude-jsonl-v1",
+    ("claude", "2.1.306"): "claude-jsonl-v1",
     ("codex", "0.144.4"): "codex-legacy",
     ("codex", "0.153.4"): "codex-paginated",
+    ("codex", "0.163.0"): ("codex-legacy", "codex-paginated"),
     ("opencode", "2.0.22"): "opencode-session-transfer-v2",
     ("opencode", "2.0.23"): "opencode-session-transfer-v2",
 }
+
+
+def _schema_choices(agent_format, client):
+    value = _SCHEMAS.get((agent_format, client))
+    return (value,) if isinstance(value, str) else value or ()
+
+
 _REASONS = {
     "schema_unproven",
     "invalid_counter",
@@ -126,7 +136,7 @@ class UsageSchemaKey:
     extractor_version: str = SEMANTICS_VERSION
 
     def __post_init__(self):
-        _require(_SCHEMAS.get((self.format, self.exact_client)) == self.native_schema)
+        _require(self.native_schema in _schema_choices(self.format, self.exact_client))
         _require(self.extractor_version == SEMANTICS_VERSION)
 
 
@@ -378,8 +388,8 @@ def capture_usage(ref, current_profile, observer, limits=None, *, client_version
             ref.profile_id == current_profile.id
             and ref.profile_fingerprint == current_profile.fingerprint
         )
-        schema = _SCHEMAS.get((ref.format.value, client_version))
-        _require(schema is not None)
+        schemas = _schema_choices(ref.format.value, client_version)
+        _require(bool(schemas))
         witness = _catalog_witness(observer._catalog.path)
         cached = resolve_source(observer._catalog, current_profile, ref)
         with Catalog.open_readonly_existing(observer._catalog.path) as physical:
@@ -419,7 +429,8 @@ def capture_usage(ref, current_profile, observer, limits=None, *, client_version
                 actual_client == client_version
                 and endpoint.observation.audit.client_id == actual_client
             )
-            _require(endpoint.observation.audit.schema_id == schema)
+            schema = endpoint.observation.audit.schema_id
+            _require(schema in schemas)
             _require(
                 snapshot.source_format is ref.format
                 and snapshot.authority_sha256 == endpoint.authority_sha256

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from session_migrate.audit_adapters import strict_decode
+from session_migrate.formats import claude, codex
 from session_migrate.model import AgentFormat
 
 DIMENSIONS = ("input", "output", "cached_input", "cache_read", "cache_write", "reasoning", "total")
@@ -65,8 +66,8 @@ def decode_usage(raw: bytes, source_format: AgentFormat, client: str, maximum: i
     """Decode explicit fields, without totals, fallback counters or epoch guesses."""
     candidates = []
     supported = {
-        AgentFormat.CLAUDE: {"2.1.209"},
-        AgentFormat.CODEX: {"0.144.4", "0.153.4"},
+        AgentFormat.CLAUDE: claude.VALIDATED_CLAUDE_VERSIONS,
+        AgentFormat.CODEX: codex.VALIDATED_LEGACY_VERSIONS | codex.VALIDATED_PAGINATED_VERSIONS,
         AgentFormat.OPENCODE: {"2.0.22", "2.0.23"},
     }
     if client not in supported.get(source_format, ()):
@@ -189,7 +190,10 @@ def decode_usage(raw: bytes, source_format: AgentFormat, client: str, maximum: i
                                     provider=provider,
                                 )
                             )
-                elif client == "0.153.4" and row.get("type") == "token_usage_record":
+                elif (
+                    client in codex.VALIDATED_PAGINATED_VERSIONS
+                    and row.get("type") == "token_usage_record"
+                ):
                     # usage is an alias with unproven scope: never add it to turn/thread.
                     for field, scope in (
                         ("turn_token_usage", "turn"),
@@ -206,6 +210,7 @@ def decode_usage(raw: bytes, source_format: AgentFormat, client: str, maximum: i
                                         "input": counts.get("input_tokens"),
                                         "output": counts.get("output_tokens"),
                                         "cached_input": counts.get("cached_input_tokens"),
+                                        "cache_write": counts.get("cache_write_input_tokens"),
                                         "reasoning": counts.get("reasoning_output_tokens"),
                                         "total": counts.get("total_tokens"),
                                     },

@@ -1,4 +1,4 @@
-"""Claude 2.1.209 closed raw grammar and independent graph membership guards."""
+"""Exact-client Claude closed grammar and independent graph membership guards."""
 
 from __future__ import annotations
 
@@ -167,7 +167,7 @@ def audit(records, snapshot, policy) -> AdapterResult:
     taxonomy = Taxonomy()
     client_ids = {r.value.get("version") for r in records if type(r.value.get("version")) is str}
     client = next(iter(client_ids)) if len(client_ids) == 1 else None
-    if client != "2.1.209" or (
+    if client not in parser.VALIDATED_CLAUDE_VERSIONS or (
         policy.client_version is not None and policy.client_version != client
     ):
         taxonomy.issue("unsupported_client_version", 0)
@@ -307,5 +307,9 @@ def audit(records, snapshot, policy) -> AdapterResult:
         taxonomy.issue("parser_rejected_source", 0)
         session = None
     return AdapterResult(
-        taxonomy, selected, "claude-jsonl-v1", client if client == "2.1.209" else None, session
+        taxonomy,
+        selected,
+        "claude-jsonl-v1",
+        client if client in parser.VALIDATED_CLAUDE_VERSIONS else None,
+        session,
     )

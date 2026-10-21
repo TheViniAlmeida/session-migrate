@@ -24,6 +24,9 @@ from session_migrate.jsonl import JsonlRecord, encode_jsonl, iter_jsonl_bytes, r
 from session_migrate.model import AgentFormat, Event, EventKind, Provenance, Role, Session
 
 PINNED_CLAUDE_VERSION = "2.1.209"
+# Exact clients with separately tested reader and portable-emission contracts.
+# Keep the writer default stable for existing migration artifacts.
+VALIDATED_CLAUDE_VERSIONS = frozenset({PINNED_CLAUDE_VERSION, "2.1.303", "2.1.306"})
 TITLE_TYPES = {"custom-title": "customTitle", "ai-title": "aiTitle"}
 
 
@@ -454,6 +457,11 @@ def _active_conversation_records(records: list[JsonlRecord]) -> list[JsonlRecord
         record = by_uuid.get(cursor)
         if record is None:
             raise SessionMigrateError("Claude active graph references a missing parent UUID")
+        if record.value.get("isSidechain") is True:
+            raise SessionMigrateError(
+                "Claude sidechain/subagent transcripts cannot be converted directly; "
+                "transfer the parent session"
+            )
         leaf_to_root.append(record)
         parent_uuid = string(record.value.get("parentUuid"))
         if parent_uuid:

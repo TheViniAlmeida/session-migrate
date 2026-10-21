@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -209,16 +210,35 @@ def _binary(variable: str, version: str, digest: str) -> Path:
     if not value:
         pytest.skip(f"set {variable} to the exact pinned native binary")
     binary = Path(value)
-    completed = subprocess.run(
-        [str(binary), "--version"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    assert hashlib.sha256(binary.read_bytes()).hexdigest() == digest
+    with tempfile.TemporaryDirectory(prefix="session-migrate-native-version-") as directory:
+        root = Path(directory)
+        for name in ("home", "claude", "codex", "config", "cache", "data", "temp"):
+            (root / name).mkdir(mode=0o700)
+        completed = subprocess.run(
+            [str(binary), "--version"],
+            cwd=root,
+            env={
+                "HOME": str(root / "home"),
+                "CLAUDE_CONFIG_DIR": str(root / "claude"),
+                "CODEX_HOME": str(root / "codex"),
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "XDG_CACHE_HOME": str(root / "cache"),
+                "XDG_DATA_HOME": str(root / "data"),
+                "TMPDIR": str(root / "temp"),
+                "DISABLE_TELEMETRY": "1",
+                "DISABLE_ERROR_REPORTING": "1",
+                "DISABLE_AUTOUPDATER": "1",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
     assert completed.returncode == 0
     assert version in completed.stdout.strip()
-    assert hashlib.sha256(binary.read_bytes()).hexdigest() == digest
     return binary
 
 
@@ -227,10 +247,33 @@ def _directories(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     for path in paths:
         path.mkdir(mode=0o700)
     client, work, system_home = paths
+    initialized = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-c",
+            "init.templateDir=",
+            "-c",
+            "init.defaultBranch=main",
+            "init",
+            "--quiet",
+            str(work),
+        ],
+        cwd=tmp_path,
+        env={
+            "HOME": str(system_home),
+            "PATH": "/usr/bin:/bin",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert initialized.returncode == 0, initialized.stderr
     return client, work, tmp_path, system_home
 
 
-def _bwrap(root: Path, work: Path) -> list[str]:
+def _bwrap(root: Path, work: Path, client_binary: Path) -> list[str]:
     binary = shutil.which("bwrap")
     if binary is None:
         pytest.skip("bubblewrap is required to materialize the canonical /fixture/work CWD")
@@ -238,6 +281,10 @@ def _bwrap(root: Path, work: Path) -> list[str]:
     for directory in ("/usr", "/lib", "/lib64", "/tmp", "/dev/shm", "/etc"):
         if Path(directory).exists():
             arguments.extend(("--ro-bind", directory, directory))
+    client_root = (
+        client_binary.parent.parent if client_binary.name == "codex" else client_binary.parent
+    )
+    arguments.extend(("--ro-bind", str(client_root), str(client_root)))
     arguments.extend(
         (
             "--bind",
@@ -326,7 +373,7 @@ def test_exact_claude_cold_reloads_sanitized_corpus_source(tmp_path: Path) -> No
     before = destination.read_bytes()
     try:
         completed = subprocess.run(
-            _bwrap(root, work)
+            _bwrap(root, work, binary)
             + [
                 str(binary),
                 "--bare",
@@ -400,7 +447,7 @@ def test_exact_codex_cold_reloads_sanitized_corpus_source(tmp_path: Path) -> Non
     before = destination.read_bytes()
     try:
         completed = subprocess.run(
-            _bwrap(root, work)
+            _bwrap(root, work, binary)
             + [
                 str(binary),
                 "--disable",
@@ -409,12 +456,13 @@ def test_exact_codex_cold_reloads_sanitized_corpus_source(tmp_path: Path) -> Non
                 "plugins",
                 "--disable",
                 "remote_plugin",
+                "--ask-for-approval",
+                "on-request",
+                "--sandbox",
+                "read-only",
                 "exec",
                 "resume",
                 CODEX_ID,
-                "--ignore-rules",
-                "--skip-git-repo-check",
-                "--dangerously-bypass-approvals-and-sandbox",
                 "--json",
                 FOLLOWUP,
             ],
@@ -551,12 +599,13 @@ def test_exact_client_resumes_fresh_writer_output(
                 "plugins",
                 "--disable",
                 "remote_plugin",
+                "--ask-for-approval",
+                "on-request",
+                "--sandbox",
+                "read-only",
                 "exec",
                 "resume",
                 target_id,
-                "--ignore-rules",
-                "--skip-git-repo-check",
-                "--dangerously-bypass-approvals-and-sandbox",
                 "--json",
                 FOLLOWUP,
             ]
