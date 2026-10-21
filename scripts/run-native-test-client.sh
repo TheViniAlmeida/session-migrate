@@ -185,7 +185,7 @@ if [[ "$isolate_network" == 1 ]]; then
   for variable in \
     SESSION_MIGRATE_LATEST_CLAUDE_BIN SESSION_MIGRATE_LATEST_CLAUDE_SHA256 \
     SESSION_MIGRATE_LATEST_CODEX_BIN SESSION_MIGRATE_LATEST_CODEX_SHA256 \
-    UV_CACHE_DIR TMPDIR; do
+    UV_CACHE_DIR UV_PYTHON UV_PYTHON_INSTALL_DIR UV_PROJECT_ENVIRONMENT VIRTUAL_ENV TMPDIR; do
     if [[ -v "$variable" ]]; then
       native_environment+=("$variable=${!variable}")
     fi
