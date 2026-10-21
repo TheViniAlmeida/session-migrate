@@ -1,7 +1,7 @@
 # Changelog do fork
 
 Histórico das melhorias de `TheViniAlmeida/session-migrate`. As datas usam
-UTC−03:00 (America/Sao_Paulo). A integração é registrada pelo dia do merge na
+UTC−03:00 (America/Belem). A integração é registrada pelo dia do merge na
 branch `next`; desenvolvimento e integração podem ocorrer em dias diferentes.
 
 O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
@@ -25,6 +25,18 @@ publicação no PyPI nem atualização automática das instalações existentes.
   pois a prova nativa não confirmou persistência retomável nesse modo.
 - Adicionados gates nativos separados para clientes atuais, sem flags de
   bypass, em repositórios e diretórios descartáveis com provedor simulado.
+
+- Instalada a DEV13 primeiro no operador e depois na instalação compartilhada;
+  **194 testes passaram em cada instalação**, sem skips, usando o wheel final.
+- Validadas sete contas: 42 verificações CLI, sete imports de core/TUI/web e
+  14 versões efetivas. Backups conferidos; 15 dependências, shared pip e links
+  globais preservados. Revisão independente pós-instalação aprovada.
+- Validados 18 casos nativos históricos/atuais e 897 regressões isoladas;
+  um oracle OpenCode não configurado ficou explicitamente pulado nessa suíte.
+- Corrigido o runner isolado do CI para conservar a seleção pública do Python
+  pelo uv, mantendo ambiente limpo e execução offline com lockfile.
+- Integrada a [PR #17](https://github.com/TheViniAlmeida/session-migrate/pull/17)
+  após revisão independente e **34 checks de CI aprovados**.
 
 ## 21/10/2026 — DEV12
 
