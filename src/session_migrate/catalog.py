@@ -16,7 +16,7 @@ import stat
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -1394,7 +1394,7 @@ class Catalog:
         root_path = Path(root.path)
         try:
             candidates = list(_candidate_files(AgentFormat(root.format), root_path))
-        except OSError:
+        except (OSError, SessionMigrateError):
             self._record_root_failure(root.id, "root_unavailable")
             counts["root_errors"] = 1
             return counts
@@ -1443,6 +1443,14 @@ class Catalog:
                         before = _kimi_session_snapshot(path)
                     except JsonlError:
                         continue
+                elif root.format == AgentFormat.CODEX.value:
+                    try:
+                        before = _codex_session_snapshot(path, root_path)
+                    except SessionMigrateError:
+                        try:
+                            before = file_snapshot(path)
+                        except JsonlError:
+                            continue
                 elif root.format in {
                     AgentFormat.GROK.value,
                     AgentFormat.OPENHANDS.value,
@@ -1472,6 +1480,10 @@ class Catalog:
                 unchanged = bool(
                     previous
                     and previous["status"] != "missing"
+                    and (
+                        root.format != AgentFormat.CODEX.value
+                        or previous["status"] in {"candidate", "validated"}
+                    )
                     and int(previous["device"]) == before.device
                     and int(previous["inode"]) == before.inode
                     and int(previous["bytes"]) == before.size
@@ -2215,6 +2227,11 @@ class Catalog:
 def _candidate_files(agent_format: AgentFormat, root: Path) -> Iterable[Path]:
     if not root.is_dir():
         raise OSError("root is not available")
+    if agent_format == AgentFormat.CODEX:
+        from session_migrate.discovery import codex_rollout_paths
+
+        yield from codex_rollout_paths(root)
+        return
     if agent_format == AgentFormat.COPILOT:
         session_state = root / "session-state"
         if not session_state.is_dir():
@@ -2396,8 +2413,20 @@ def _scan_file(path: Path, agent_format: AgentFormat, root: Path) -> _Scan:
     first_record_type: str | None = None
     parent_session_id: str | None = None
     wrong_format = False
+    codex_attached = False
     try:
-        for record in iter_jsonl(path):
+        if agent_format == AgentFormat.CODEX:
+            from session_migrate.native_snapshots import (
+                SourceCaptureContext,
+                capture_readable_source,
+                check_source_identity,
+            )
+
+            snapshot = capture_readable_source(SourceCaptureContext(agent_format, path), root=root)
+            source_records = snapshot.decoded_records()
+        else:
+            source_records = iter_jsonl(path)
+        for record in source_records:
             records += 1
             value = record.value
             record_type = _string(value.get("type"))
@@ -2436,6 +2465,7 @@ def _scan_file(path: Path, agent_format: AgentFormat, root: Path) -> _Scan:
                 if not isinstance(payload, dict):
                     payload = {}
                 if record_type == "session_meta":
+                    codex_attached = codex_attached or payload.get("attached_thread") is True
                     has_session_meta = True
                     session_id = session_id or _normalized_uuid(
                         _string(payload.get("id")) or _string(payload.get("session_id"))
@@ -2563,6 +2593,8 @@ def _scan_file(path: Path, agent_format: AgentFormat, root: Path) -> _Scan:
                 }:
                     has_conversation = True
         ensure_file_unchanged(path, before)
+        if agent_format == AgentFormat.CODEX:
+            check_source_identity(snapshot)
     except JsonlError as exc:
         code = "file_changed" if "changed while" in str(exc) else "invalid_jsonl"
         status = "busy" if code == "file_changed" else "corrupt"
@@ -2582,6 +2614,17 @@ def _scan_file(path: Path, agent_format: AgentFormat, root: Path) -> _Scan:
             records=records,
             labels=tuple(labels),
         )
+    except SessionMigrateError as exc:
+        message = str(exc)
+        status, reason = "corrupt", "codex_storage_invalid"
+        if "subagent history projection" in message:
+            status, reason = "unsupported", "codex_subagent_history"
+        elif "history_base" in message:
+            status, reason = "unsupported", "codex_history_base"
+        elif "changed" in message:
+            status, reason = "busy", "file_changed"
+        base = _base_scan(path, agent_format, root, status, reason)
+        return replace(base, session_id=base.filename_session_id, labels=tuple(labels))
     except OSError:
         return _base_scan(path, agent_format, root, "unreadable", "file_unreadable")
 
@@ -2615,7 +2658,7 @@ def _scan_file(path: Path, agent_format: AgentFormat, root: Path) -> _Scan:
             status, reason = "corrupt", "missing_session_meta"
         elif codex_selected_history_mode == "paginated" and not codex_ordinals_complete:
             status, reason = "corrupt", "codex_paginated_ordinals"
-        elif not has_conversation:
+        elif not has_conversation and not codex_attached:
             status, reason = "corrupt", "no_conversation_records"
     elif agent_format == AgentFormat.PI:
         if first_record_type != "session" or session_record_index != 1 or not has_session_meta:
@@ -3015,6 +3058,34 @@ def _sqlite_session_snapshot(path: Path, format_name: str) -> _VirtualSnapshot:
         )
     fingerprint = sha256("\0".join(components).encode()).hexdigest()
     return _VirtualSnapshot(main.st_dev, main.st_ino, total_size, newest, fingerprint)
+
+
+def _codex_session_snapshot(path: Path, root: Path) -> _VirtualSnapshot:
+    from session_migrate.codex_storage import codex_history_read_paths
+
+    main = file_snapshot(path)
+    paths = codex_history_read_paths(root, path)
+    witnesses = []
+    for candidate in paths:
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            witnesses.append((str(candidate.relative_to(root)), None))
+            continue
+        witnesses.append(
+            (
+                str(candidate.relative_to(root)),
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+                stat.S_IFMT(info.st_mode),
+            )
+        )
+    ensure_file_unchanged(path, main)
+    fingerprint = sha256(json.dumps(witnesses, separators=(",", ":")).encode()).hexdigest()
+    return _VirtualSnapshot(main.device, main.inode, main.size, main.modified_ns, fingerprint)
 
 
 def _directory_session_snapshot(path: Path, format_name: str) -> _VirtualSnapshot:
@@ -3571,7 +3642,13 @@ def _root_from_row(row: sqlite3.Row) -> CatalogRoot:
 
 
 def _filename_uuid(path: Path) -> str | None:
-    match = _UUID_SUFFIX.search(path.stem)
+    if path.name.startswith("rollout-"):
+        from session_migrate.discovery import codex_thread_id
+
+        if identifier := codex_thread_id(path):
+            return identifier
+    stem = Path(path.name.removesuffix(".zst")).stem
+    match = _UUID_SUFFIX.search(stem)
     return _normalized_uuid(match.group("id")) if match else None
 
 

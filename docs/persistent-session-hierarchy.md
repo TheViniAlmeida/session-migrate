@@ -1,8 +1,11 @@
-# Proposta: árvores de sessões persistentes
+# Árvores de sessões persistentes
 
-Status em 05/11/2026: **projeto e esquema, sem migração de árvore implementada**.
+Status em 05/11/2026: **runtime implementado na DEV16**, com CLI, TUI e dashboard.
+O [guia de uso](tree-migration.md) descreve a entrada compacta, os limites e a retomada.
+O schema de proposta abaixo permanece referência de projeto; a saída de runtime
+é uma visão de revisão, nunca um documento que reconstitui autorização.
 O primeiro destino proposto é o OpenCode **2.2.5**, a partir de sessões Claude
-selecionadas explicitamente. Esta proposta cobre sessões independentes que
+selecionadas explicitamente. O runtime cobre sessões independentes que
 continuam disponíveis após reiniciar o cliente, inclusive filhas e netas.
 Subagentes efêmeros ficam fora desse escopo.
 
@@ -109,7 +112,7 @@ completa no cliente. `verified_complete` exige adaptador e enumeração nativa
 conclusiva, incluindo paginação. Não oferecer completude a partir de uma página
 de raízes.
 
-O validador semântico futuro deve rejeitar antes de qualquer escrita:
+O validador semântico rejeita antes de qualquer escrita:
 
 1. Chaves repetidas de nó, relação ou evidência; identidades nativas repetidas;
    referências ausentes; relações reflexivas; ciclos; mais de um pai na árvore
@@ -187,7 +190,7 @@ Construir a entrada nativa por lista explícita de campos permitidos: o
 importador OpenCode aceita `permissions`, portanto exportar/importar JSON bruto
 da origem não é um atalho permitido.
 
-## Préflight e publicação futura
+## Préflight e publicação
 
 `preflight.status=ready_for_live_review` é uma descrição, nunca autorização
 reaproveitável. Carregar um JSON salvo não reconstitui um handle de publicação.
@@ -283,6 +286,9 @@ todos os nós e registrar uma falha; excedê-los bloqueia o préflight.
 Critério final: todos os nós selecionados e somente eles são encontrados no
 root/backend escolhido, com IDs novos fixados, relações projetadas verificadas,
 históricos independentes equivalentes à projeção aprovada e diário concluído.
-Qualquer nó incerto torna o resultado parcial. Esta entrega valida somente o
-formato documental e o exemplo sintético; os seis marcos de runtime permanecem
-pendentes.
+Qualquer nó incerto torna o resultado parcial. A DEV16 implementa os marcos de runtime para inventários explícitos e contratos
+nativos comprovados, incluindo testes de quatro nós em standalone e servidor conectado.
+A descoberta automática de metadados privados Claude Desktop continua dependente de
+uma fixture/contrato próprio; o manifesto manual cobre essa origem funcionalmente.
+O diário real acrescenta `attempting.target_sha256` por nova preparação e títulos
+por nó; nunca reexecuta nós incertos ou promove cobertura ausente.

@@ -60,6 +60,22 @@
             <p class="subtle">Title support and any conversion losses are checked in the review.</p>
             <button id="prepare-transfer" class="primary-button" type="submit" disabled>Review transfer <span aria-hidden="true">→</span></button>
           </form>
+          <section id="tree-controls" hidden aria-label="Persistent session tree">
+            <h3>Persistent session tree</h3>
+            <p class="subtle">Use the source profile and destination above. Each declared source is read again before publication. Review the exact selected nodes, titles, relationships and losses.</p>
+            <p class="subtle">Interactive trees support up to 16 nodes and 8 MiB of source transcripts in total, with 4 MiB per node. Use the CLI for larger inventories.</p>
+            <label for="tree-manifest">Manual inventory declaration</label><input id="tree-manifest" type="file" accept="application/json,.json">
+            <p id="tree-file-name" class="subtle">Choose a session-tree-inventory JSON file.</p>
+            <label for="tree-source-version">Source client version</label><input id="tree-source-version" maxlength="64" autocomplete="off">
+            <label for="tree-mode">Selection</label><select id="tree-mode"><option value="single">Single persistent node</option><option value="subtree" selected>Subtree</option><option value="full_tree">Complete tree</option></select>
+            <label for="tree-anchor">Anchor node key (empty: root)</label><input id="tree-anchor" maxlength="96" autocomplete="off">
+            <label for="tree-edges">Hierarchy edge keys (comma separated; empty: all declared)</label><input id="tree-edges" maxlength="4096" autocomplete="off">
+            <label><input id="tree-detach" type="checkbox"> Explicitly detach anchor from omitted parent</label>
+            <label><input id="tree-partial" type="checkbox"> Acknowledge a partial inventory or omitted nodes</label>
+            <label for="tree-provider">Model provider</label><input id="tree-provider" maxlength="256" autocomplete="off">
+            <label for="tree-model">Model</label><input id="tree-model" maxlength="256" autocomplete="off">
+            <button id="prepare-tree" type="button" class="quiet-button" disabled>Review selected tree</button>
+          </section>
           <div id="adoption-controls" hidden><h3>Record a current baseline</h3><label for="adopt-target-session">Existing destination session</label><select id="adopt-target-session" disabled><option value="">Choose an existing session</option></select><button id="preview-adoption" class="quiet-button" disabled>Preview destination session</button><pre id="adoption-preview" class="preview" tabindex="0" hidden></pre><p class="subtle">This records the current relation. It does not import messages or prove past history.</p><button id="prepare-adoption" class="quiet-button" disabled>Review baseline</button></div>
           <div id="handoff-editor" hidden><h3>Edit your handoff</h3><label for="handoff-document">Complete handoff text</label><textarea id="handoff-document" rows="14" spellcheck="false"></textarea><p class="subtle">Review the entire text. It is transferred as user-provided context; it is not a full-history migration.</p><button id="accept-handoff" type="button" class="primary-button">Review this handoff</button><button id="discard-handoff" type="button" class="quiet-button">Discard handoff</button></div>
           <div id="proposal" class="proposal" hidden><h3 id="proposal-heading">Review this transfer</h3><pre id="proposal-details" class="metadata" tabindex="0"></pre><p id="proposal-expiry" class="subtle"></p><button id="confirm-transfer" class="primary-button" disabled>Confirm transfer</button><button id="discard-review" class="quiet-button">Start a new review</button></div>

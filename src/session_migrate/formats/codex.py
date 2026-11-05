@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import uuid
 from collections import Counter, deque
 from collections.abc import Sequence
@@ -14,7 +15,7 @@ from typing import Any
 
 from session_migrate.errors import SessionMigrateError
 from session_migrate.formats.common import content_text, object_value, string, valid_rfc3339
-from session_migrate.jsonl import JsonlRecord, encode_jsonl, iter_jsonl_bytes, read_jsonl_bytes
+from session_migrate.jsonl import JsonlRecord, encode_jsonl
 from session_migrate.model import AgentFormat, Event, EventKind, Provenance, Role, Session
 
 PINNED_CODEX_VERSION = "0.144.4"
@@ -58,16 +59,54 @@ PROVIDER_CONTEXT_CONTENT_KINDS = frozenset(
 SUPPORTED_HISTORY_MODES = frozenset({"legacy", "paginated"})
 
 
-def parse(path: Path) -> Session:
-    source_path = path.resolve()
-    return parse_bytes(read_jsonl_bytes(path), source_path)
+def parse(path: Path, *, root: Path | None = None) -> Session:
+    from session_migrate.codex_storage import (
+        decode_codex_storage,
+        materialize_codex_history,
+        strict_codex_records,
+    )
+    from session_migrate.native_snapshots import SourceCaptureContext, capture_source
+
+    snapshot = capture_source(SourceCaptureContext(AgentFormat.CODEX, path.resolve()))
+    decoded = decode_codex_storage(snapshot.raw_bytes, snapshot.source_path)
+    records = list(strict_codex_records(decoded))
+    metadata = object_value(records[0].value.get("payload")) if records else {}
+    if metadata.get("history_base") is not None or (
+        metadata.get("subagent_history_start_ordinal") is not None
+        or metadata.get("attached_thread") is True
+    ):
+        original_path = Path(os.path.abspath(path.expanduser()))
+        if ".." in path.parts or snapshot.source_path != original_path:
+            raise SessionMigrateError("Codex history_base path cannot use symlinks or traversal")
+        if root is None:
+            root = next(
+                (
+                    parent.parent
+                    for parent in snapshot.source_path.parents
+                    if parent.name in {"sessions", "archived_sessions"}
+                ),
+                snapshot.source_path.parent,
+            )
+        history = materialize_codex_history(root, snapshot.source_path, source_snapshot=snapshot)
+        return parse_records(
+            list(strict_codex_records(history.materialized_bytes)),
+            source_path=snapshot.source_path,
+            source_sha256=history.authority_sha256,
+        )
+    return parse_records(
+        records,
+        source_path=snapshot.source_path,
+        source_sha256=snapshot.authority_sha256,
+    )
 
 
 def parse_bytes(data: bytes, source_path: Path) -> Session:
     """Parse one captured authority without resolving or rereading its source path."""
 
+    from session_migrate.codex_storage import decode_codex_storage, strict_codex_records
+
     return parse_records(
-        list(iter_jsonl_bytes(data)),
+        list(strict_codex_records(decode_codex_storage(data, source_path))),
         source_path=source_path,
         source_sha256=hashlib.sha256(data).hexdigest(),
     )

@@ -287,10 +287,14 @@ def prepare_handoff(
         if entry is not None:
             client_version = entry.cli_version
         elif resolved.path is not None:
-            from session_migrate.native_snapshots import SourceCaptureContext, capture_source
+            from session_migrate.native_snapshots import (
+                SourceCaptureContext,
+                capture_readable_source,
+            )
 
-            captured = capture_source(
+            captured = capture_readable_source(
                 SourceCaptureContext(source_ref.format, resolved.path),
+                root=profile.root,
                 byte_limit=limits.max_source_bytes,
             )
             client_version = captured.parse().cli_version
@@ -302,7 +306,7 @@ def prepare_handoff(
     )
     validate_endpoint(endpoint, observer=observer, ref=source_ref)
     authority = _original_authority(endpoint, observer, source_ref)
-    _require(len(authority.snapshot.raw_bytes) <= limits.max_source_bytes, "limit_exceeded")
+    _require(authority.snapshot.captured_byte_count <= limits.max_source_bytes, "limit_exceeded")
     events = authority.session.events
     seen, selected_events, excerpts = set(), set(), []
     for item in selection:

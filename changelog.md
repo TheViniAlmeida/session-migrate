@@ -8,6 +8,28 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
+## 05/11/2026 — DEV16
+
+- DEV15 foi um candidato preparado, sem ativação; a entrega final inclui a
+  aceitação de versões Claude conhecidas misturadas, preservando UNKNOWN.
+
+- Implementada migração de árvores persistentes para OpenCode 2.2.5: seleção de
+  sessão/subárvore/árvore, IDs novos estáveis, títulos e importação pai antes das filhas.
+- Adicionados CLI `tree`, árvore visual na TUI via Ctrl+T e fluxo opcional no
+  dashboard com `--allow-tree --allow-publish`, usando o mesmo núcleo.
+- Criados diário coordenador e operações por nó no ledger, com confirmação única,
+  cancelamento observável e retomada explícita de nós comprovadamente não iniciados.
+- Fortalecida a retomada: confere origem, opções, artefato e destino no ledger real;
+  revalida nós publicados durante toda a operação e registra hashes de cada tentativa.
+- Adicionada leitura Codex `.jsonl.zst` e `history_base`, incluindo arquivo físico
+  de revert, forks e attached, com limites de expansão, raiz e captura consistente.
+- Catálogo, descoberta, inspeção, prévia, auditoria e handoff usam os mesmos bytes
+  materializados. JSON ambíguo e fonte fora do root são recusados antes da projeção.
+- Mantido UNKNOWN para contexto privado ancestral fora do escopo; parentID
+  organizacional e cobertura parcial não promovem prova de fork, FULL ou update.
+- Publicados guia de uso, schema e exemplo do inventário compacto. Vínculos Claude
+  não persistidos são declarados explicitamente, sem heurística de texto ou título.
+
 ## 05/11/2026 — DEV14
 
 - Adicionado suporte ao OpenCode 2.2.5 na migração e nas APIs públicas,

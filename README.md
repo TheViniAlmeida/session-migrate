@@ -68,6 +68,11 @@ prepared migration:
 smigrate tui
 ```
 
+Persistent session families can be migrated with `smigrate tree` or **Ctrl+T** in
+the TUI. See the [tree migration guide](docs/tree-migration.md) for inventories,
+selection, review and explicit partial recovery. Codex compressed rollouts and
+shared history are read through bounded storage captures.
+
 See [current client compatibility](docs/current-client-compatibility.md) for
 exact tested releases and native replay limits.
 

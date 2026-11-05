@@ -108,6 +108,14 @@ class Inspection:
 
 
 def inspect_session(path: Path, *, source_format: AgentFormat | None = None) -> Inspection:
+    if source_format == AgentFormat.CODEX or (
+        source_format is None and path.name.endswith(".jsonl.zst")
+    ):
+        from session_migrate.native_snapshots import SourceCaptureContext, capture_readable_source
+
+        return inspect_snapshot(
+            capture_readable_source(SourceCaptureContext(AgentFormat.CODEX, path.resolve()))
+        )
     if source_format == AgentFormat.GROK or (
         source_format is None
         and path.is_dir()
@@ -188,6 +196,8 @@ def inspect_session(path: Path, *, source_format: AgentFormat | None = None) -> 
     if not records:
         raise JsonlError(f"session file contains no JSON records: {path}")
     detected = source_format or detect_format([record.value for record in records])
+    if detected == AgentFormat.CODEX:
+        return inspect_session(path, source_format=AgentFormat.CODEX)
     if detected == AgentFormat.VIBE:
         ensure_file_unchanged(path, before)
         return _inspect_portable_database(vibe.parse_session(path))
@@ -201,6 +211,37 @@ def inspect_session(path: Path, *, source_format: AgentFormat | None = None) -> 
         ensure_file_unchanged(path, before)
         return _inspect_portable_database(kimi.parse_session(path))
 
+    digest = file_sha256(path)
+    ensure_file_unchanged(path, before)
+    return _inspect_jsonl_records(
+        records, detected, path=path.resolve(), byte_count=before.size, digest=digest
+    )
+
+
+def inspect_snapshot(snapshot: Any) -> Inspection:
+    """Inspect the exact immutable parse/audit authority, keeping its storage hash."""
+    from session_migrate.native_snapshots import NativeSnapshot
+
+    if not isinstance(snapshot, NativeSnapshot) or not snapshot.integrity_valid():
+        raise SessionMigrateError("Inspection requires an intact native snapshot")
+    records = snapshot.decoded_records()
+    physical_bytes = (
+        sum(len(component.raw_bytes) for component in snapshot.storage_components)
+        if snapshot.storage_components
+        else len(snapshot.raw_bytes)
+    )
+    return _inspect_jsonl_records(
+        records,
+        snapshot.source_format,
+        path=snapshot.source_path,
+        byte_count=physical_bytes,
+        digest=snapshot.authority_sha256,
+    )
+
+
+def _inspect_jsonl_records(
+    records: Any, detected: AgentFormat, *, path: Path, byte_count: int, digest: str
+) -> Inspection:
     record_types: Counter[str] = Counter()
     roles: Counter[str] = Counter()
     blocks: Counter[str] = Counter()
@@ -325,12 +366,10 @@ def inspect_session(path: Path, *, source_format: AgentFormat | None = None) -> 
                 tool_results += 1
             events[record_type] += 1
 
-    digest = file_sha256(path)
-    ensure_file_unchanged(path, before)
     return Inspection(
         format=detected.value,
-        path=str(path.resolve()),
-        bytes=before.size,
+        path=str(path),
+        bytes=byte_count,
         sha256=digest,
         records=len(records),
         session_id=session_id,
@@ -484,6 +523,17 @@ def detect_format(records: list[dict[str, Any] | Any]) -> AgentFormat:
 def detect_path_format(path: Path) -> AgentFormat:
     """Detect JSON-document and JSONL source formats under the normal input bounds."""
 
+    if path.name.endswith(".jsonl.zst") and path.is_file():
+        from session_migrate.codex_storage import decode_codex_storage
+        from session_migrate.jsonl import iter_jsonl_bytes
+        from session_migrate.native_snapshots import SourceCaptureContext, capture_source
+
+        snapshot = capture_source(SourceCaptureContext(AgentFormat.CODEX, path))
+        data = decode_codex_storage(snapshot.raw_bytes, snapshot.source_path)
+        detected = detect_format([record.value for record in iter_jsonl_bytes(data)])
+        if detected != AgentFormat.CODEX:
+            raise FormatDetectionError("Compressed rollout is not Codex session metadata")
+        return detected
     if path.is_dir():
         if (path / "summary.json").is_file() and (path / "updates.jsonl").is_file():
             grok.parse_session(path)

@@ -102,9 +102,10 @@ def _bind_execution_context(
         if _absolute(native_path) != root:
             raise SessionMigrateError("Observed database path differs from its native root.")
     elif snapshot is not None:
-        if snapshot.provenance is not CaptureProvenance.FILE or snapshot.source_path != _absolute(
-            native_path
-        ):
+        if snapshot.provenance not in {
+            CaptureProvenance.FILE,
+            CaptureProvenance.RESOLVED_STORAGE,
+        } or snapshot.source_path != _absolute(native_path):
             raise SessionMigrateError("Portable capture cannot qualify a native file.")
         check_source_identity(snapshot)
     else:

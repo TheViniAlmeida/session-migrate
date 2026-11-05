@@ -20,3 +20,7 @@ Button { margin-right: 1; }
 #handoff-form { height: 1fr; }
 #handoff-document { height: 16; min-height: 8; margin-bottom: 1; }
 #handoff-metadata { height: auto; margin: 1 0; }
+#tree-status { height: auto; min-height: 2; padding: 0 1; }
+#tree-form { height: 1fr; }
+#tree-metadata { height: auto; margin: 1 0; }
+#tree-browser { height: 12; min-height: 6; margin: 1 0; }

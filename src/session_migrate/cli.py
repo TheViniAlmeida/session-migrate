@@ -58,6 +58,9 @@ def build_parser() -> argparse.ArgumentParser:
     from session_migrate.handoff_cli import add_handoff_commands
 
     add_handoff_commands(subparsers)
+    from session_migrate.tree_cli import add_tree_commands
+
+    add_tree_commands(subparsers)
 
     tui_parser = subparsers.add_parser("tui", help="interactive migration (optional tui extra)")
     tui_parser.add_argument(
@@ -294,6 +297,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.command == "tree":
+            from session_migrate.tree_cli import run_tree_command
+
+            return run_tree_command(args, parser)
         if args.command == "web":
             from session_migrate.web.launch import run_web
 

@@ -27,6 +27,7 @@ MAX_CAPTURE_JSON_DEPTH = 128
 class CaptureProvenance(StrEnum):
     FILE = "file"
     EXPORTED_BYTES = "exported_bytes"
+    RESOLVED_STORAGE = "resolved_storage"
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -81,7 +82,10 @@ class NativeSnapshot:
     identity: FileIdentity | None
     ancestors: tuple[AncestorIdentity, ...]
     _raw_bytes: bytes = field(repr=False)
+    storage_components: tuple[NativeSnapshot, ...] = field(default=(), repr=False)
+    storage_root: Path | None = field(default=None, repr=False)
     authority_sha256: str = field(init=False)
+    decoded_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
         SourceCaptureContext(self.source_format, self.source_path)
@@ -93,12 +97,110 @@ class NativeSnapshot:
             not isinstance(item, AncestorIdentity) for item in self.ancestors
         ):
             raise SessionMigrateError("native capture ancestry is invalid")
+        if self.provenance == CaptureProvenance.RESOLVED_STORAGE:
+            self._validate_storage()
+        elif self.storage_components or self.storage_root is not None:
+            raise SessionMigrateError("ordinary capture cannot carry storage components")
         if self.provenance == CaptureProvenance.EXPORTED_BYTES:
             if self.identity is not None or self.ancestors:
                 raise SessionMigrateError("exported capture cannot carry filesystem identity")
         elif not isinstance(self.identity, FileIdentity) or not self.ancestors:
             raise SessionMigrateError("file capture requires filesystem identity")
-        object.__setattr__(self, "authority_sha256", hashlib.sha256(self._raw_bytes).hexdigest())
+        object.__setattr__(self, "decoded_sha256", hashlib.sha256(self._raw_bytes).hexdigest())
+        object.__setattr__(self, "authority_sha256", self._authority())
+
+    def _validate_storage(self) -> None:
+        if (
+            self.source_format is not AgentFormat.CODEX
+            or type(self.storage_components) is not tuple
+            or not 1 <= len(self.storage_components) <= 64
+            or not isinstance(self.storage_root, Path)
+            or not self.storage_root.is_absolute()
+            or ".." in self.storage_root.parts
+        ):
+            raise SessionMigrateError("resolved storage capture is invalid")
+        seen = set()
+        for component in self.storage_components:
+            if (
+                type(component) is not NativeSnapshot
+                or component.source_format is not AgentFormat.CODEX
+                or component.provenance is not CaptureProvenance.FILE
+                or not component.source_path.is_relative_to(self.storage_root)
+                or component.source_path == self.storage_root
+                or component.source_path in seen
+                or not component.integrity_valid()
+            ):
+                raise SessionMigrateError("resolved storage component is invalid")
+            seen.add(component.source_path)
+        leaf = self.storage_components[0]
+        if (
+            self.source_path != leaf.source_path
+            or self.identity != leaf.identity
+            or self.ancestors != leaf.ancestors
+        ):
+            raise SessionMigrateError("resolved storage leaf identity is invalid")
+
+    def _authority(self) -> str:
+        if self.provenance is CaptureProvenance.RESOLVED_STORAGE:
+            from session_migrate.codex_storage import materialization_authority
+
+            return materialization_authority(
+                self.storage_root, self.storage_components, self._raw_bytes
+            )
+        return hashlib.sha256(self._raw_bytes).hexdigest()
+
+    def integrity_valid(self) -> bool:
+        """Bind physical component bytes and their separately decoded projection."""
+        try:
+            if self.provenance is CaptureProvenance.RESOLVED_STORAGE:
+                self._validate_storage()
+            elif self.storage_components or self.storage_root is not None:
+                return False
+            return (
+                hashlib.sha256(self._raw_bytes).hexdigest() == self.decoded_sha256
+                and self._authority() == self.authority_sha256
+            )
+        except (SessionMigrateError, TypeError, ValueError, AttributeError, RecursionError):
+            return False
+
+    @property
+    def captured_byte_count(self) -> int:
+        return len(self._raw_bytes) + sum(len(c.raw_bytes) for c in self.storage_components)
+
+    @property
+    def physical_source_sha256(self) -> str:
+        return (
+            self.storage_components[0].authority_sha256
+            if self.storage_components
+            else self.authority_sha256
+        )
+
+    @property
+    def source_storage_bytes(self) -> bytes:
+        return self.storage_components[0].raw_bytes if self.storage_components else self.raw_bytes
+
+    @property
+    def storage_binding(self) -> tuple:
+        return (
+            str(self.storage_root) if self.storage_root is not None else None,
+            tuple(
+                (
+                    str(c.source_path),
+                    c.authority_sha256,
+                    (
+                        c.identity.device,
+                        c.identity.inode,
+                        c.identity.mode,
+                        c.identity.links,
+                        c.identity.size,
+                        c.identity.modified_ns,
+                        c.identity.changed_ns,
+                    ),
+                    tuple((str(a.path), a.device, a.inode) for a in c.ancestors),
+                )
+                for c in self.storage_components
+            ),
+        )
 
     @property
     def raw_bytes(self) -> bytes:
@@ -290,6 +392,12 @@ def check_source_identity(snapshot: NativeSnapshot) -> None:
     No source body is read here and no content or namespace proof is returned.
     """
 
+    if snapshot.provenance is CaptureProvenance.RESOLVED_STORAGE:
+        if not snapshot.integrity_valid():
+            raise SessionMigrateError("resolved storage capture changed")
+        for component in snapshot.storage_components:
+            check_source_identity(component)
+        return
     if snapshot.provenance != CaptureProvenance.FILE:
         raise SessionMigrateError("native capture has no filesystem identity")
     try:
@@ -309,3 +417,96 @@ def check_source_identity(snapshot: NativeSnapshot) -> None:
                 raise SessionMigrateError("native capture file changed")
     except OSError:
         raise SessionMigrateError("native capture filesystem guard failed") from None
+
+
+def capture_readable_source(
+    context: SourceCaptureContext,
+    *,
+    root: Path | None = None,
+    byte_limit: int = DEFAULT_MAX_TOTAL_BYTES,
+) -> NativeSnapshot:
+    """Capture physical authorities, then resolve Codex storage within one root.
+
+    Ordinary captures keep their byte-for-byte authority. Compressed/forked
+    inputs retain every raw component and bind the materialized parse/audit bytes
+    separately; no caller receives a fresh read disguised as the original file.
+    """
+    # Check an explicitly selected namespace before opening the source, including
+    # ordinary uncompressed files which otherwise return through the fast path.
+    if root is not None:
+        if (
+            not isinstance(root, Path)
+            or not root.is_absolute()
+            or ".." in root.parts
+            or ".." in context.source_path.parts
+        ):
+            raise SessionMigrateError("native capture root or source path is noncanonical")
+        source_path = Path(os.path.abspath(context.source_path.expanduser()))
+        if source_path == root or not source_path.is_relative_to(root):
+            raise SessionMigrateError("native capture source is outside the authorized root")
+        if any(part.is_symlink() for part in (root, *root.parents)):
+            raise SessionMigrateError("native capture root cannot use symlinks")
+    snapshot = capture_source(context, byte_limit=byte_limit)
+    if context.source_format is not AgentFormat.CODEX:
+        return snapshot
+    from session_migrate.codex_storage import (
+        decode_codex_storage,
+        materialize_codex_history,
+        strict_codex_records,
+    )
+
+    decoded = decode_codex_storage(
+        snapshot.raw_bytes,
+        snapshot.source_path,
+        max_decoded_bytes=(
+            max(1, byte_limit - len(snapshot.raw_bytes))
+            if snapshot.source_path.name.endswith(".jsonl.zst")
+            else byte_limit
+        ),
+    )
+    first = next(strict_codex_records(decoded), None)
+    metadata = first.value.get("payload", {}) if first is not None else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    linked = (
+        metadata.get("history_base") is not None
+        or metadata.get("attached_thread") is True
+        or metadata.get("subagent_history_start_ordinal") is not None
+    )
+    if not linked and decoded == snapshot.raw_bytes:
+        return snapshot
+    boundary = root or next(
+        (
+            parent.parent
+            for parent in snapshot.source_path.parents
+            if parent.name in {"sessions", "archived_sessions"}
+        ),
+        snapshot.source_path.parent,
+    )
+    if not boundary.is_absolute() or ".." in boundary.parts:
+        raise SessionMigrateError("Codex storage root must be an absolute bounded root")
+    if linked:
+        history = materialize_codex_history(
+            boundary,
+            snapshot.source_path,
+            source_snapshot=snapshot,
+            max_decoded_bytes=byte_limit,
+            max_total_bytes=byte_limit,
+        )
+        decoded, components = history.materialized_bytes, history.components
+    else:
+        components = (snapshot,)
+    resolved = NativeSnapshot(
+        snapshot.source_format,
+        snapshot.source_path,
+        CaptureProvenance.RESOLVED_STORAGE,
+        snapshot.identity,
+        snapshot.ancestors,
+        decoded,
+        tuple(components),
+        boundary,
+    )
+    if resolved.captured_byte_count > byte_limit:
+        raise SessionMigrateError("resolved storage exceeds the aggregate capture byte limit")
+    check_source_identity(resolved)
+    return resolved

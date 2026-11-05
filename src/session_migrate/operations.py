@@ -213,6 +213,8 @@ class OperationRequest:
     require_native_title: bool = False
     target_client: str | None = None
     target_server: str | None = None
+    target_parent_id: str | None = None
+    reviewed_tree_projection: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command", OperationKind(self.command))
@@ -220,6 +222,23 @@ class OperationRequest:
             object.__setattr__(self, "source_format", AgentFormat(self.source_format))
         if self.target_format is not None:
             object.__setattr__(self, "target_format", TargetFormat(self.target_format))
+        if self.target_parent_id is not None and (
+            self.target_format is not TargetFormat.OPENCODE
+            or self.target_cli_version != "2.2.5"
+            or not isinstance(self.target_parent_id, str)
+            or not re.fullmatch(r"ses_[0-9a-f]{32}", self.target_parent_id)
+        ):
+            raise SessionMigrateError("Session parents require the exact OpenCode 2.2.5 target")
+        if type(self.reviewed_tree_projection) is not bool or (
+            self.reviewed_tree_projection
+            and (
+                self.target_format is not TargetFormat.OPENCODE
+                or self.target_cli_version != "2.2.5"
+            )
+        ):
+            raise SessionMigrateError(
+                "Reviewed tree projection requires the exact OpenCode 2.2.5 target"
+            )
         if self.target_client is not None and self.target_client != "openchamber":
             raise SessionMigrateError("target client is unsupported")
         if self.target_server is not None and self.target_client != "openchamber":
@@ -1031,6 +1050,10 @@ def _prepare_operation(
             catalog_opener=catalog_opener,
             runtime_context=runtime_context,
         )
+        if state_home is not None and built.artifact.target_format is TargetFormat.OPENCODE:
+            built = replace(
+                built, manifest=opencode_manifest_path(built.artifact, state_home=state_home)
+            )
         if built.source_root is not None and built.artifact.source.source_format in {
             AgentFormat.OPENCODE,
             AgentFormat.KILO,
@@ -1176,6 +1199,7 @@ def _prepare_operation(
                 "model_provider": built.request.model_provider,
                 "timestamp": built.artifact.timestamp,
                 "sha256": state.artifact_sha256,
+                "reviewed_tree_projection": built.request.reviewed_tree_projection,
             },
             "title": built.artifact.title_plan.to_dict() if built.artifact.title_plan else None,
             "losses": built.artifact.dropped,
@@ -1281,6 +1305,19 @@ def _verify_installed_identity(state: _PreparedState) -> Session:
         != normalized_source_id(AgentFormat(target), built.artifact.session_id)
     ):
         raise SessionMigrateError("installed target identity could not be verified")
+    if target is TargetFormat.OPENCODE and built.request.target_parent_id is not None:
+        from session_migrate.formats import opencode
+
+        if not state.observed_captures:
+            raise SessionMigrateError("installed target parent has no authoritative export")
+        observed = opencode.parse_import_bytes(state.observed_captures[-1].raw_bytes)
+        if (
+            observed.parent_session != built.request.target_parent_id
+            or observed.cwd != built.artifact.cwd
+        ):
+            raise SessionMigrateError(
+                "installed target parent or project differs from the prepared tree"
+            )
     if built.request.target_server:
         from session_migrate.openchamber import verify_session_discovery
 
@@ -1311,6 +1348,24 @@ def _observe_native_title(state: _PreparedState, session: Session) -> TitleRecei
         )
         if selected.get("title") != built.artifact.title_plan.requested or (
             session.title != built.artifact.title_plan.requested
+        ):
+            raise SessionMigrateError("native title did not match the prepared title")
+        return TitleReceipt.verified_native(
+            built.artifact.title_plan, observed=session.title, cli_version=observed_version
+        )
+    if observed_version == "2.2.5":
+        # Its CLI list intentionally exposes roots only. The exact public
+        # export already captured by identity verification includes children.
+        from session_migrate.formats import opencode
+
+        if not state.observed_captures:
+            raise SessionMigrateError("native title requires an authoritative exact export")
+        selected = opencode.parse_import_bytes(state.observed_captures[-1].raw_bytes)
+        if (
+            selected.session_id != built.artifact.session_id
+            or selected.title != built.artifact.title_plan.requested
+            or selected.cwd != built.artifact.cwd
+            or session.title != selected.title
         ):
             raise SessionMigrateError("native title did not match the prepared title")
         return TitleReceipt.verified_native(
@@ -1492,6 +1547,7 @@ def _prepare_lineage_projection(state: _PreparedState):
         model=request.model,
         target_title=request.target_title,
         title_policy=request.title_policy,
+        target_parent_id=request.target_parent_id,
     )
     source_context = None
     if (
@@ -1610,7 +1666,11 @@ def _ready_record(state, operation_id):
         else ProjectionExpectation(
             _canonical_snapshot_sha(target_observation, versions) if target_known else None,
             (),
-            projection.expectation_coverage if projection is not None else Coverage.UNKNOWN,
+            Coverage.PARTIAL
+            if state.built.request.reviewed_tree_projection and target_known
+            else projection.expectation_coverage
+            if projection is not None
+            else Coverage.UNKNOWN,
             target_observation.source_prefix if target_known else None,
             projection.expected.relation.chain_sha256 if target_known else None,
         )
@@ -2015,10 +2075,10 @@ def _prepublication_guards(state, *, preflight=True):
 def _quick_publication_guards(state):
     from session_migrate.native_snapshots import CaptureProvenance, check_source_identity
 
-    if (
-        state.last_source_capture
-        and state.last_source_capture[-1].provenance is CaptureProvenance.FILE
-    ):
+    if state.last_source_capture and state.last_source_capture[-1].provenance in {
+        CaptureProvenance.FILE,
+        CaptureProvenance.RESOLVED_STORAGE,
+    }:
         check_source_identity(state.last_source_capture[-1])
     if (
         _client_epoch(state.built.request.source_cli),
@@ -2910,8 +2970,11 @@ def _resolve_source(
             )
     else:
         source_format = AgentFormat(request.source_format) if request.source_format else None
+        source_root = expected_root or (
+            request.source_home if request.reviewed_tree_projection else None
+        )
         session = _load_path_source(
-            request.path, source_format, None, source_environ, max_source_bytes, on_capture
+            request.path, source_format, source_root, source_environ, max_source_bytes, on_capture
         )
         target_format = TargetFormat(request.target_format)
     return session, target_format, source_root
@@ -3063,6 +3126,7 @@ def _build_operation(
                 model=request.model,
                 target_title=request.target_title,
                 title_policy=request.title_policy,
+                target_parent_id=request.target_parent_id,
             ),
             environ=environ,
         )
@@ -3229,10 +3293,22 @@ def _load_path_source(
 
         selected_format = source_format or detect_path_format(path)
         if selected_format in {AgentFormat.CLAUDE, AgentFormat.CODEX, AgentFormat.OPENCODE}:
+            from session_migrate.native_snapshots import capture_readable_source
+
             try:
-                snapshot = capture_source(
+                reader = (
+                    capture_readable_source
+                    if selected_format is AgentFormat.CODEX
+                    else capture_source
+                )
+                snapshot = reader(
                     SourceCaptureContext(selected_format, path),
                     byte_limit=max_source_bytes or DEFAULT_MAX_TOTAL_BYTES,
+                    **(
+                        {"root": root or _physical_source_root(path, selected_format)}
+                        if selected_format is AgentFormat.CODEX
+                        else {}
+                    ),
                 )
             except SessionMigrateError as error:
                 if (

@@ -439,9 +439,9 @@ def capture_usage(ref, current_profile, observer, limits=None, *, client_version
             _require(
                 snapshot.source_format is ref.format
                 and snapshot.authority_sha256 == endpoint.authority_sha256
-                and hashlib.sha256(snapshot.raw_bytes).hexdigest() == endpoint.authority_sha256
+                and snapshot.integrity_valid()
             )
-            _require(len(snapshot.raw_bytes) <= limits.capture_bytes, "usage_limit")
+            _require(snapshot.captured_byte_count <= limits.capture_bytes, "usage_limit")
             revision = CaptureRevisionV1(
                 uuid.uuid4().hex,
                 snapshot.authority_sha256,
@@ -459,7 +459,7 @@ def capture_usage(ref, current_profile, observer, limits=None, *, client_version
                     sum(s.owned_bytes for s in _CAPTURES.values())
                     + _RESERVED_BYTES
                     - limits.capture_bytes
-                    + len(snapshot.raw_bytes)
+                    + snapshot.captured_byte_count
                     <= 128 * 1024 * 1024,
                     "usage_limit",
                 )
@@ -475,7 +475,7 @@ def capture_usage(ref, current_profile, observer, limits=None, *, client_version
                     monotonic_ns() + limits.ttl_seconds * 1_000_000_000,
                     _sha([asdict(revision), list(captured.native_read_effects)]),
                     witness,
-                    owned_bytes=len(snapshot.raw_bytes),
+                    owned_bytes=snapshot.captured_byte_count,
                 )
             return captured
 

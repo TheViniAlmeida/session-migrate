@@ -27,6 +27,7 @@ from session_migrate.conversion import (
 )
 from session_migrate.discovery import normalized_source_id
 from session_migrate.errors import SessionMigrateError, SourceReadLimitError
+from session_migrate.jsonl import DEFAULT_MAX_TOTAL_BYTES
 from session_migrate.model import AgentFormat, Session, TargetFormat
 from session_migrate.operations import (
     CancellationToken,
@@ -392,6 +393,7 @@ def source_read_paths(
     root: Path,
     *,
     max_entries: int = 100_000,
+    max_source_bytes: int = DEFAULT_MAX_TOTAL_BYTES,
 ) -> tuple[Path, ...]:
     """Enumerate only authoritative selected-session files, with bounded directory work.
 
@@ -419,7 +421,18 @@ def source_read_paths(
 
     paths: list[Path]
     validate(path)
-    if source_format == AgentFormat.KIMI:
+    if source_format == AgentFormat.CODEX:
+        from session_migrate.codex_storage import codex_history_read_paths
+
+        paths = list(
+            codex_history_read_paths(
+                root,
+                path,
+                max_probe_bytes=min(max_source_bytes, 8 * 1024 * 1024),
+                max_entries=max_entries,
+            )
+        )
+    elif source_format == AgentFormat.KIMI:
         from session_migrate.formats import kimi
 
         directory, wire, state = kimi._source_paths(path)
@@ -517,6 +530,28 @@ def load_bounded_source(
     root = root.resolve(strict=True)
     if root.is_file():
         root = root.parent
+    if source_format == AgentFormat.CODEX:
+        from session_migrate.native_snapshots import (
+            SourceCaptureContext,
+            capture_readable_source,
+            check_source_identity,
+        )
+
+        try:
+            snapshot = capture_readable_source(
+                SourceCaptureContext(AgentFormat.CODEX, path),
+                root=root,
+                byte_limit=min(max_source_bytes, DEFAULT_MAX_TOTAL_BYTES),
+            )
+        except SessionMigrateError as exc:
+            if "limit" in str(exc) or "budget" in str(exc):
+                raise SourceReadLimitError("Source exceeds the interactive read budget.") from exc
+            raise
+        if snapshot.captured_byte_count > max_source_bytes:
+            raise SourceReadLimitError("Source exceeds the interactive read budget.")
+        session = snapshot.parse()
+        check_source_identity(snapshot)
+        return session
     paths = source_read_paths(source_format, path, root)
     before = _path_revision(paths)
     temp_root = _temporary_root(os.environ if environ is None else environ)
@@ -595,7 +630,9 @@ def read_session(
         ):
             raise SessionMigrateError("Source byte budget must be a positive integer.")
         if source.path is not None:
-            paths = source_read_paths(profile.format, source.path, profile.root)
+            paths = source_read_paths(
+                profile.format, source.path, profile.root, max_source_bytes=max_source_bytes
+            )
             total = sum(candidate.stat().st_size for candidate in paths if candidate.is_file())
             if total > max_source_bytes:
                 raise SourceReadLimitError("Source exceeds the interactive read budget.")
@@ -633,12 +670,12 @@ def read_session(
         assert source.path is not None
         session = (
             load_session(source.path, profile.format)
-            if max_source_bytes is None
+            if max_source_bytes is None and profile.format != AgentFormat.CODEX
             else load_bounded_source(
                 source.path,
                 profile.format,
                 root=profile.root,
-                max_source_bytes=max_source_bytes,
+                max_source_bytes=max_source_bytes or DEFAULT_MAX_TOTAL_BYTES,
                 environ=values,
             )
         )

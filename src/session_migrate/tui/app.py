@@ -42,6 +42,7 @@ class MigrationApp(App):
         ("ctrl+q", "quit_safe", "Quit"),
         ("ctrl+o", "operations", "Operations"),
         ("ctrl+h", "handoff", "Handoff / return-new"),
+        ("ctrl+t", "tree", "Persistent tree"),
     ]
 
     def __init__(self, controller: Controller, *, profiles_file: Path | None = None):
@@ -72,6 +73,7 @@ class MigrationApp(App):
         with Horizontal(id="app-navigation"):
             yield Button("Operations", id="operations")
             yield Button("Handoff / return-new", id="handoff")
+            yield Button("Persistent tree", id="tree")
         yield Literal("Loading profiles…", id="status")
         with ContentSwitcher(initial="source", id="steps"):
             with VerticalScroll(id="source"):
@@ -431,6 +433,9 @@ class MigrationApp(App):
         self.status(" ".join(page.notices) or "Preview ready.")
 
     def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "tree":
+            self.action_tree()
+            return
         if event.button.id == "handoff":
             self.action_handoff()
             return
@@ -716,14 +721,25 @@ class MigrationApp(App):
             return
         self.push_screen(HandoffScreen(self.controller, profiles_file=self.profiles_file))
 
+    def action_tree(self):
+        from session_migrate.tui.tree_screen import TreeScreen
+
+        if isinstance(self.screen, TreeScreen):
+            return
+        if self.pending or self.preview_request:
+            self.status("Wait for the current task before reviewing a persistent tree.")
+            return
+        self.push_screen(TreeScreen(self.controller, profiles_file=self.profiles_file))
+
     def action_quit(self):
         # Also route inherited framework quit bindings through the publication guard.
         self.action_quit_safe()
 
     def action_quit_safe(self):
         from session_migrate.tui.handoff_screen import HandoffScreen
+        from session_migrate.tui.tree_screen import TreeScreen
 
-        if isinstance(self.screen, HandoffScreen):
+        if isinstance(self.screen, (HandoffScreen, TreeScreen)):
             self.screen.action_quit_safe()
             return
         if self.pending == "commit":

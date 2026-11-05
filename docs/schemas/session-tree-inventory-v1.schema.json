@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://session-migrate.github.io/schemas/session-tree-inventory-v1.schema.json",
+  "title": "Explicit persistent session inventory (DEV15 runtime input)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "root_node_key",
+    "nodes",
+    "relationships",
+    "declaration"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "kind": {
+      "const": "session-tree-inventory"
+    },
+    "root_node_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,95}$"
+    },
+    "canonical_root": {
+      "type": "string"
+    },
+    "source_format": {
+      "enum": [
+        "claude",
+        "codex",
+        "opencode"
+      ]
+    },
+    "completeness": {
+      "enum": [
+        "partial",
+        "declared_complete"
+      ]
+    },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1024,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "source_native_id",
+          "relative_path",
+          "source_parent_status"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,95}$"
+          },
+          "source_native_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$"
+          },
+          "relative_path": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "source_parent_status": {
+            "enum": [
+              "known_root",
+              "known_parent",
+              "unknown"
+            ]
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 1024
+          }
+        }
+      }
+    },
+    "relationships": {
+      "type": "array",
+      "maxItems": 2048,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "parent_node_key",
+          "child_node_key",
+          "kind"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,95}$"
+          },
+          "parent_node_key": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,95}$"
+          },
+          "child_node_key": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,95}$"
+          },
+          "kind": {
+            "enum": [
+              "organizational_parent",
+              "fork_origin"
+            ]
+          }
+        }
+      }
+    },
+    "declaration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "declaration_id",
+        "declared_at",
+        "operator",
+        "statement",
+        "confirmed"
+      ],
+      "properties": {
+        "declaration_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,95}$"
+        },
+        "declared_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "operator": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]{0,95}$"
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "confirmed": {
+          "const": true
+        }
+      }
+    }
+  }
+}

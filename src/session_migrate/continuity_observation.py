@@ -43,7 +43,7 @@ from session_migrate.native_namespaces import (
 from session_migrate.native_snapshots import (
     NativeSnapshot,
     SourceCaptureContext,
-    capture_source,
+    capture_readable_source,
     check_source_identity,
 )
 from session_migrate.profiles import (
@@ -326,8 +326,9 @@ def observe_endpoint(
         if ref.format in {AgentFormat.CLAUDE, AgentFormat.CODEX}:
             _require(source.path is not None, "endpoint_unavailable")
             declare("file_capture_read_attempted")
-            snapshot = capture_source(
+            snapshot = capture_readable_source(
                 SourceCaptureContext(ref.format, source.path),
+                root=profile.root,
                 byte_limit=observer._byte_limit,
             )
             session = snapshot.parse()
@@ -425,7 +426,10 @@ def validate_endpoint(
     )
     validate_observation(endpoint.observation)
     _require(_observation_binding(endpoint) == state.binding)
-    _require(hashlib.sha256(state.snapshot.raw_bytes).hexdigest() == endpoint.authority_sha256)
+    _require(
+        state.snapshot.integrity_valid()
+        and state.snapshot.authority_sha256 == endpoint.authority_sha256
+    )
     if "file_capture_read" in endpoint.native_read_effects:
         check_source_identity(state.snapshot)
     identity = qualify_namespace(

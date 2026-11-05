@@ -41,7 +41,7 @@ def add_web_command(subparsers, path_parser):
         action="store_true",
         help="enable explicit reviewed transfers for the selected profiles",
     )
-    for action in ("adopt", "reconcile", "cancel-ready", "handoff", "return-new"):
+    for action in ("adopt", "reconcile", "cancel-ready", "handoff", "return-new", "tree"):
         parser.add_argument(
             f"--allow-{action}",
             action="store_true",
@@ -67,6 +67,7 @@ def selected_runtime_actions(args):
     for name, actions in (
         ("handoff", {"summary"}),
         ("return_new", {"return_new_full", "return_new_summary"}),
+        ("tree", {"tree"}),
     ):
         value = getattr(args, "allow_" + name, False)
         if type(value) is not bool:
