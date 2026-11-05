@@ -1,4 +1,4 @@
-"""OpenCode 1.17.20 and 2.0 public import/export adapters.
+"""OpenCode 1.17.20 and 2.0/2.1/2.2 public import/export adapters.
 
 The writer emits the public JSON shape consumed by ``opencode import``.  It
 never writes OpenCode's SQLite database directly.

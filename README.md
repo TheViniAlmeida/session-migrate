@@ -68,7 +68,7 @@ prepared migration:
 smigrate tui
 ```
 
-See [current Claude/Codex compatibility](docs/current-client-compatibility.md) for
+See [current client compatibility](docs/current-client-compatibility.md) for
 exact tested releases and native replay limits.
 
 See the [terminal interface](docs/terminal-ui.md) for installation, profile roots

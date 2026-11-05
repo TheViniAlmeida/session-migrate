@@ -1,0 +1,1075 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:session-migrate:session-tree:v1",
+  "title": "Persistent session tree proposal v1 (design only)",
+  "description": "Metadata-only proposal. Schema validation does not authorize execution, prove native relations, validate graph invariants, or establish source/target identity. See persistent-session-hierarchy.md. Journal events use $defs/journalEvent.",
+  "$ref": "#/$defs/proposal",
+  "$defs": {
+    "key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 96,
+      "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$"
+    },
+    "sha256": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*(?:^|/)\\.(?:/|$))[^\\u0000-\\u001f]+$"
+    },
+    "namespace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "format",
+        "profile_id",
+        "canonical_root",
+        "root_witness_sha256",
+        "profile_fingerprint_sha256",
+        "client_version"
+      ],
+      "properties": {
+        "format": {
+          "enum": [
+            "claude",
+            "codex",
+            "opencode"
+          ]
+        },
+        "profile_id": {
+          "$ref": "#/$defs/key"
+        },
+        "canonical_root": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?:/|[A-Za-z]:[\\\\/]|\\\\\\\\)[^\\u0000-\\u001f]*$"
+        },
+        "root_witness_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "profile_fingerprint_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "client_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "source_native_id",
+        "persistent",
+        "persistence_evidence_ids",
+        "source_parent_status"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/key"
+        },
+        "source_native_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "persistent": {
+          "const": true
+        },
+        "persistence_evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/key"
+          },
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "source_parent_status": {
+          "enum": [
+            "known_root",
+            "known_parent",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "evidence": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "kind",
+            "relative_path",
+            "component_sha256",
+            "field_pointer",
+            "client_version"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/key"
+            },
+            "kind": {
+              "const": "native_metadata"
+            },
+            "relative_path": {
+              "$ref": "#/$defs/relativePath"
+            },
+            "component_sha256": {
+              "$ref": "#/$defs/sha256"
+            },
+            "field_pointer": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^/"
+            },
+            "client_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "kind",
+            "declaration_id",
+            "declared_at",
+            "statement"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/key"
+            },
+            "kind": {
+              "const": "manual_declaration"
+            },
+            "declaration_id": {
+              "$ref": "#/$defs/key"
+            },
+            "declared_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "statement": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "id",
+            "kind",
+            "uri",
+            "claim"
+          ],
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/key"
+            },
+            "kind": {
+              "const": "external_report"
+            },
+            "uri": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "format": "uri"
+            },
+            "claim": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024
+            }
+          }
+        }
+      ]
+    },
+    "prefixWitness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "policy",
+        "parent_capture_sha256",
+        "child_capture_sha256",
+        "logical_unit_count",
+        "unit_chain_sha256",
+        "tool_link_count",
+        "tool_link_chain_sha256",
+        "boundary"
+      ],
+      "properties": {
+        "policy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "parent_capture_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "child_capture_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "logical_unit_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unit_chain_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "tool_link_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "tool_link_chain_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "boundary": {
+          "enum": [
+            "proven_closed",
+            "unproven"
+          ]
+        }
+      }
+    },
+    "relationship": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "parent_node_key",
+        "child_node_key",
+        "kind",
+        "provenance",
+        "evidence_ids",
+        "shared_prefix"
+      ],
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/key"
+        },
+        "parent_node_key": {
+          "$ref": "#/$defs/key"
+        },
+        "child_node_key": {
+          "$ref": "#/$defs/key"
+        },
+        "kind": {
+          "enum": [
+            "organizational_parent",
+            "fork_origin"
+          ]
+        },
+        "provenance": {
+          "enum": [
+            "native",
+            "manual"
+          ]
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/key"
+          },
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "shared_prefix": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/prefixWitness"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relative_path",
+        "sha256",
+        "byte_count"
+      ],
+      "properties": {
+        "relative_path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "byte_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 268435456
+        }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_key",
+        "snapshot_sha256",
+        "source_revision_sha256",
+        "components",
+        "history_mode",
+        "canonical_policy",
+        "logical_unit_count",
+        "unit_chain_sha256",
+        "tool_link_count",
+        "tool_link_chain_sha256",
+        "snapshot_policy"
+      ],
+      "properties": {
+        "node_key": {
+          "$ref": "#/$defs/key"
+        },
+        "snapshot_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_revision_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "components": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/component"
+          },
+          "minItems": 1,
+          "maxItems": 1024
+        },
+        "history_mode": {
+          "enum": [
+            "complete_local",
+            "verified_materialized_prefix"
+          ]
+        },
+        "canonical_policy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96
+        },
+        "logical_unit_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "unit_chain_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "tool_link_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "tool_link_chain_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "snapshot_policy": {
+          "const": "tree-source-components-v1"
+        }
+      }
+    },
+    "title": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requested",
+        "mode"
+      ],
+      "properties": {
+        "requested": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "mode": {
+          "enum": [
+            "native",
+            "local_alias"
+          ]
+        }
+      }
+    },
+    "targetPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_key",
+        "native_id",
+        "target_parent_node_key",
+        "relationship_disposition",
+        "source_relationship_keys",
+        "title",
+        "source_capture_sha256",
+        "expected_logical_unit_count",
+        "expected_unit_chain_sha256",
+        "expected_tool_link_count",
+        "expected_tool_link_chain_sha256",
+        "history_policy",
+        "loss_codes"
+      ],
+      "properties": {
+        "node_key": {
+          "$ref": "#/$defs/key"
+        },
+        "native_id": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 80,
+          "pattern": "^ses_[0-9a-f]{32}$"
+        },
+        "target_parent_node_key": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/key"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "relationship_disposition": {
+          "enum": [
+            "native_parent",
+            "root",
+            "detached_selection_boundary",
+            "retained_only",
+            "unsupported"
+          ]
+        },
+        "source_relationship_keys": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/key"
+          },
+          "minItems": 0,
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "title": {
+          "$ref": "#/$defs/title"
+        },
+        "source_capture_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expected_logical_unit_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expected_unit_chain_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expected_tool_link_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "expected_tool_link_chain_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "history_policy": {
+          "const": "independent_materialized_history"
+        },
+        "loss_codes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 96
+          },
+          "minItems": 0,
+          "maxItems": 128,
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "relationship_disposition": {
+                "const": "native_parent"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "target_parent_node_key": {
+                "$ref": "#/$defs/key"
+              },
+              "source_relationship_keys": {
+                "minItems": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "target_parent_node_key": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "operation_id",
+        "created_at",
+        "synthetic",
+        "source_namespace",
+        "target_namespace",
+        "inventory",
+        "selection",
+        "nodes",
+        "relationships",
+        "evidence",
+        "captures",
+        "targets",
+        "id_strategy",
+        "limits",
+        "preflight",
+        "journal_contract"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "session-tree-proposal"
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "synthetic": {
+          "type": "boolean"
+        },
+        "source_namespace": {
+          "$ref": "#/$defs/namespace"
+        },
+        "target_namespace": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/namespace"
+            },
+            {
+              "properties": {
+                "format": {
+                  "const": "opencode"
+                }
+              }
+            }
+          ]
+        },
+        "inventory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope",
+            "completeness",
+            "root_node_key",
+            "evidence_ids"
+          ],
+          "properties": {
+            "scope": {
+              "enum": [
+                "explicit_manifest",
+                "native_query"
+              ]
+            },
+            "completeness": {
+              "enum": [
+                "declared_complete",
+                "verified_complete",
+                "partial"
+              ]
+            },
+            "root_node_key": {
+              "$ref": "#/$defs/key"
+            },
+            "evidence_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/key"
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            }
+          }
+        },
+        "selection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "anchor_node_key",
+            "included_node_keys",
+            "hierarchy_relationship_keys",
+            "boundary_policy"
+          ],
+          "properties": {
+            "mode": {
+              "enum": [
+                "single",
+                "subtree",
+                "full_tree"
+              ]
+            },
+            "anchor_node_key": {
+              "$ref": "#/$defs/key"
+            },
+            "included_node_keys": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/key"
+              },
+              "minItems": 1,
+              "maxItems": 1024,
+              "uniqueItems": true
+            },
+            "hierarchy_relationship_keys": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/key"
+              },
+              "minItems": 0,
+              "maxItems": 2048,
+              "uniqueItems": true
+            },
+            "boundary_policy": {
+              "enum": [
+                "require_closed",
+                "detach_explicit"
+              ]
+            }
+          }
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/node"
+          },
+          "minItems": 1,
+          "maxItems": 1024
+        },
+        "relationships": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/relationship"
+          },
+          "minItems": 0,
+          "maxItems": 2048
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          },
+          "minItems": 1,
+          "maxItems": 4096
+        },
+        "captures": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/capture"
+          },
+          "minItems": 1,
+          "maxItems": 1024
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/targetPlan"
+          },
+          "minItems": 1,
+          "maxItems": 1024
+        },
+        "id_strategy": {
+          "const": "uuid5_operation_qualified_source_v1"
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "max_nodes",
+            "max_tree_depth",
+            "max_capture_bytes",
+            "max_total_capture_bytes",
+            "max_proposal_bytes",
+            "max_json_depth"
+          ],
+          "properties": {
+            "max_nodes": {
+              "const": 1024
+            },
+            "max_tree_depth": {
+              "const": 64
+            },
+            "max_capture_bytes": {
+              "const": 268435456
+            },
+            "max_total_capture_bytes": {
+              "const": 1073741824
+            },
+            "max_proposal_bytes": {
+              "const": 8388608
+            },
+            "max_json_depth": {
+              "const": 128
+            }
+          }
+        },
+        "preflight": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "blocker_codes",
+            "check_receipt_sha256"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "blocked",
+                "ready_for_live_review"
+              ]
+            },
+            "blocker_codes": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 96
+              },
+              "minItems": 0,
+              "maxItems": 256,
+              "uniqueItems": true
+            },
+            "check_receipt_sha256": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/sha256"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          }
+        },
+        "journal_contract": {
+          "const": "durable-per-node-v1-inspect-only-recovery"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "synthetic": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "preflight": {
+                "properties": {
+                  "status": {
+                    "const": "blocked"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "preflight": {
+                "properties": {
+                  "status": {
+                    "const": "ready_for_live_review"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "preflight": {
+                "properties": {
+                  "blocker_codes": {
+                    "maxItems": 0
+                  },
+                  "check_receipt_sha256": {
+                    "$ref": "#/$defs/sha256"
+                  }
+                }
+              },
+              "targets": {
+                "items": {
+                  "properties": {
+                    "relationship_disposition": {
+                      "not": {
+                        "const": "unsupported"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "preflight": {
+                "properties": {
+                  "status": {
+                    "const": "blocked"
+                  }
+                }
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "preflight": {
+                "properties": {
+                  "blocker_codes": {
+                    "minItems": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "journalEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "operation_id",
+        "node_key",
+        "sequence",
+        "recorded_at",
+        "target_namespace_fingerprint_sha256",
+        "target_native_id",
+        "source_capture_sha256",
+        "stage",
+        "publication",
+        "observed_export_sha256",
+        "receipt_sha256",
+        "previous_event_sha256",
+        "event_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "const": "session-tree-node-event"
+        },
+        "operation_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "node_key": {
+          "$ref": "#/$defs/key"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "recorded_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "target_namespace_fingerprint_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "target_native_id": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 80,
+          "pattern": "^ses_[0-9a-f]{32}$"
+        },
+        "source_capture_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "stage": {
+          "enum": [
+            "reserved",
+            "intent_durable",
+            "native_acknowledged",
+            "verified",
+            "completed",
+            "failed_before_publish",
+            "needs_reconcile"
+          ]
+        },
+        "publication": {
+          "enum": [
+            "native_not_started",
+            "attempted_unknown",
+            "acknowledged"
+          ]
+        },
+        "observed_export_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "receipt_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "previous_event_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "enum": [
+                  "reserved",
+                  "failed_before_publish"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "publication": {
+                "const": "native_not_started"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "const": "intent_durable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "publication": {
+                "const": "attempted_unknown"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "enum": [
+                  "native_acknowledged",
+                  "verified",
+                  "completed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "publication": {
+                "const": "acknowledged"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "enum": [
+                  "verified",
+                  "completed"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "observed_export_sha256": {
+                "$ref": "#/$defs/sha256"
+              },
+              "receipt_sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

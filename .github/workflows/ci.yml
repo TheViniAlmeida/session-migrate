@@ -70,7 +70,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        client: [opencode-v2, opencode-v21]
+        client: [opencode-v2, opencode-v21, opencode-v22]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -112,8 +112,10 @@ jobs:
           - antigravity
           - claude
           - claude-current
+          - claude-nov
           - codex
           - codex-current
+          - codex-nov
           - copilot
           - cursor
           - devin
@@ -127,6 +129,7 @@ jobs:
           - opencode
           - opencode-v2
           - opencode-v21
+          - opencode-v22
           - openhands
           - pi
           - qwen

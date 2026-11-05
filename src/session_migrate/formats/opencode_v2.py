@@ -1,4 +1,4 @@
-"""Public OpenCode 2.0/2.1 transfer schema support; no private database access.
+"""Public OpenCode 2.0/2.1/2.2 transfer schema support; no private database access.
 
 Legacy bundles are an internal portable projection only. Native v2 files always
 use SessionTransfer.Data (flat messages), not legacy message info/parts.
@@ -14,9 +14,9 @@ from typing import Any
 
 from session_migrate.errors import SessionMigrateError
 
-_VERSION = re.compile(r"(?:opencode v)?(2\.[01]\.\d+(?:[-+][0-9A-Za-z.-]+)?)")
+_VERSION = re.compile(r"(?:opencode v)?(2\.[012]\.\d+(?:[-+][0-9A-Za-z.-]+)?)")
 VALIDATED_VERSION = "2.0.23"
-VALIDATED_VERSIONS = frozenset({"2.0.22", VALIDATED_VERSION, "2.1.1"})
+VALIDATED_VERSIONS = frozenset({"2.0.22", VALIDATED_VERSION, "2.1.1", "2.2.5"})
 
 
 def version(value: str) -> str | None:
@@ -26,6 +26,8 @@ def version(value: str) -> str | None:
 
 def validated_version(value: str) -> str:
     release = version(value)
+    if release and release.startswith("2.2."):
+        return "2.2.5"
     return "2.1.1" if release and release.startswith("2.1.") else VALIDATED_VERSION
 
 
@@ -48,7 +50,7 @@ def from_legacy(
 ) -> dict[str, Any]:
     old = bundle["info"]
     release = version(old.get("version", ""))
-    schema_21 = bool(release and release.startswith("2.1."))
+    schema_21 = bool(release and release.startswith(("2.1.", "2.2.")))
     ref: dict[str, Any] = {}
     messages: list[dict[str, Any]] = []
     compact: set[str] = set()
@@ -538,6 +540,15 @@ def loss_events(bundle: dict[str, Any]) -> list[Any]:
                     provenance=Provenance(0, "session"),
                 )
             )
+    if "busy" in bundle["info"]["time"]:
+        events.append(
+            Event(
+                kind=EventKind.OPAQUE,
+                timestamp=_iso_from_ms(bundle["info"]["time"]["created"]),
+                payload={"reason": "opencode_v2_session_busy"},
+                provenance=Provenance(0, "session"),
+            )
+        )
     for index, message in enumerate(bundle["messages"]):
         reasons = []
         kind = message.get("type")
@@ -716,7 +727,7 @@ def _validate_native(bundle: dict[str, Any]) -> None:
         "parentID" in info and not info["parentID"].startswith("ses_")
     ):
         raise SessionMigrateError("OpenCode v2 has invalid session identity")
-    time(info.get("time"), ("created", "updated"), ("idle", "viewed", "archived"))
+    time(info.get("time"), ("created", "updated"), ("busy", "idle", "viewed", "archived"))
     if info["time"]["updated"] < info["time"]["created"]:
         raise SessionMigrateError("OpenCode v2 has invalid update time")
     location_ref(info.get("location"))

@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "kind": "session-tree-proposal",
+  "operation_id": "4f3f56bd-2fd8-4f12-9f9a-1e11ac48aa0a",
+  "created_at": "2026-11-05T10:00:00-03:00",
+  "synthetic": true,
+  "source_namespace": {
+    "format": "claude",
+    "profile_id": "claude_synthetic",
+    "canonical_root": "/synthetic/claude/projects",
+    "root_witness_sha256": "1056bcf5f147f9184b470f44b8a33cd701b67811727a379ded13e989b6c6625b",
+    "profile_fingerprint_sha256": "752b6c938fc0ccd7109d531d29d47533fd3a2c6909c8d2916eb19dba3b69e89d",
+    "client_version": "2.1.318"
+  },
+  "target_namespace": {
+    "format": "opencode",
+    "profile_id": "opencode_synthetic",
+    "canonical_root": "/synthetic/opencode/data",
+    "root_witness_sha256": "b11e352813605c8b5d105adf6d9f7af6318370146c812ff5bcf0df080a013ad0",
+    "profile_fingerprint_sha256": "14421ee3a93d42dfce7e0ab5c8f17e124121101c8dd3249dc0f47d1c4b88eaf8",
+    "client_version": "2.2.5"
+  },
+  "inventory": {
+    "scope": "explicit_manifest",
+    "completeness": "declared_complete",
+    "root_node_key": "root",
+    "evidence_ids": [
+      "manual_synthetic_tree"
+    ]
+  },
+  "selection": {
+    "mode": "full_tree",
+    "anchor_node_key": "root",
+    "included_node_keys": [
+      "root",
+      "child",
+      "grandchild"
+    ],
+    "hierarchy_relationship_keys": [
+      "edge_child",
+      "edge_grandchild"
+    ],
+    "boundary_policy": "require_closed"
+  },
+  "nodes": [
+    {
+      "key": "root",
+      "source_native_id": "11111111-1111-4111-8111-111111111111",
+      "persistent": true,
+      "persistence_evidence_ids": [
+        "manual_synthetic_tree"
+      ],
+      "source_parent_status": "known_root"
+    },
+    {
+      "key": "child",
+      "source_native_id": "22222222-2222-4222-8222-222222222222",
+      "persistent": true,
+      "persistence_evidence_ids": [
+        "manual_synthetic_tree"
+      ],
+      "source_parent_status": "known_parent"
+    },
+    {
+      "key": "grandchild",
+      "source_native_id": "33333333-3333-4333-8333-333333333333",
+      "persistent": true,
+      "persistence_evidence_ids": [
+        "manual_synthetic_tree"
+      ],
+      "source_parent_status": "known_parent"
+    }
+  ],
+  "relationships": [
+    {
+      "key": "edge_child",
+      "parent_node_key": "root",
+      "child_node_key": "child",
+      "kind": "fork_origin",
+      "provenance": "manual",
+      "evidence_ids": [
+        "manual_synthetic_tree"
+      ],
+      "shared_prefix": null
+    },
+    {
+      "key": "edge_grandchild",
+      "parent_node_key": "child",
+      "child_node_key": "grandchild",
+      "kind": "fork_origin",
+      "provenance": "manual",
+      "evidence_ids": [
+        "manual_synthetic_tree"
+      ],
+      "shared_prefix": null
+    }
+  ],
+  "evidence": [
+    {
+      "id": "manual_synthetic_tree",
+      "kind": "manual_declaration",
+      "declaration_id": "synthetic_example_only",
+      "declared_at": "2026-11-05T10:00:00-03:00",
+      "statement": "Synthetic three-node tree. Manual fork origins illustrate explicit mapping; no Claude Desktop metadata or real source snapshots were captured."
+    }
+  ],
+  "captures": [
+    {
+      "node_key": "root",
+      "snapshot_sha256": "35941d366587dc41d9a358e24d1ce209356d1e4ccffddf4003ac2dbea350f1c9",
+      "source_revision_sha256": "b7e0ee782bbc8b1deb7bd6734a562d345fad169bf1ff2086574b0b749dc81c5d",
+      "components": [
+        {
+          "relative_path": "project/11111111-1111-4111-8111-111111111111.jsonl",
+          "sha256": "64a5c3eeffd28dbf8673c6cf35af6fd17054ab2f323a6d833a4cdc84d91855de",
+          "byte_count": 100
+        }
+      ],
+      "history_mode": "complete_local",
+      "canonical_policy": "synthetic-not-a-supported-policy-v1",
+      "logical_unit_count": 2,
+      "unit_chain_sha256": "96f06ff337c1ce90ce9bbe01eafb9b0311ea9a08fb1f341ac1325a23a0e8a367",
+      "tool_link_count": 0,
+      "tool_link_chain_sha256": "e482da41ec87b49b5eadf0f9309b4c6495b37b4c56d831b03685f44f165e570f",
+      "snapshot_policy": "tree-source-components-v1"
+    },
+    {
+      "node_key": "child",
+      "snapshot_sha256": "449298cb673d81c9f6d82983b3b01158a9ba83675313a80397ab8350756b28bf",
+      "source_revision_sha256": "d86ff6d70fd8e354a62073f218f4b073c2cac12a6ac68f4a78b8a088210ef342",
+      "components": [
+        {
+          "relative_path": "project/22222222-2222-4222-8222-222222222222.jsonl",
+          "sha256": "2ce4bd112b00ca42da8e1d607eef2d486e639ea952b3505557019f4f8c11f32e",
+          "byte_count": 100
+        }
+      ],
+      "history_mode": "complete_local",
+      "canonical_policy": "synthetic-not-a-supported-policy-v1",
+      "logical_unit_count": 4,
+      "unit_chain_sha256": "1f0ee5c6602bbc4ae0e02bf534e1ebbbe82b43e0bf2995542d7489b487857701",
+      "tool_link_count": 0,
+      "tool_link_chain_sha256": "e482da41ec87b49b5eadf0f9309b4c6495b37b4c56d831b03685f44f165e570f",
+      "snapshot_policy": "tree-source-components-v1"
+    },
+    {
+      "node_key": "grandchild",
+      "snapshot_sha256": "5b0dad01a6bca8a10f821d1db657acae5a3a423b88ce378778615fee87d7313d",
+      "source_revision_sha256": "403b0e2aa1de920fd7b4bb11b22e62fb377374a72c2f1098256471cb8e3c7f35",
+      "components": [
+        {
+          "relative_path": "project/33333333-3333-4333-8333-333333333333.jsonl",
+          "sha256": "7be7f728de96234702c09dfb42dd4925ffaa623b431847fab07175523c18caa3",
+          "byte_count": 100
+        }
+      ],
+      "history_mode": "complete_local",
+      "canonical_policy": "synthetic-not-a-supported-policy-v1",
+      "logical_unit_count": 6,
+      "unit_chain_sha256": "999b45510a3aae2336bee85cdd846aa2317b30e98b6519601afc551e595d1f53",
+      "tool_link_count": 0,
+      "tool_link_chain_sha256": "e482da41ec87b49b5eadf0f9309b4c6495b37b4c56d831b03685f44f165e570f",
+      "snapshot_policy": "tree-source-components-v1"
+    }
+  ],
+  "targets": [
+    {
+      "node_key": "root",
+      "native_id": "ses_746db1ef9ce25dbe9bacf36471023d7a",
+      "target_parent_node_key": null,
+      "relationship_disposition": "root",
+      "source_relationship_keys": [],
+      "title": {
+        "requested": "Synthetic root migration",
+        "mode": "native"
+      },
+      "source_capture_sha256": "35941d366587dc41d9a358e24d1ce209356d1e4ccffddf4003ac2dbea350f1c9",
+      "expected_logical_unit_count": 2,
+      "expected_unit_chain_sha256": "96f06ff337c1ce90ce9bbe01eafb9b0311ea9a08fb1f341ac1325a23a0e8a367",
+      "expected_tool_link_count": 0,
+      "expected_tool_link_chain_sha256": "e482da41ec87b49b5eadf0f9309b4c6495b37b4c56d831b03685f44f165e570f",
+      "history_policy": "independent_materialized_history",
+      "loss_codes": []
+    },
+    {
+      "node_key": "child",
+      "native_id": "ses_6dc450f8692a54fbb1e7689bbbfe191e",
+      "target_parent_node_key": "root",
+      "relationship_disposition": "native_parent",
+      "source_relationship_keys": [
+        "edge_child"
+      ],
+      "title": {
+        "requested": "Synthetic child migration",
+        "mode": "native"
+      },
+      "source_capture_sha256": "449298cb673d81c9f6d82983b3b01158a9ba83675313a80397ab8350756b28bf",
+      "expected_logical_unit_count": 4,
+      "expected_unit_chain_sha256": "1f0ee5c6602bbc4ae0e02bf534e1ebbbe82b43e0bf2995542d7489b487857701",
+      "expected_tool_link_count": 0,
+      "expected_tool_link_chain_sha256": "e482da41ec87b49b5eadf0f9309b4c6495b37b4c56d831b03685f44f165e570f",
+      "history_policy": "independent_materialized_history",
+      "loss_codes": [
+        "FORK_ORIGIN_RETAINED_IN_MIGRATION_METADATA_ONLY"
+      ]
+    },
+    {
+      "node_key": "grandchild",
+      "native_id": "ses_35b41007cf2052d08a928d3b08702026",
+      "target_parent_node_key": "child",
+      "relationship_disposition": "native_parent",
+      "source_relationship_keys": [
+        "edge_grandchild"
+      ],
+      "title": {
+        "requested": "Synthetic grandchild migration",
+        "mode": "native"
+      },
+      "source_capture_sha256": "5b0dad01a6bca8a10f821d1db657acae5a3a423b88ce378778615fee87d7313d",
+      "expected_logical_unit_count": 6,
+      "expected_unit_chain_sha256": "999b45510a3aae2336bee85cdd846aa2317b30e98b6519601afc551e595d1f53",
+      "expected_tool_link_count": 0,
+      "expected_tool_link_chain_sha256": "e482da41ec87b49b5eadf0f9309b4c6495b37b4c56d831b03685f44f165e570f",
+      "history_policy": "independent_materialized_history",
+      "loss_codes": [
+        "FORK_ORIGIN_RETAINED_IN_MIGRATION_METADATA_ONLY"
+      ]
+    }
+  ],
+  "id_strategy": "uuid5_operation_qualified_source_v1",
+  "limits": {
+    "max_nodes": 1024,
+    "max_tree_depth": 64,
+    "max_capture_bytes": 268435456,
+    "max_total_capture_bytes": 1073741824,
+    "max_proposal_bytes": 8388608,
+    "max_json_depth": 128
+  },
+  "preflight": {
+    "status": "blocked",
+    "blocker_codes": [
+      "SYNTHETIC_EVIDENCE_ONLY",
+      "NO_CAPTURED_SOURCE_ARTIFACTS",
+      "NO_LIVE_TARGET_PREFLIGHT"
+    ],
+    "check_receipt_sha256": null
+  },
+  "journal_contract": "durable-per-node-v1-inspect-only-recovery"
+}

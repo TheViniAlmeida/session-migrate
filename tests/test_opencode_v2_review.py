@@ -105,7 +105,7 @@ def test_malformed_native_fields_rejected_before_projection(tmp_path, mutation):
         opencode.validate_native_bytes(json.dumps(bundle).encode(), bundle["info"]["id"])
 
 
-@pytest.mark.parametrize("release", ["2.0.22", "2.0.23", "2.1.1"])
+@pytest.mark.parametrize("release", ["2.0.22", "2.0.23", "2.1.1", "2.2.5"])
 @pytest.mark.parametrize(
     "blocks",
     [mixed_blocks(), [{"type": "text", "text": ""}, *mixed_blocks(), {"type": "text", "text": ""}]],
@@ -528,7 +528,7 @@ def test_legacy_loss_oracle_counts_only_lost_segmentation_or_order(
 def test_stock_v2_accepts_and_cold_exports_review_sources_and_fixed_targets(tmp_path, case):
     binary = os.environ.get("SESSION_MIGRATE_TEST_OPENCODE_V2")
     if not binary:
-        pytest.skip("set SESSION_MIGRATE_TEST_OPENCODE_V2 to stock 2.0.22, 2.0.23 or 2.1.1")
+        pytest.skip("set SESSION_MIGRATE_TEST_OPENCODE_V2 to stock 2.0.22, 2.0.23, 2.1.1 or 2.2.5")
     env = {
         "PATH": "/usr/bin:/bin",
         "LANG": "C.UTF-8",
@@ -555,7 +555,7 @@ def test_stock_v2_accepts_and_cold_exports_review_sources_and_fixed_targets(tmp_
         return result.stdout
 
     release = run("--version").strip().removeprefix("opencode v")
-    assert release in {"2.0.22", "2.0.23", "2.1.1"}
+    assert release in {"2.0.22", "2.0.23", "2.1.1", "2.2.5"}
     bundle = source_bundle(tmp_path)
     if case == "mixed":
         tool(bundle)["state"]["content"] = mixed_blocks()
@@ -611,7 +611,7 @@ def test_stock_v2_accepts_and_cold_exports_review_sources_and_fixed_targets(tmp_
             timeout=90,
         )
         assert rejected.returncode != 0
-        diagnostic = "Bad Request" if release == "2.1.1" else "SchemaError"
+        diagnostic = "Bad Request" if release in {"2.1.1", "2.2.5"} else "SchemaError"
         assert diagnostic in rejected.stderr
         missing = subprocess.run(
             [binary, "session", "export", bundle["info"]["id"], "--standalone"],
@@ -647,7 +647,9 @@ def test_stock_v2_accepts_and_cold_exports_review_sources_and_fixed_targets(tmp_
         assert migrated.dropped["opaque:opencode_v2_tool_error_response"] == 1
     else:
         assert not any(m["type"] == "compaction" for m in exported["messages"])
-        private_fields = ("native",) if release == "2.1.1" else ("providerContext", "providerState")
+        private_fields = (
+            ("native",) if release in {"2.1.1", "2.2.5"} else ("providerContext", "providerState")
+        )
         for reason in (
             *private_fields,
             "compaction_empty_portable_summary",

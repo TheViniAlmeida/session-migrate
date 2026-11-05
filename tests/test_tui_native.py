@@ -82,9 +82,9 @@ def stock(tmp_path):
     proxy = tmp_path / "stock-opencode"
     proxy.symlink_to(binary)
     release = detect_opencode_version(proxy, environ=environment(tmp_path / "version-probe"))
-    if release not in {"2.0.22", "2.0.23", "2.1.1"}:
+    if release not in {"2.0.22", "2.0.23", "2.1.1", "2.2.5"}:
         raise pytest.UsageError(
-            "native TUI gate requires designated stock OpenCode 2.0.22/2.0.23/2.1.1"
+            "native TUI gate requires designated stock OpenCode 2.0.22/2.0.23/2.1.1/2.2.5"
         )
     return StockClient(proxy, release)
 
@@ -335,6 +335,7 @@ def title_stock(tmp_path):
         "32cf5aa0a69a650e36277e3315d189835ddc79fb9aa1d0aef5025be5af5ad122",
         "a233de331f4438336e604d8e006fdab18e5911c4ece16de8e502eb61394c3586",
         "0e81c77fcc27b263708b133bbf9880cd641060c20e22d3dec8a79b9a8db90450",
+        "8d060e1d2fbb9bb44cf09ae6ed1f3f6a7cff070b5227e2f90970132b23a92050",
     }
     digest = hashlib.sha256(binary.read_bytes()).hexdigest()
     if digest not in accepted:
@@ -375,7 +376,7 @@ def title_stock(tmp_path):
     )
     wrapper.chmod(0o700)
     release = detect_opencode_version(wrapper, environ=environment(tmp_path / "private-version"))
-    assert release in {"2.0.22", "2.0.23", "2.1.1"}
+    assert release in {"2.0.22", "2.0.23", "2.1.1", "2.2.5"}
     return StockClient(wrapper, release)
 
 

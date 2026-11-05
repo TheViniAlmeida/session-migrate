@@ -50,6 +50,7 @@ _NATIVE_TITLE_PROOFS = {
     (AgentFormat.OPENCODE, "v2", "2.0.23"): "opencode-2.0.23-public-list-cold-export",
     (AgentFormat.OPENCODE, "v2", "2.0.27"): "opencode-2.0.27-public-list-cold-export",
     (AgentFormat.OPENCODE, "v2", "2.1.1"): "opencode-2.1.1-public-list-cold-export",
+    (AgentFormat.OPENCODE, "v2", "2.2.5"): "opencode-2.2.5-public-list-cold-export",
 }
 
 

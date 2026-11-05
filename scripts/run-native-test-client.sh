@@ -37,6 +37,10 @@ case "$client" in
       tests/test_claude_codex_latest_native.py::test_latest_claude_native_project_directory_override
     )
     ;;
+  claude-nov)
+    isolate_network=1
+    tests=(tests/test_claude_nov_native.py)
+    ;;
   codex)
     tests=(
       tests/test_claude_codex_corpus_native.py::test_exact_codex_cold_reloads_sanitized_corpus_source
@@ -53,6 +57,10 @@ case "$client" in
       'tests/test_claude_codex_latest_native.py::test_latest_stock_cold_resumes_current_writer[current-tool-history-codex]'
       tests/test_claude_codex_latest_native.py::test_latest_codex_app_server_reads_writer_history
     )
+    ;;
+  codex-nov)
+    isolate_network=1
+    tests=(tests/test_codex_nov_native.py)
     ;;
   copilot)
     tests=(tests/test_copilot_source_native.py)
@@ -122,7 +130,7 @@ case "$client" in
       'tests/test_opencode_kilo_corpus_native.py::test_exact_client_cold_import_export_and_continuation_preserve_prefix[opencode]'
     )
     ;;
-  opencode-v2|opencode-v21)
+  opencode-v2|opencode-v21|opencode-v22)
     tests=(
       tests/test_opencode_v2.py::test_native_v2_isolated_import_export_dry_run_and_collision
       tests/test_opencode_v2_native.py
@@ -133,6 +141,8 @@ case "$client" in
     )
     if [[ "$client" == opencode-v21 ]]; then
       tests+=(tests/test_opencode_v21_native.py)
+    elif [[ "$client" == opencode-v22 ]]; then
+      tests+=(tests/test_opencode_v22_native.py)
     fi
     ;;
   openhands)
@@ -185,6 +195,8 @@ if [[ "$isolate_network" == 1 ]]; then
   for variable in \
     SESSION_MIGRATE_LATEST_CLAUDE_BIN SESSION_MIGRATE_LATEST_CLAUDE_SHA256 \
     SESSION_MIGRATE_LATEST_CODEX_BIN SESSION_MIGRATE_LATEST_CODEX_SHA256 \
+    SESSION_MIGRATE_NOV_CLAUDE_BIN SESSION_MIGRATE_NOV_CLAUDE_SHA256 \
+    SESSION_MIGRATE_NOV_CODEX_BIN SESSION_MIGRATE_NOV_CODEX_SHA256 \
     UV_CACHE_DIR UV_PYTHON UV_PYTHON_INSTALL_DIR UV_PROJECT_ENVIRONMENT VIRTUAL_ENV TMPDIR; do
     if [[ -v "$variable" ]]; then
       native_environment+=("$variable=${!variable}")

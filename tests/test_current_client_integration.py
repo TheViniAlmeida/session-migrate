@@ -21,7 +21,11 @@ from session_migrate.usage_extractors import decode_usage
     [
         (TargetFormat.CLAUDE, "2.1.303"),
         (TargetFormat.CLAUDE, "2.1.306"),
+        (TargetFormat.CLAUDE, "2.1.317"),
+        (TargetFormat.CLAUDE, "2.1.318"),
         (TargetFormat.CODEX, "0.163.0"),
+        (TargetFormat.CODEX, "0.166.0"),
+        (TargetFormat.OPENCODE, "2.2.5"),
     ],
 )
 def test_current_explicit_target_is_consistent_across_interfaces(tmp_path, target, version):
@@ -78,10 +82,11 @@ def test_custom_claude_namespace_refused_before_preparation_side_effects(tmp_pat
 
 
 @pytest.mark.parametrize("schema", ["codex-legacy", "codex-paginated"])
-def test_latest_codex_usage_accepts_only_proven_native_schema(schema):
-    UsageSchemaKey("codex", "0.163.0", schema)
+@pytest.mark.parametrize("version", ["0.163.0", "0.166.0"])
+def test_latest_codex_usage_accepts_only_proven_native_schema(schema, version):
+    UsageSchemaKey("codex", version, schema)
     with pytest.raises(UsageError):
-        UsageSchemaKey("codex", "0.163.0", "unknown-schema")
+        UsageSchemaKey("codex", version, "unknown-schema")
 
 
 def test_latest_counter_fields_keep_turn_request_and_cumulative_separate():
@@ -143,3 +148,18 @@ def test_current_claude_raw_counter_fields_remain_observations(version):
     assert dict(samples[0].counters)["input"] == 10
     assert dict(samples[0].counters)["cache_write"] == 1
     assert not samples[0].identity_parts
+
+
+@pytest.mark.parametrize(
+    "format,version,schema",
+    [
+        ("claude", "2.1.317", "claude-jsonl-v1"),
+        ("claude", "2.1.318", "claude-jsonl-v1"),
+        ("opencode", "2.1.1", "opencode-session-transfer-v2"),
+        ("opencode", "2.2.5", "opencode-session-transfer-v2"),
+    ],
+)
+def test_current_usage_registry_matches_the_proven_source_schema(format, version, schema):
+    UsageSchemaKey(format, version, schema)
+    with pytest.raises(UsageError):
+        UsageSchemaKey(format, version, "unknown-schema")
