@@ -7,7 +7,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -86,7 +85,15 @@ def native(tmp_path):
         result = subprocess.run(
             prefix
             + (
-                [sys.executable, "-c", args, str(tmp_path)]
+                [
+                    "/usr/bin/python3",
+                    "-I",
+                    "-B",
+                    "-c",
+                    "import sys;sys.path[:0]="
+                    "['/tmp/session-migrate-src','/tmp/session-migrate-tests'];" + args,
+                    str(tmp_path),
+                ]
                 if worker
                 else ["/tmp/opencode-v22", *args]
             ),
