@@ -138,7 +138,7 @@ not bypass source parsing or resolve the five reported compaction cases.
 
 ## Release validation
 
-The local selected suites passed **601 tests**: 261 parser/conversion/tree
+The local selected suites passed **630 tests**: 290 parser/conversion/tree
 regressions, 325 audit/projection/operation/usage regressions, 13 CLI checks and
 2 real OpenCode 2.2.5 gates (standalone and connected server). The native gates
 used private filesystem/network namespaces, four-node families, cold server
