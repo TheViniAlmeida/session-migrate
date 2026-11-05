@@ -27,6 +27,17 @@ publicação no PyPI nem atualização automática das instalações existentes.
   prioritariamente Claude → OpenCode, com vínculos comprovados ou declaração
   manual explícita. A migração automática de árvores ainda não está habilitada.
 
+- Instalada a DEV14 primeiro no operador e depois na instalação compartilhada,
+  com backup verificado e revisão independente pós-instalação aprovada.
+- QA do pacote instalado: 295 testes passaram no operador; na compartilhada,
+  294 passaram e um teste da TUI expirou. O mesmo caso passou isoladamente,
+  sem alteração do aplicativo ou do limite de espera; evidência inicial preservada.
+- Validadas sete contas: 42 verificações CLI, sete imports e 14 versões efetivas.
+  Conferidos 84 arquivos; 15 dependências, pip e links globais preservados.
+- Integrada a [PR #18](https://github.com/TheViniAlmeida/session-migrate/pull/18)
+  após **38 checks de CI aprovados**. O worker do teste de API passou a usar
+  um interpretador disponível dentro do isolamento do runner.
+
 ## 21/10/2026 — DEV13
 
 - Adicionado suporte testado a Claude Code 2.1.303/2.1.306 e Codex 0.163.0,
