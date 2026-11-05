@@ -8,6 +8,25 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
+## 05/11/2026 — DEV14
+
+- Adicionado suporte ao OpenCode 2.2.5 na migração e nas APIs públicas,
+  preservando os contratos 2.0/2.1 e a auditoria conservativa de campos privados.
+- Validados import/export standalone e conectado, autenticação, identidade do
+  backend, listagem de sessões/mensagens e retomada de filha persistente.
+- Adicionados Claude Code 2.1.317/2.1.318 e Codex 0.166.0 às versões exatas
+  comprovadas, mantendo as versões e os escritores anteriores.
+- Corrigida a classificação de contexto tipado do Codex com metadata de
+  proveniência; ele não vira mensagem do usuário. Uso permanece separado por
+  escopo, com campos desconhecidos explícitos.
+- Mantidas as limitações do leitor offline Codex para rollouts comprimidos e
+  históricos dependentes de `history_base`; os testes do cliente nativo não
+  promovem esses formatos a fontes suportadas pelo migrador.
+- Acrescentados gates atuais ao CI e OpenCode 2.2.5 à matriz nativa da TUI.
+- Documentados esquema e plano para árvores de sessões persistentes,
+  prioritariamente Claude → OpenCode, com vínculos comprovados ou declaração
+  manual explícita. A migração automática de árvores ainda não está habilitada.
+
 ## 21/10/2026 — DEV13
 
 - Adicionado suporte testado a Claude Code 2.1.303/2.1.306 e Codex 0.163.0,

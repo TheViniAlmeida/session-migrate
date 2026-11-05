@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from session_migrate.audit_adapters import strict_decode
-from session_migrate.formats import claude, codex
+from session_migrate.formats import claude, codex, opencode_v2
 from session_migrate.model import AgentFormat
 
 DIMENSIONS = ("input", "output", "cached_input", "cache_read", "cache_write", "reasoning", "total")
@@ -68,7 +68,7 @@ def decode_usage(raw: bytes, source_format: AgentFormat, client: str, maximum: i
     supported = {
         AgentFormat.CLAUDE: claude.VALIDATED_CLAUDE_VERSIONS,
         AgentFormat.CODEX: codex.VALIDATED_LEGACY_VERSIONS | codex.VALIDATED_PAGINATED_VERSIONS,
-        AgentFormat.OPENCODE: {"2.0.22", "2.0.23"},
+        AgentFormat.OPENCODE: opencode_v2.VALIDATED_VERSIONS,
     }
     if client not in supported.get(source_format, ()):
         return ()

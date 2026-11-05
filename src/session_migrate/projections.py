@@ -17,7 +17,7 @@ from weakref import WeakKeyDictionary
 
 from session_migrate.canonical import _json_bytes
 from session_migrate.conversion import ConversionArtifact, ConversionOptions
-from session_migrate.formats import claude, codex
+from session_migrate.formats import claude, codex, opencode_v2
 from session_migrate.lineage import Coverage, PolicyVersions
 from session_migrate.model import AgentFormat, Session, TargetFormat
 from session_migrate.native_snapshots import NativeSnapshot, SourceCaptureContext
@@ -37,7 +37,7 @@ _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _CLIENTS = {
     TargetFormat.CLAUDE: claude.VALIDATED_CLAUDE_VERSIONS,
     TargetFormat.CODEX: codex.VALIDATED_TARGET_VERSIONS,
-    TargetFormat.OPENCODE: {"2.0.22", "2.0.23", "2.1.1"},
+    TargetFormat.OPENCODE: opencode_v2.VALIDATED_VERSIONS,
 }
 
 
@@ -73,7 +73,8 @@ class SourceVersionContext:
     def __post_init__(self) -> None:
         require(self.source_format is AgentFormat.OPENCODE, "unsupported_policy")
         require(
-            type(self.source_client) is str and self.source_client in {"2.0.22", "2.0.23", "2.1.1"},
+            type(self.source_client) is str
+            and self.source_client in opencode_v2.VALIDATED_VERSIONS,
             "unsupported_policy",
         )
         require(isinstance(self.virtual_source_path, Path))
@@ -430,7 +431,9 @@ def prepare_projection(
             "context_mismatch",
         )
         require(
-            parsed_source.cli_version in (None, "2.0.22", "2.0.23", "2.1.1"), "context_mismatch"
+            parsed_source.cli_version is None
+            or parsed_source.cli_version in opencode_v2.VALIDATED_VERSIONS,
+            "context_mismatch",
         )
         parsed_source = replace(
             parsed_source,

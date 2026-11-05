@@ -1456,12 +1456,12 @@ def _prepare_lineage_projection(state: _PreparedState):
     known_sources = {
         AgentFormat.CLAUDE: claude.VALIDATED_CLAUDE_VERSIONS,
         AgentFormat.CODEX: codex.VALIDATED_LEGACY_VERSIONS | codex.VALIDATED_PAGINATED_VERSIONS,
-        AgentFormat.OPENCODE: {"2.0.22", "2.0.23", "2.1.1"},
+        AgentFormat.OPENCODE: opencode_v2.VALIDATED_VERSIONS,
     }
     known_targets = {
         TargetFormat.CLAUDE: claude.VALIDATED_CLAUDE_VERSIONS,
         TargetFormat.CODEX: codex.VALIDATED_TARGET_VERSIONS,
-        TargetFormat.OPENCODE: {"2.0.22", "2.0.23", "2.1.1"},
+        TargetFormat.OPENCODE: opencode_v2.VALIDATED_VERSIONS,
     }
     if artifact.source.cli_version not in known_sources.get(
         artifact.source.source_format, ()

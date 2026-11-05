@@ -1,4 +1,43 @@
-# Current Claude Code and Codex compatibility
+# Current client compatibility
+
+DEV14 adds OpenCode **2.2.5**, Claude Code **2.1.317 / 2.1.318** and Codex
+**0.166.0**, checked on 5 November 2026. The existing exact contracts below are
+retained. OpenCode recognizes the 2.2 transfer schema, but native title and audit
+proofs are pinned to 2.2.5. GitHub's generic OpenCode `releases/latest` still
+points to the older 1.x series; the explicit 2.2.5 release is the target.
+
+OpenCode 2.2.5 keeps the 2.1 public transfer shape, supports `time.busy`, and
+moves some storage internally into blobs without exposing those details to the
+migrator. The current checks cover CLI standalone and connected `--server`
+import/export, authenticated API identity, session/message listing, cold reopen,
+and an independently resumed persistent child with `parentID`. The importer
+requires the parent to exist first. Omitting `parentID` from the list API includes
+children; the ordinary CLI list returns roots only.
+
+Codex 0.166.0 has per-content `content_item_metadata.provenance` in addition to
+`content_item_kinds`. Typed provider context remains opaque rather than becoming
+a user message. Literal user text is not filtered by a text-prefix guess.
+Unknown provenance retains the audit's UNKNOWN classification. The native client
+can read compressed `.jsonl.zst` rollouts, including inherited fork history;
+**the migrator's offline reader does not support compressed rollouts or resolve
+shared `history_base` dependencies**. Those native-client probes do not certify
+migration of those sources. Missing/unsupported input remains a reported limit.
+
+Claude 2.1.317/318 retains the historical portable writer contract. Independent
+fork and cold-resume tests confirm that a CLI fork is a separate persistent
+session, while its transcript does not provide a proven parent-session pointer.
+Desktop nesting metadata requires a separate evidence-backed adapter. The
+[persistent-session hierarchy design](persistent-session-hierarchy.md) specifies
+that work; it does not enable automatic tree migration in this release.
+
+The `claude-nov`, `codex-nov` and `opencode-v22` CI selectors keep the October
+selectors intact; the keyboard migration matrix also includes OpenCode 2.2.5.
+
+November primary releases: [OpenCode 2.2.5](https://github.com/anomalyco/opencode/releases/tag/v2.2.5),
+[Claude 2.1.318](https://github.com/anthropics/claude-code/releases/tag/v2.1.318),
+[Codex 0.166.0](https://github.com/openai/codex/releases/tag/rust-v0.166.0).
+
+## October contracts retained
 
 DEV13 adds exact tested contracts for Claude Code **2.1.303 / 2.1.306** and
 Codex **0.163.0**. The published stable versions checked on 21 October 2026

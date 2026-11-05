@@ -332,11 +332,16 @@ def audit(records, snapshot, policy) -> AdapterResult:
                         if content and content_kinds == ():
                             taxonomy.issue("invalid_content_item_kinds", record.index)
                             content = []
+                        content_sources = parser._message_content_sources(payload)
+                        if content and content_sources == ():
+                            taxonomy.issue("invalid_content_item_metadata", record.index)
+                            content = []
                         for block_index, block_value in enumerate(content):
                             if (
-                                content_kinds is not None
-                                and content_kinds[block_index]
-                                in parser.PROVIDER_CONTEXT_CONTENT_KINDS
+                                parser._provider_context_kind(
+                                    content_kinds, content_sources, block_index
+                                )
+                                is not None
                             ):
                                 taxonomy.loss_records.add(record.index)
                                 taxonomy.issue("provider_body_known_loss", record.index)

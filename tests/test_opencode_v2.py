@@ -294,7 +294,9 @@ def test_v2_private_provider_state_accounted(tmp_path):
         ("opencode v2.0.23", True),
         ("2.0.23-gateway.3648f00e", True),
         ("2.1.0", True),
-        ("2.2.0", False),
+        ("2.2.0", True),
+        ("2.2.5", True),
+        ("2.3.0", False),
         ("3.0.0", False),
         ("9.9.9", False),
         ("1.17.20", True),
@@ -348,7 +350,7 @@ def test_native_v2_isolated_import_export_dry_run_and_collision(tmp_path):
     for value in [env["HOME"], *(env[k] for k in env if k.startswith("XDG_"))]:
         Path(value).mkdir()
     release = conversion._opencode_version(Path(native), env)
-    assert release in {"2.0.22", "2.0.23", "2.1.1"}
+    assert release in {"2.0.22", "2.0.23", "2.1.1", "2.2.5"}
     target = artifact(tmp_path, release)
     # Include a native completed compaction and linked tool output from the Codex fixture.
     value = json.loads(target.native_bytes)

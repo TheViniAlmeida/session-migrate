@@ -18,13 +18,36 @@ from session_migrate.jsonl import JsonlRecord, encode_jsonl, iter_jsonl_bytes, r
 from session_migrate.model import AgentFormat, Event, EventKind, Provenance, Role, Session
 
 PINNED_CODEX_VERSION = "0.144.4"
-VALIDATED_LEGACY_VERSIONS = frozenset({"0.144.4", "0.163.0"})
-VALIDATED_PAGINATED_VERSIONS = frozenset({"0.153.4", "0.163.0"})
-VALIDATED_TARGET_VERSIONS = frozenset({"0.144.4", "0.163.0"})
+VALIDATED_LEGACY_VERSIONS = frozenset({"0.144.4", "0.163.0", "0.166.0"})
+VALIDATED_PAGINATED_VERSIONS = frozenset({"0.153.4", "0.163.0", "0.166.0"})
+VALIDATED_TARGET_VERSIONS = frozenset({"0.144.4", "0.163.0", "0.166.0"})
 
 # Harness-owned metadata classifies content entries independently of their text.
 # Latest Codex also appends these entries when resuming an older legacy rollout.
-PROVIDER_CONTEXT_CONTENT_KINDS = frozenset({"environments.environment_context"})
+PROVIDER_CONTEXT_CONTENT_KINDS = frozenset(
+    {
+        "environments.environment_context",
+        "agents_md.instructions",
+        "hooks.additional_context",
+        "multi_agent.subagent_notification",
+        "multi_agent.inter_agent_message",
+        "multi_agent.inter_agent_completion_message",
+        "agent_message_board.notification",
+        "current_time.reminder",
+        "current_time.unavailable",
+        "plugins.recommendations",
+        "generic.turn_aborted",
+        "guardian.retained_instructions",
+        "guardian.sender_messages",
+        "guardian.context_omission",
+        "compaction.summary",
+        "recap.prompt",
+        "realtime_conversation.delegation",
+        "apply_patch.legacy_exec_command_warning",
+        "model_switch.legacy_mismatch_warning",
+        "unified_exec.legacy_process_limit_warning",
+    }
+)
 
 # Codex 0.147+ paginated rollouts persist canonical TurnItems in
 # event_msg/item_completed records. Provider response_item messages are not an
@@ -678,6 +701,64 @@ def _message_content_kinds(payload: dict[str, Any]) -> tuple[str, ...] | None:
     return tuple(kinds)
 
 
+def _message_content_sources(payload: dict[str, Any]) -> tuple[str, ...] | None:
+    """Read aligned host attribution without inferring a source from message text."""
+
+    metadata = object_value(payload.get("internal_chat_message_metadata_passthrough"))
+    sources = metadata.get("content_item_metadata")
+    if sources is None:
+        return None
+    content = payload.get("content")
+    if (
+        not isinstance(sources, list)
+        or not isinstance(content, list)
+        or len(sources) != len(content)
+    ):
+        return ()
+    result: list[str] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            return ()
+        if (
+            source.get("harness_injected") is not None
+            and type(source["harness_injected"]) is not bool
+        ):
+            return ()
+        if source.get("source_tool_namespace") is not None and not isinstance(
+            source["source_tool_namespace"], str
+        ):
+            return ()
+        provenance = source.get("provenance")
+        if provenance is not None:
+            if not isinstance(provenance, dict) or not isinstance(provenance.get("type"), str):
+                return ()
+            result.append(provenance["type"])
+        elif isinstance(source.get("source_tool_namespace"), str):
+            result.append("tool")
+        elif source.get("harness_injected") is True:
+            result.append("harness")
+        else:
+            # Historical false/absent attribution does not prove a user source.
+            result.append("unknown")
+    return tuple(result)
+
+
+def _provider_context_kind(
+    content_kinds: tuple[str, ...] | None,
+    content_sources: tuple[str, ...] | None,
+    index: int,
+) -> str | None:
+    kind = content_kinds[index] if content_kinds else None
+    if kind in PROVIDER_CONTEXT_CONTENT_KINDS or (
+        kind and (kind.endswith(".internal_context") or kind.startswith("additional_content."))
+    ):
+        return kind
+    source = content_sources[index] if content_sources else None
+    if source is not None and source not in {"user", "unknown", "user_configured"}:
+        return f"provenance:{source}"
+    return None
+
+
 def _response_item_events(
     payload: dict[str, Any],
     timestamp: str | None,
@@ -715,23 +796,31 @@ def _response_item_events(
                     provenance=provenance,
                 )
             ]
+        content_sources = _message_content_sources(payload)
+        if content and content_sources == ():
+            return [
+                Event(
+                    kind=EventKind.OPAQUE,
+                    timestamp=timestamp,
+                    payload={"reason": "invalid_content_item_metadata"},
+                    provenance=provenance,
+                )
+            ]
         for block_index, block in enumerate(content):
             block_provenance = Provenance(
                 provenance.record_index,
                 provenance.record_type,
                 block_index=block_index,
             )
-            if (
-                content_kinds is not None
-                and content_kinds[block_index] in PROVIDER_CONTEXT_CONTENT_KINDS
-            ):
+            context_kind = _provider_context_kind(content_kinds, content_sources, block_index)
+            if context_kind is not None:
                 result.append(
                     Event(
                         kind=EventKind.OPAQUE,
                         timestamp=timestamp,
                         payload={
                             "reason": "provider_context_message",
-                            "source_content_kind": content_kinds[block_index],
+                            "source_content_kind": context_kind,
                         },
                         provenance=block_provenance,
                     )

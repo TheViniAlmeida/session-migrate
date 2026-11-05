@@ -219,7 +219,10 @@ def test_latest_emission_keeps_the_existing_writer_default():
     emitted, _ = claude.serialize(source, session_id="target", cwd=Path("/fixture/work"))
 
     assert claude.PINNED_CLAUDE_VERSION == "2.1.209"
-    assert frozenset({"2.1.209", "2.1.303", "2.1.306"}) == claude.VALIDATED_CLAUDE_VERSIONS
+    assert (
+        frozenset({"2.1.209", "2.1.303", "2.1.306", "2.1.317", "2.1.318"})
+        == claude.VALIDATED_CLAUDE_VERSIONS
+    )
     assert {record.value.get("version") for record in iter_jsonl_bytes(emitted)} == {"2.1.209"}
 
 

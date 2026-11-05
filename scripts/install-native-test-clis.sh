@@ -62,6 +62,15 @@ if want claude-current; then
     "$native_root/npm/claude-current/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
   record SESSION_MIGRATE_LATEST_CLAUDE_SHA256 "$claude_current_sha256"
 fi
+if want claude-nov; then
+  npm_cli claude-nov '@anthropic-ai/claude-code@2.1.318' \
+    SESSION_MIGRATE_NOV_CLAUDE_BIN \
+    node_modules/@anthropic-ai/claude-code-linux-x64/claude
+  claude_nov_sha256=708c77b204db30086ff6f1ed34577bda03e1be74ced80557cbf7b54249ebf0bd
+  verify "$claude_nov_sha256" \
+    "$native_root/npm/claude-nov/node_modules/@anthropic-ai/claude-code-linux-x64/claude"
+  record SESSION_MIGRATE_NOV_CLAUDE_SHA256 "$claude_nov_sha256"
+fi
 if want codex; then
   npm_cli codex '@openai/codex@0.144.4' \
     SESSION_MIGRATE_CODEX_BIN \
@@ -75,6 +84,15 @@ if want codex-current; then
   verify "$codex_current_sha256" \
     "$native_root/npm/codex-current/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
   record SESSION_MIGRATE_LATEST_CODEX_SHA256 "$codex_current_sha256"
+fi
+if want codex-nov; then
+  npm_cli codex-nov '@openai/codex@0.166.0' \
+    SESSION_MIGRATE_NOV_CODEX_BIN \
+    node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex
+  codex_nov_sha256=b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8
+  verify "$codex_nov_sha256" \
+    "$native_root/npm/codex-nov/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex"
+  record SESSION_MIGRATE_NOV_CODEX_SHA256 "$codex_nov_sha256"
 fi
 if want copilot; then
   npm_cli copilot '@github/copilot@1.0.70' \
@@ -103,6 +121,13 @@ fi
 if want opencode-v21; then
   npm_cli opencode-v21 '@opencode/cli@2.1.1' \
     SESSION_MIGRATE_TEST_OPENCODE_V2 node_modules/@opencode/cli-linux-x64/bin/opencode
+fi
+if want opencode-v22; then
+  npm_cli opencode-v22 '@opencode/cli@2.2.5' \
+    SESSION_MIGRATE_TEST_OPENCODE_V2 node_modules/@opencode/cli-linux-x64/bin/opencode
+  opencode_v22_binary="$native_root/npm/opencode-v22/node_modules/@opencode/cli-linux-x64/bin/opencode"
+  verify 8d060e1d2fbb9bb44cf09ae6ed1f3f6a7cff070b5227e2f90970132b23a92050 "$opencode_v22_binary"
+  record SESSION_MIGRATE_TEST_OPENCODE_V22 "$opencode_v22_binary"
 fi
 if want pi; then
   npm_cli pi '@earendil-works/pi-coding-agent@0.80.6' \

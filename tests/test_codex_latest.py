@@ -106,9 +106,9 @@ def test_old_versions_do_not_gain_unproved_history_mode(mode, version):
 
 def test_latest_writer_keeps_legacy_schema_and_compatible_default():
     assert codex.PINNED_CODEX_VERSION == "0.144.4"
-    assert {"0.144.4", "0.163.0"} == codex.VALIDATED_LEGACY_VERSIONS
-    assert {"0.153.4", "0.163.0"} == codex.VALIDATED_PAGINATED_VERSIONS
-    assert {"0.144.4", "0.163.0"} == codex.VALIDATED_TARGET_VERSIONS
+    assert {"0.144.4", "0.163.0", "0.166.0"} == codex.VALIDATED_LEGACY_VERSIONS
+    assert {"0.153.4", "0.163.0", "0.166.0"} == codex.VALIDATED_PAGINATED_VERSIONS
+    assert {"0.144.4", "0.163.0", "0.166.0"} == codex.VALIDATED_TARGET_VERSIONS
     data, dropped = codex.serialize_events(
         [
             Event(

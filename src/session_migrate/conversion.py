@@ -657,7 +657,7 @@ def load_opencode_session(
     if not opencode.supported_version(observed_version):
         raise SessionMigrateError(
             "OpenCode source CLI version mismatch: expected "
-            f"{opencode.PINNED_OPENCODE_VERSION} or supported 2.0.x/2.1.x, "
+            f"{opencode.PINNED_OPENCODE_VERSION} or supported 2.0.x/2.1.x/2.2.x, "
             f"observed {observed_version}"
         )
     temporary_root = values.get("TMPDIR")
@@ -2102,7 +2102,7 @@ def install_opencode_artifact(
     if not opencode.supported_version(artifact.target_cli_version):
         raise SessionMigrateError(
             "automatic OpenCode import requires target metadata version 1.17.20 "
-            "or supported 2.0.x/2.1.x"
+            "or supported 2.0.x/2.1.x/2.2.x"
         )
     cli = _resolve_opencode_cli(target_cli, values)
     observed_version = _opencode_version(cli, values)

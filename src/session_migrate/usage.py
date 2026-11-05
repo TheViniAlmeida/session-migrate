@@ -34,11 +34,16 @@ _SCHEMAS = {
     ("claude", "2.1.209"): "claude-jsonl-v1",
     ("claude", "2.1.303"): "claude-jsonl-v1",
     ("claude", "2.1.306"): "claude-jsonl-v1",
+    ("claude", "2.1.317"): "claude-jsonl-v1",
+    ("claude", "2.1.318"): "claude-jsonl-v1",
     ("codex", "0.144.4"): "codex-legacy",
     ("codex", "0.153.4"): "codex-paginated",
     ("codex", "0.163.0"): ("codex-legacy", "codex-paginated"),
+    ("codex", "0.166.0"): ("codex-legacy", "codex-paginated"),
     ("opencode", "2.0.22"): "opencode-session-transfer-v2",
     ("opencode", "2.0.23"): "opencode-session-transfer-v2",
+    ("opencode", "2.1.1"): "opencode-session-transfer-v2",
+    ("opencode", "2.2.5"): "opencode-session-transfer-v2",
 }
 
 

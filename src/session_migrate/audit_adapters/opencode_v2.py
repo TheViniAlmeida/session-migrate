@@ -23,7 +23,7 @@ from session_migrate.audit_adapters import (
 from session_migrate.errors import SessionMigrateError
 from session_migrate.formats import opencode as parser
 
-_CLIENTS = frozenset({"2.0.22", "2.0.23", "2.1.1"})
+_CLIENTS = frozenset({"2.0.22", "2.0.23", "2.1.1", "2.2.5"})
 
 MODEL = obj(
     {
@@ -227,7 +227,7 @@ def audit(value, snapshot, policy) -> AdapterResult:
     client = policy.client_version
     if client not in _CLIENTS:
         taxonomy.issue("unsupported_client_version", 0)
-    schema_21 = client == "2.1.1"
+    schema_21 = client in {"2.1.1", "2.2.5"}
     info = value.get("info") if type(value) is dict else None
     info = info if type(info) is dict else {}
     grammar = obj(
@@ -245,7 +245,11 @@ def audit(value, snapshot, policy) -> AdapterResult:
                     ),
                     "cost": NUMBER,
                     "tokens": TOKENS,
-                    "time": CLOCK,
+                    "time": (
+                        obj({**CLOCK.fields, "busy": scalar(LOSS, int)}, required=("created",))
+                        if client == "2.2.5"
+                        else CLOCK
+                    ),
                     "metadata": subtree(UNKNOWN),
                     "permissions": subtree(UNKNOWN),
                     "revert": subtree(UNKNOWN),

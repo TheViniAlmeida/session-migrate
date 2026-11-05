@@ -26,7 +26,9 @@ from session_migrate.model import AgentFormat, Event, EventKind, Provenance, Rol
 PINNED_CLAUDE_VERSION = "2.1.209"
 # Exact clients with separately tested reader and portable-emission contracts.
 # Keep the writer default stable for existing migration artifacts.
-VALIDATED_CLAUDE_VERSIONS = frozenset({PINNED_CLAUDE_VERSION, "2.1.303", "2.1.306"})
+VALIDATED_CLAUDE_VERSIONS = frozenset(
+    {PINNED_CLAUDE_VERSION, "2.1.303", "2.1.306", "2.1.317", "2.1.318"}
+)
 TITLE_TYPES = {"custom-title": "customTitle", "ai-title": "aiTitle"}
 
 

@@ -40,7 +40,8 @@ def test_paginated_aliases_remain_separate_unproven_scopes(tmp_path):
     assert not samples[1].identity_parts and not samples[2].identity_parts
 
 
-def test_opencode_no_per_message_fallback_or_cost_inference(tmp_path):
+@pytest.mark.parametrize("version", ["2.0.23", "2.1.1", "2.2.5"])
+def test_opencode_no_per_message_fallback_or_cost_inference(tmp_path, version):
     value = {
         "info": {
             "id": "ses_fixture",
@@ -54,7 +55,7 @@ def test_opencode_no_per_message_fallback_or_cost_inference(tmp_path):
     path.write_text(json.dumps(value))
     path.chmod(0o600)
     snapshot = capture_source(SourceCaptureContext(AgentFormat.OPENCODE, path))
-    samples = decode_usage(snapshot.raw_bytes, AgentFormat.OPENCODE, "2.0.23", 100)
+    samples = decode_usage(snapshot.raw_bytes, AgentFormat.OPENCODE, version, 100)
     assert dict(samples[0].counters)["input"] is None
     assert samples[0].model is None and samples[0].provider is None
     assert dict(samples[1].counters)["input"] == 99
