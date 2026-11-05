@@ -514,11 +514,15 @@ def _type_exact_json_equal(left: Any, right: Any) -> bool:
 
 
 def _same_desktop_message(first: JsonlRecord, repeated: JsonlRecord) -> bool:
-    """Recognize only the captured 2.1.309 message-envelope repetition shape."""
+    """Recognize only the bounded 2.1.309 envelope repetition shapes."""
 
     for row in (first.value, repeated.value):
         kind = row.get("type")
-        if kind not in {"user", "assistant", "attachment"} or row.get("version") != "2.1.309":
+        if kind not in {"user", "assistant", "attachment", "system"} or (
+            row.get("version") != "2.1.309"
+        ):
+            return False
+        if kind == "system" and row.get("subtype") != "stop_hook_summary":
             return False
         if not {"uuid", "parentUuid", "sessionId", "timestamp", "version", "type"} <= row.keys():
             return False
@@ -529,6 +533,10 @@ def _same_desktop_message(first: JsonlRecord, repeated: JsonlRecord) -> bool:
             return False
         if type(row["timestamp"]) is not str or not valid_rfc3339(row["timestamp"]):
             return False
+        if kind == "system":
+            # Stop-hook summaries already project as OPAQUE. Their bodies have
+            # no replay contract and remain uninterpreted, with exact equality.
+            continue
         if kind == "attachment":
             # Attachment nodes already project as OPAQUE. Equality only permits
             # graph traversal; neither physical envelope becomes replay text.

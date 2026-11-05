@@ -812,9 +812,17 @@ for path in source_root.glob('*.jsonl'):
     for row in rows:
         row['version']=SOURCE_VERSION
     if SOURCE_VERSION=='2.1.309':
-        # A late copy of the oldest message must not become the fallback leaf.
+        hook={**rows[0],'type':'system','subtype':'stop_hook_summary',
+            'uuid':rows[0]['uuid']+'-hook','parentUuid':rows[0]['uuid'],
+            'content':'HOOK_ONLY_SENTINEL','hookInfos':[{'status':'synthetic'}]}
+        hook.pop('message')
+        if len(rows)>1:
+            rows[1]['parentUuid']=hook['uuid']
+        rows.insert(1,hook)
+        # Late copies must not rewind the fallback leaf or become conversation.
         rows.append({**rows[0],'cwd':'/fixture/other','slug':'copied-envelope',
             'promptId':'copied-prompt','toolUseResult':{'unprojected':'WRAPPER_ONLY_SENTINEL'}})
+        rows.append({**hook,'slug':'repeated-hook'})
     path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
 inventory=inventory_from_explicit_manifest(declaration,root=source_root,source_format='claude',
     client_version=SOURCE_VERSION)
@@ -932,6 +940,7 @@ assert replay.count('PRIVATE_BODY_SENTINEL parent')==1
 assert 'PRIVATE_BODY_SENTINEL grandchild' not in replay
 assert 'PRIVATE_BODY_SENTINEL sibling' not in replay
 assert 'WRAPPER_ONLY_SENTINEL' not in replay
+assert 'HOOK_ONLY_SENTINEL' not in replay
 if server is not None:
     server.terminate()
     server.wait(timeout=10)

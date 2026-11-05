@@ -13,7 +13,8 @@ publicação no PyPI nem atualização automática das instalações existentes.
 - Adicionado [contrato limitado de leitura Claude Desktop 2.1.309](docs/claude-desktop-309.md)
   para migração individual e árvore, sem alterar versões nos arquivos nem
   certificar emissão nativa, completude ou uso de tokens nessa versão.
-- Cópias de mensagens/attachments com conteúdo e ancestrais idênticos admitem
+- Cópias de mensagens/attachments e system/stop_hook_summary com conteúdo
+  e ancestrais idênticos admitem
   diferenças apenas em cwd/slug/promptId/toolUseResult. Cada envelope omitido
   fica contabilizado; o hash e a contagem físicos são preservados.
 - Cópias tardias não rebobinam a mensagem final. Cwd conflitante exige destino

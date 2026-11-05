@@ -18,8 +18,10 @@ are not admitted to tree inventory by this change.
 
 ## Duplicate envelope contract
 
-Only exact-309 `user`, `assistant` and `attachment` records can qualify.
-Attachments remain opaque, including their original occurrence. A duplicate
+Only exact-309 `user`, `assistant`, `attachment`, and
+`system`/`stop_hook_summary` records can qualify. Attachments and stop-hook
+summaries remain opaque, including their original occurrence. Other system
+subtypes and repeated compact boundaries are not accepted. A duplicate
 must contain an explicit UUID, parent, session identity, timestamp and version.
 The complete JSON must be equal, including JSON types, list order and presence
 versus absence of fields, except for these top-level envelope fields:

@@ -309,6 +309,132 @@ def test_compact_boundary_duplicate_still_rejected():
         _parse(rows)
 
 
+def stop_hook_summary(**fields):
+    row = desktop(uid="hook", parent="u")
+    row.pop("message")
+    row.update(
+        type="system",
+        subtype="stop_hook_summary",
+        content={"uninterpreted": ["HOOK_BODY_SENTINEL", 7, None]},
+        hookInfos=[{"command": "SYNTHETIC_HOOK_SENTINEL", "result": {"value": 1}}],
+    )
+    row.update(fields)
+    return row
+
+
+@pytest.mark.parametrize("late_copy", [False, True])
+@pytest.mark.parametrize("cwd_conflict", [False, True])
+def test_stop_hook_summary_duplicates_remain_opaque_with_physical_loss(late_copy, cwd_conflict):
+    hook = stop_hook_summary()
+    repeated = copy.deepcopy(hook)
+    repeated["slug"] = "another-wrapper"
+    if cwd_conflict:
+        repeated["cwd"] = "/fixture/other"
+    answer = desktop("assistant", "a", "hook", "answer")
+    rows = [desktop(), hook, answer, repeated] if late_copy else [desktop(), hook, repeated, answer]
+    before = copy.deepcopy(rows)
+    source = _parse(rows)
+    assert messages(source) == ["request", "answer"]
+    assert source.raw_record_count == 4
+    assert source.source_sha256 == hashlib.sha256(encode_jsonl(rows)).hexdigest()
+    assert source.cwd == (None if cwd_conflict else Path("/fixture/work"))
+    opaque = [event for event in source.events if event.kind is EventKind.OPAQUE]
+    assert [event.provenance.record_index for event in opaque] == [1, 3 if late_copy else 2]
+    duplicate_reason = (
+        "duplicate_envelope_cwd_conflict" if cwd_conflict else "duplicate_desktop_message_envelope"
+    )
+    assert [event.payload["reason"] for event in opaque] == [
+        "active_graph_metadata_record",
+        duplicate_reason,
+    ]
+    assert rows == before
+    assert "HOOK_BODY_SENTINEL" not in repr(source.events)
+    assert "SYNTHETIC_HOOK_SENTINEL" not in repr(source.events)
+    _emitted, dropped = claude.serialize(source, session_id="target", cwd=Path("/fixture/work"))
+    assert dropped == {
+        "opaque:active_graph_metadata_record": 1,
+        f"opaque:{duplicate_reason}": 1,
+    }
+    audit, observation = _observe(rows)
+    assert audit.coverage is observation.coverage is Coverage.UNKNOWN
+    assert observation.fidelity is Coverage.PARTIAL
+    assert audit.client_id is None
+    issues = dict(audit.issue_counts)
+    assert issues["duplicate_envelope_unproven"] == issues["duplicate_envelope_loss"] == 1
+    assert "invalid_graph" not in issues
+    assert "parser_rejected_source" not in issues
+    assert {atom.record_index for atom in audit.atoms} == {0, 1, 2, 3}
+
+
+def test_stop_hook_summary_duplicate_does_not_require_an_unproven_body_shape():
+    hook = stop_hook_summary()
+    hook.pop("content")
+    hook.pop("hookInfos")
+    rows = [desktop(), hook, desktop("assistant", "a", "hook", "answer"), copy.deepcopy(hook)]
+    source = _parse(rows)
+    assert messages(source) == ["request", "answer"]
+    assert sum(event.kind is EventKind.OPAQUE for event in source.events) == 2
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("subtype", "compact_boundary"),
+        ("subtype", "other_hook_summary"),
+        ("content", {"uninterpreted": ["changed", 7, None]}),
+        ("hookInfos", [{"command": "changed", "result": {"value": 1}}]),
+        ("hookInfos", [{"command": "SYNTHETIC_HOOK_SENTINEL", "result": {"value": True}}]),
+        ("hookInfos", [{"command": "SYNTHETIC_HOOK_SENTINEL", "result": {"value": 1.0}}]),
+        ("parentUuid", "another-parent"),
+        ("sessionId", "another-session"),
+        ("logicalParentUuid", "another-parent"),
+        ("isSidechain", True),
+        ("version", "2.1.318"),
+        ("timestamp", "2026-11-05T21:00:53-03:00"),
+        ("message", {"role": "user", "content": "unexpected"}),
+        ("unknownField", None),
+    ],
+)
+def test_stop_hook_summary_duplicate_conflicts_remain_rejected(field, value, tmp_path):
+    hook = stop_hook_summary()
+    repeated = {**copy.deepcopy(hook), field: value}
+    rows = [desktop(), hook, desktop("assistant", "a", "hook", "answer"), repeated]
+    with pytest.raises(SessionMigrateError, match="duplicate record UUID"):
+        _parse(rows)
+    audit = audit_rows(rows, tmp_path)
+    assert audit.coverage is Coverage.UNKNOWN
+    assert "invalid_graph" in dict(audit.issue_counts)
+    assert "parser_rejected_source" in dict(audit.issue_counts)
+
+
+@pytest.mark.parametrize("subtype", [None, "compact_boundary", "other_hook_summary"])
+def test_other_system_duplicate_subtypes_stay_rejected(subtype):
+    hook = stop_hook_summary(subtype=subtype)
+    rows = [desktop(), hook, desktop("assistant", "a", "hook", "answer"), copy.deepcopy(hook)]
+    with pytest.raises(SessionMigrateError, match="duplicate record UUID"):
+        _parse(rows)
+
+
+@pytest.mark.parametrize("field", ["parentUuid", "sessionId", "timestamp", "version", "type"])
+def test_stop_hook_summary_duplicate_requires_same_explicit_envelope_fields(field):
+    hook = stop_hook_summary()
+    hook.pop(field)
+    rows = [desktop(), hook, desktop("assistant", "a", "hook", "answer"), copy.deepcopy(hook)]
+    with pytest.raises(SessionMigrateError, match="duplicate record UUID"):
+        _parse(rows)
+
+
+@pytest.mark.parametrize("cycle", [False, True])
+def test_stop_hook_summary_duplicate_does_not_repair_missing_parent_or_cycle(cycle, tmp_path):
+    hook = stop_hook_summary(parentUuid="a" if cycle else "missing")
+    rows = [desktop(), hook, desktop("assistant", "a", "hook", "answer"), copy.deepcopy(hook)]
+    with pytest.raises(SessionMigrateError, match="ancestry cycle" if cycle else "missing parent"):
+        _parse(rows)
+    issues = dict(audit_rows(rows, tmp_path).issue_counts)
+    assert "invalid_graph" in issues
+    assert "parser_rejected_source" in issues
+
+
 @pytest.mark.parametrize("value", [None, "", "invalid-timestamp", 1, True])
 def test_duplicate_timestamp_must_be_explicit_valid_text(value):
     first = desktop()
