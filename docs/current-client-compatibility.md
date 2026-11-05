@@ -45,6 +45,9 @@ The [309 reader contract](claude-desktop-309.md) admits exact-309 tree inventori
 and narrowly matching duplicate envelopes. This is separate from the validated
 client registry: coverage stays UNKNOWN, native writer/usage certification is not
 added, conflicting content/ancestry and missing active parents remain errors.
+Reviewed trees for OpenCode 2.2.5 can archive genuinely open tool calls through
+a versioned proof of `ImportedIncompleteTool`; explicit losses and typed native
+export verification are required, without granting full-history authority.
 
 ## October contracts retained
 

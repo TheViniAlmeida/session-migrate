@@ -819,6 +819,11 @@ for path in source_root.glob('*.jsonl'):
         if len(rows)>1:
             rows[1]['parentUuid']=hook['uuid']
         rows.insert(1,hook)
+        last=next(row for row in reversed(rows) if row['type'] in ('user','assistant'))
+        rows.append({**rows[0],'type':'assistant','uuid':rows[0]['uuid']+'-open-call',
+            'parentUuid':last['uuid'],'message':{'role':'assistant','content':[{
+                'type':'tool_use','id':'archived-call','name':'Read',
+                'input':{'file_path':'ARCHIVE_INPUT_SENTINEL'}}]}})
         # Late copies must not rewind the fallback leaf or become conversation.
         rows.append({**rows[0],'cwd':'/fixture/other','slug':'copied-envelope',
             'promptId':'copied-prompt','toolUseResult':{'unprojected':'WRAPPER_ONLY_SENTINEL'}})
@@ -900,6 +905,14 @@ for index,native_id in enumerate(ids):
     document=json.loads(export.stdout)
     assert document['info'].get('parentID')==proposal['nodes'][index]['parent_target_id']
     assert document['messages']
+    if SOURCE_VERSION=='2.1.309':
+        tools=[part for message in document['messages'] for part in message.get('content',[])
+            if isinstance(part,dict) and part.get('type')=='tool']
+        assert len(tools)==1
+        assert tools[0]['id']=='archived-call' and tools[0]['name']=='Read'
+        assert tools[0]['state']=={'status':'error','input':{'file_path':'ARCHIVE_INPUT_SENTINEL'},
+            'error':{'type':'ImportedIncompleteTool',
+                'message':'Imported call had no completed result'}}
     if index==0: parent_before=document
     if index==1: child_before=document
 assert json.dumps(child_before).count('PRIVATE_BODY_SENTINEL parent')==1
@@ -941,6 +954,9 @@ assert 'PRIVATE_BODY_SENTINEL grandchild' not in replay
 assert 'PRIVATE_BODY_SENTINEL sibling' not in replay
 assert 'WRAPPER_ONLY_SENTINEL' not in replay
 assert 'HOOK_ONLY_SENTINEL' not in replay
+if SOURCE_VERSION=='2.1.309':
+    assert 'ARCHIVE_INPUT_SENTINEL' in replay
+    assert 'Imported call had no completed result' in replay
 if server is not None:
     server.terminate()
     server.wait(timeout=10)

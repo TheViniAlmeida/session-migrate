@@ -138,7 +138,7 @@ not bypass source parsing or resolve the five reported compaction cases.
 
 ## Release validation
 
-The local selected suites passed **630 tests**: 290 parser/conversion/tree
+The local selected suites passed **668 tests**: 328 parser/conversion/tree
 regressions, 325 audit/projection/operation/usage regressions, 13 CLI checks and
 2 real OpenCode 2.2.5 gates (standalone and connected server). The native gates
 used private filesystem/network namespaces, four-node families, cold server
@@ -155,3 +155,47 @@ passed. The wheel's 91 package files were compared to the reviewed sources.
 This does not certify Claude Desktop native replay or the five unresolved
 compaction transcripts. No real conversation was read or migrated, and this
 release preparation does not update existing installations automatically.
+
+### Reviewed archival of unsettled tool calls
+
+A transcript that parses is not automatically eligible for publication. The
+strict `portable-projection-v1` policy still rejects `open_tool_call`. Reviewed
+tree operations targeting **OpenCode 2.2.5** can now select the versioned
+`portable-opencode-225-archive-v1` policy when the source has an open call.
+The existing `reviewed_tree_projection` core request opt-in is bound to the
+operation's options hash; the tree coordinator requires explicit acknowledgement
+of partial projection before any import.
+
+| Source tool result | Parser calls/results | Reviewed tree behavior |
+| --- | --- | --- |
+| Absent | 1 / 0 | Archive the call as `ImportedIncompleteTool`, with a declared loss |
+| Empty string | 1 / 1 | Preserve a completed result |
+| Empty list | 1 / 1 | Preserve a completed result |
+| Only `tool_reference` | 1 / 1 | Preserve the result; declare reference-content loss |
+
+Empty and reference-only results are never silently removed by the parser or
+audit normalization. The archive transformation preserves the call ID, name and
+input and creates an explicit **target-side error**, not a successful source
+result. The source witness still reports the open call. A generated relation
+binds each target error to its original call, and the expected projection is
+computed independently of the writer.
+
+Prepare and observed-export verification check the raw typed marker, ID, name,
+input and exact error message. Replacing it with a same-text `ToolError`, success,
+a marker on another call, or extra/missing markers does not pass. Only genuinely
+open calls qualify: missing names/IDs, duplicate calls/results, orphan or
+ambiguous results and identity mismatches remain errors. Other target versions
+and the default strict projection policy are unchanged.
+
+Every archived call contributes explicit losses. Source coverage **UNKNOWN**
+stays UNKNOWN; known source coverage can be PARTIAL. No archive projection with
+generated errors receives a completeness certificate or delta/update authority.
+The direct CLI does not implicitly enable the reviewed-tree opt-in. Use the
+reviewed tree workflow, including its existing `--acknowledge-partial` step.
+
+Cold reconciliation support is not expanded: the existing native-format and
+UNKNOWN proof gates can still return `context_unavailable` or
+`proof_unavailable`. Uncertain imports are never automatically repeated.
+Completed tree nodes remain protected by their existing source/target/ledger
+checks; organizational parents are verified independently of tool archival.
+The five unresolved compaction inputs are still refused before this stage.

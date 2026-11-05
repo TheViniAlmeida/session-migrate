@@ -1500,7 +1500,7 @@ def _prepare_lineage_projection(state: _PreparedState):
         return prepared, prepared.versions, None
     if state.built.request.command == OperationKind.CONVERT or state.built.source_snapshot is None:
         return None, None, None
-    from session_migrate.projection_policies import ProjectionPolicy
+    from session_migrate.projection_policies import OPENCODE_ARCHIVE_POLICY_ID, ProjectionPolicy
     from session_migrate.projections import (
         ProjectionContext,
         SourceVersionContext,
@@ -1525,6 +1525,16 @@ def _prepare_lineage_projection(state: _PreparedState):
     ) or artifact.target_cli_version not in known_targets.get(artifact.target_format, ()):
         return None, None, None
     policy = ProjectionPolicy()
+    if state.built.request.reviewed_tree_projection:
+        from session_migrate.canonical import hash_events
+
+        source_tools = dict(
+            hash_events(artifact.source.events, policy.canonical_policy).issue_counts
+        )
+        if source_tools.get("open_tool_call"):
+            # The reviewed tree request is already bound in the options hash and
+            # restricted to OpenCode 2.2.5. Its coordinator requires loss acknowledgement.
+            policy = ProjectionPolicy(OPENCODE_ARCHIVE_POLICY_ID)
     versions = PolicyVersions(
         policy.canonical_policy.algorithm,
         policy.policy_id,

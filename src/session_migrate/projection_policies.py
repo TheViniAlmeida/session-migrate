@@ -13,6 +13,7 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from session_migrate.audit_adapters import strict_decode
 from session_migrate.canonical import (
     MAX_DIAGNOSTICS,
     CanonicalPolicy,
@@ -28,6 +29,11 @@ from session_migrate.witnesses import SequenceWitness
 
 if TYPE_CHECKING:
     from session_migrate.native_audit import CanonicalObservation
+
+PORTABLE_POLICY_ID = "portable-projection-v1"
+OPENCODE_ARCHIVE_POLICY_ID = "portable-opencode-225-archive-v1"
+INCOMPLETE_TOOL_MESSAGE = "Imported call had no completed result"
+INCOMPLETE_TOOL_RULE = "opencode-225-incomplete-tool-error-v1"
 
 
 class ProjectionError(SessionMigrateError):
@@ -62,7 +68,10 @@ class ProjectionPolicy:
     canonical_policy: CanonicalPolicy = CanonicalPolicy()
 
     def __post_init__(self) -> None:
-        require(self.policy_id == "portable-projection-v1", "unsupported_policy")
+        require(
+            self.policy_id in {PORTABLE_POLICY_ID, OPENCODE_ARCHIVE_POLICY_ID},
+            "unsupported_policy",
+        )
         require(type(self.canonical_policy) is CanonicalPolicy, "unsupported_policy")
         self.canonical_policy.__post_init__()
 
@@ -78,6 +87,18 @@ class ProjectionPolicy:
         ).hexdigest()
 
 
+def policy_from_id(policy_id: str) -> ProjectionPolicy:
+    """Resolve persisted identifiers only through the supported policy registry."""
+    require(type(policy_id) is str, "unsupported_policy")
+    return ProjectionPolicy(policy_id)
+
+
+def validate_policy_target(policy: ProjectionPolicy, target: TargetFormat, client: str) -> None:
+    policy.__post_init__()
+    if policy.policy_id == OPENCODE_ARCHIVE_POLICY_ID:
+        require(target is TargetFormat.OPENCODE and client == "2.2.5", "unsupported_policy")
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class RelationMember:
     source_index: int
@@ -91,11 +112,23 @@ class RelationMember:
 
 
 @dataclass(frozen=True, slots=True, repr=False)
+class GeneratedRelationMember:
+    source_index: int
+    call_target_index: int
+    target_index: int
+    source_sha256: str
+    target_sha256: str
+    transform: str
+    rule_id: str
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class ExpectedProjection:
     policy: ProjectionPolicy
     witness: SemanticWitness
     relation: SequenceWitness
     members: tuple[RelationMember, ...]
+    generated_members: tuple[GeneratedRelationMember, ...]
     loss_counts: tuple[tuple[str, int], ...]
     metadata_loss_counts: tuple[tuple[str, int], ...]
     relation_complete: bool
@@ -105,6 +138,55 @@ class ExpectedProjection:
     @property
     def events(self) -> tuple[Event, ...]:
         return copy.deepcopy(self._events)
+
+
+def archived_tools_match(expected: ExpectedProjection, snapshot) -> bool:
+    """Check native archive markers that canonical tool errors intentionally erase.
+
+    The expected calls come only from independently derived generated bindings.
+    A same-text ordinary error, or a marker moved to another call, is not proof.
+    """
+    if expected.policy.policy_id != OPENCODE_ARCHIVE_POLICY_ID:
+        return True
+    try:
+        bundle = strict_decode(snapshot.raw_bytes)
+        tools = [
+            content
+            for message in bundle["messages"]
+            if message.get("type") == "assistant"
+            for content in message["content"]
+            if content.get("type") == "tool"
+        ]
+        marked = [
+            tool
+            for tool in tools
+            if tool.get("state", {}).get("error", {}).get("type") == "ImportedIncompleteTool"
+        ]
+        wanted = {
+            expected._events[member.call_target_index].tool_call_id: expected._events[
+                member.call_target_index
+            ]
+            for member in expected.generated_members
+        }
+        if len(marked) != len(wanted) or {tool["id"] for tool in marked} != set(wanted):
+            return False
+        for tool in marked:
+            call = wanted[tool["id"]]
+            state = tool["state"]
+            if not (
+                tool["name"] == call.tool_name
+                and state["status"] == "error"
+                and state["error"]
+                == {
+                    "type": "ImportedIncompleteTool",
+                    "message": INCOMPLETE_TOOL_MESSAGE,
+                }
+                and _json_bytes(state["input"]) == _json_bytes(call.payload["input"])
+            ):
+                return False
+        return True
+    except (SessionMigrateError, ValueError, TypeError, KeyError, AttributeError):
+        return False
 
 
 def _content(event: Event, target: TargetFormat, losses: set[str]) -> tuple[str | None, list]:
@@ -155,6 +237,8 @@ def expected_from_source(
     policy = policy if policy is not None else ProjectionPolicy()
     require(type(policy) is ProjectionPolicy, "unsupported_policy")
     policy.__post_init__()
+    archive = policy.policy_id == OPENCODE_ARCHIVE_POLICY_ID
+    require(not archive or target_format is TargetFormat.OPENCODE, "unsupported_policy")
     require(
         type(target_format) is TargetFormat
         and target_format
@@ -179,11 +263,15 @@ def expected_from_source(
     }
     raw_witness = hash_events(events, policy.canonical_policy)
     require(
-        not any(code in tool_issues for code, _ in raw_witness.issue_counts),
+        not any(
+            code in tool_issues and not (archive and code == "open_tool_call")
+            for code, _ in raw_witness.issue_counts
+        ),
         "source_tools_unproven",
     )
     projected: list[Event] = []
     origins: list[list[tuple[int, int | None, int | None]]] = []
+    generated_origins: dict[int, int] = {}
     losses_by_source: list[set[str]] = [set() for _ in events]
     transforms = ["preserve" for _ in events]
     calls: dict[str, tuple[int, Event]] = {}
@@ -257,10 +345,29 @@ def expected_from_source(
             calls[e.tool_call_id] = (index, e)
             emit(projected_call, index)
             if target_format is TargetFormat.OPENCODE:
-                result_index, result = deferred_results[e.tool_call_id]
-                emit(result_event(result, result_index, e), result_index, "associate_tool_result")
-                if result_index != index + 1:
-                    losses_by_source[result_index].add("tool_result_order_associated")
+                if e.tool_call_id in deferred_results:
+                    result_index, result = deferred_results[e.tool_call_id]
+                    emit(
+                        result_event(result, result_index, e), result_index, "associate_tool_result"
+                    )
+                    if result_index != index + 1:
+                        losses_by_source[result_index].add("tool_result_order_associated")
+                else:
+                    require(archive, "source_tools_unproven")
+                    generated = replace(
+                        projected_call,
+                        kind=EventKind.TOOL_RESULT,
+                        role=Role.TOOL,
+                        text=INCOMPLETE_TOOL_MESSAGE,
+                        payload={
+                            "content_blocks": [{"type": "text", "text": INCOMPLETE_TOOL_MESSAGE}],
+                            "is_error": True,
+                        },
+                    )
+                    projected.append(generated)
+                    origins.append([])
+                    generated_origins[id(generated)] = index
+                    losses.add("incomplete_tool_archived")
         elif e.kind is EventKind.TOOL_RESULT:
             if target_format is not TargetFormat.OPENCODE:
                 emit(result_event(e, index, calls[e.tool_call_id][1]), index)
@@ -359,8 +466,29 @@ def expected_from_source(
         for source_index, start, length in sources:
             require(source_index not in target_members)
             target_members[source_index] = (target_index, start, length)
+    generated_members = tuple(
+        GeneratedRelationMember(
+            generated_origins[id(event)],
+            target_members[generated_origins[id(event)]][0],
+            target_index,
+            original[generated_origins[id(event)]].sha256,
+            projected_units[target_index].sha256,
+            "archive_incomplete_tool",
+            INCOMPLETE_TOOL_RULE,
+        )
+        for target_index, event in enumerate(projected)
+        if id(event) in generated_origins
+    )
+    normal_targets = {target[0] for target in target_members.values()}
+    generated_targets = {member.target_index for member in generated_members}
+    require(not normal_targets & generated_targets)
+    require(normal_targets | generated_targets == set(range(len(projected_units))))
     relation_root = hashlib.sha256(
-        b"session-migrate/projection-relation/v1\0"
+        (
+            b"session-migrate/projection-relation/v2\0"
+            if archive
+            else b"session-migrate/projection-relation/v1\0"
+        )
         + bytes.fromhex(policy.sha256)
         + bytes.fromhex(source.audit.authority_sha256)
         + bytes.fromhex(source.audit.selection_sha256)
@@ -408,6 +536,21 @@ def expected_from_source(
         ).digest()
         if len(members) < MAX_DIAGNOSTICS:
             members.append(member)
+    for member in generated_members:
+        body = _json_bytes(
+            {
+                "source": member.source_index,
+                "call_target": member.call_target_index,
+                "target": member.target_index,
+                "source_sha256": member.source_sha256,
+                "target_sha256": member.target_sha256,
+                "transform": member.transform,
+                "rule_id": member.rule_id,
+            }
+        )
+        relation_root = hashlib.sha256(
+            relation_root + b"generated\0" + hashlib.sha256(body).digest()
+        ).digest()
     relation_root = hashlib.sha256(
         relation_root
         + _json_bytes(
@@ -423,6 +566,7 @@ def expected_from_source(
         hash_events(projected, policy.canonical_policy),
         SequenceWitness(len(original), relation_root.hex()),
         tuple(members),
+        generated_members,
         tuple(sorted(loss_counts.items())),
         tuple(sorted(metadata_loss_counts.items())),
         source.coverage is Coverage.VERIFIED,

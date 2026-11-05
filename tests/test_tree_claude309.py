@@ -13,7 +13,12 @@ from test_tree_operations import setup as setup
 from session_migrate.errors import SessionMigrateError
 from session_migrate.formats import opencode
 from session_migrate.model import EventKind
-from session_migrate.tree_operations import commit_tree, prepare_tree, tree_proposal
+from session_migrate.tree_operations import (
+    commit_tree,
+    prepare_tree,
+    prepare_tree_resume,
+    tree_proposal,
+)
 from session_migrate.tree_sources import inventory_from_explicit_manifest
 
 
@@ -183,3 +188,98 @@ def test_309_tool_evidence_survives_opencode_projection(tmp_path):
     assert tools[1].payload["is_error"] is True
     assert "WRAPPER_ONLY_SENTINEL" not in artifact.native_bytes.decode()
     assert artifact.dropped["opaque:duplicate_desktop_message_envelope"] == 1
+
+
+@pytest.mark.parametrize(
+    "content", ["", [], [{"type": "tool_reference", "tool_name": "Read"}], None]
+)
+@pytest.mark.parametrize("acknowledge", [False, True])
+def test_tree_distinguishes_empty_results_from_missing_results(setup, content, acknowledge):
+    from session_migrate.formats import claude
+
+    inventory, selection, options, native, imports = setup
+    root = Path(inventory.canonical_root)
+    for node in inventory.nodes:
+        path = root / node.relative_path
+        first = json.loads(path.read_text())
+        first["version"] = "2.1.309"
+        call = {
+            **first,
+            "type": "assistant",
+            "uuid": "call-node",
+            "parentUuid": first["uuid"],
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "call", "name": "Read", "input": {"file": "fixture"}}
+                ],
+            },
+        }
+        rows = [first, call]
+        if content is not None:
+            rows.append(
+                {
+                    **first,
+                    "uuid": "result-node",
+                    "parentUuid": "call-node",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {"type": "tool_result", "tool_use_id": "call", "content": content}
+                        ],
+                    },
+                }
+            )
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        parsed = claude.parse(path)
+        assert sum(e.kind is EventKind.TOOL_CALL for e in parsed.events) == 1
+        assert sum(e.kind is EventKind.TOOL_RESULT for e in parsed.events) == (content is not None)
+    inventory = inventory_from_explicit_manifest(
+        declaration(inventory), root=root, source_format="claude", client_version="2.1.309"
+    )
+    options["acknowledge_partial"] = acknowledge
+    prepared = prepare_tree(inventory, selection, **options)
+    assert tree_proposal(prepared)["coverage"] == "unknown"
+    if content is None:
+        for _, handle in prepared._state.handles:
+            proof = handle._state.projection
+            assert proof.certificate is None
+            assert proof._policy.policy_id == "portable-opencode-225-archive-v1"
+            assert dict(proof.expected.loss_counts)["incomplete_tool_archived"] == 1
+    if not acknowledge:
+        with pytest.raises(SessionMigrateError, match="acknowledg"):
+            commit_tree(prepared)
+        assert not imports
+        return
+    result = commit_tree(prepared).to_dict()
+    assert result["status"] == "completed"
+    assert len(imports) == 3
+    for document in native.values():
+        tools = [
+            part
+            for message in document["messages"]
+            for part in message.get("content", [])
+            if part.get("type") == "tool"
+        ]
+        assert len(tools) == 1
+        if content is None:
+            assert tools[0]["state"] == {
+                "status": "error",
+                "input": {"file": "fixture"},
+                "error": {
+                    "type": "ImportedIncompleteTool",
+                    "message": "Imported call had no completed result",
+                },
+            }
+        else:
+            assert tools[0]["state"]["status"] == "completed"
+            assert "ImportedIncompleteTool" not in json.dumps(document)
+
+    if content is None:
+        resumed = prepare_tree_resume(
+            inventory, selection, operation_id=result["operation_id"], **options
+        )
+        resumed_result = commit_tree(resumed).to_dict()
+        assert resumed_result["status"] == "completed"
+        assert resumed_result["coverage"] == "unknown"
+        assert len(imports) == 3

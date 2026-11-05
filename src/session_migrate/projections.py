@@ -25,8 +25,10 @@ from session_migrate.projection_policies import (
     ExpectedProjection,
     ProjectionError,
     ProjectionPolicy,
+    archived_tools_match,
     expected_from_source,
     require,
+    validate_policy_target,
 )
 
 if TYPE_CHECKING:
@@ -268,6 +270,11 @@ def _expectation_sha(expected: ExpectedProjection) -> str:
             "issues": list(expected.witness.issue_counts),
             "relation": asdict(expected.relation),
             "members": [asdict(m) for m in expected.members],
+            **(
+                {"generated_members": [asdict(m) for m in expected.generated_members]}
+                if expected.generated_members
+                else {}
+            ),
             "losses": list(expected.loss_counts),
             "metadata_losses": list(expected.metadata_loss_counts),
             "relation_complete": expected.relation_complete,
@@ -426,6 +433,7 @@ def prepare_projection(
     context.__post_init__()
     versions.__post_init__()
     policy.__post_init__()
+    validate_policy_target(policy, context.target_format, context.target_client)
     require(type(artifact) is ConversionArtifact)
     require(artifact.target_format is context.target_format, "context_mismatch")
     require(artifact.target_cli_version == context.target_client, "context_mismatch")
@@ -500,6 +508,7 @@ def prepare_projection(
         ),
     )
     artifact_obs = _observe(artifact_snapshot, context.target_client, policy)
+    require(archived_tools_match(expected, artifact_snapshot), "semantic_mismatch")
     require(versions.target_adapter == artifact_obs.audit.audit_policy_id, "unsupported_policy")
     require(
         _same_semantics(
@@ -682,7 +691,8 @@ def verify_projection(
         "context_mismatch",
     )
     observed = _observe(observed_snapshot, context.target_client, prepared._policy)
-    semantic = _same_semantics(
+    validate_policy_target(prepared._policy, context.target_format, context.target_client)
+    semantic = archived_tools_match(prepared.expected, observed_snapshot) and _same_semantics(
         prepared.expected.witness.prefix_witness,
         _target_conversation_witness(
             observed, observed_snapshot, prepared._options, prepared._policy

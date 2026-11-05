@@ -126,3 +126,10 @@ Matching duplicate envelopes have a [bounded reader contract](claude-desktop-309
 coverage remains UNKNOWN and requires acknowledgement. Session links are still
 operator-declared. Missing active parents and conflicting copies are refused
 before publication.
+
+Reviewed 2.2.5 tree publication can archive a genuinely open tool call as an
+explicit `ImportedIncompleteTool` error. The independent proof preserves the
+call's ID/name/input and verifies the raw marker after import. Review the
+`tool_call:v2_incomplete_archived` counts before acknowledgement. This does not
+repair missing source parents or permit ambiguous tool identities; source
+UNKNOWN coverage and recovery limits remain in force.
