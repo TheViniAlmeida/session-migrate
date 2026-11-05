@@ -112,8 +112,10 @@ replaced, or truncated file fails with a retryable error.
 - Codex replays canonical legacy `response_item` history. For a complete root
   paginated rollout it validates contiguous ordinals and takes visible turns
   only from `event_msg.item_completed` TurnItems, never from contextual
-  provider messages. External `history_base` and subagent projections remain
-  fail-closed.
+  provider messages. DEV16 resolves `history_base` through bounded immutable
+  component captures inside one authorized root, including compressed storage.
+  Physical and materialized hashes remain distinct; ancestor context outside
+  the projection keeps UNKNOWN coverage. Subagent projections remain fail-closed.
 - Pi follows the v3 `id`/`parentId` active tree and rejects unsupported schema
   versions.
 - OMP follows its v3 active tree after validating the fixed 256-byte title

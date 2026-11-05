@@ -30,6 +30,18 @@ publicação no PyPI nem atualização automática das instalações existentes.
 - Publicados guia de uso, schema e exemplo do inventário compacto. Vínculos Claude
   não persistidos são declarados explicitamente, sem heurística de texto ou título.
 
+- Integrada a [PR #19](https://github.com/TheViniAlmeida/session-migrate/pull/19)
+  após revisão independente e **38 checks de CI aprovados**. O job Python 3.11
+  foi repetido após `proof_unavailable` em um teste antigo de catálogo; passou
+  sem alterar as guardas.
+- Instalada a DEV16 primeiro no operador e depois na compartilhada, com backups
+  verificados, 91 arquivos conferidos e as mesmas 15 dependências/pip preservados.
+- QA instalado: 533 casos únicos validados em cada prefixo. Em cada rodada,
+  532 passaram e um caso da TUI expirou; o mesmo caso passou isoladamente, com
+  o mesmo código e limite. As evidências iniciais foram preservadas.
+- Sete contas passaram em 42 verificações CLI, sete imports e 14 versões efetivas;
+  revisão independente pós-instalação aprovada. Candidato DEV15 não foi ativado.
+
 ## 05/11/2026 — DEV14
 
 - Adicionado suporte ao OpenCode 2.2.5 na migração e nas APIs públicas,

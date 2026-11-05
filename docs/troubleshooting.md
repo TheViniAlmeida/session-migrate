@@ -270,10 +270,13 @@ credentials. See the [Hermes](hermes-format.md),
 
 A complete root paginated rollout is supported when every record has an integer
 ordinal contiguous from zero. Missing/gapped ordinals are treated as corrupt.
-`history_base` and `subagent_history_start_ordinal` mean the file depends on an
-external or projected prefix and remain unsupported; `--format codex` cannot
-bypass either guard. Resume or export the root session instead of flattening
-the dependent file by hand.
+DEV16 resolves `history_base` only inside the explicitly selected source root.
+For a dependent rollout, use `transfer --from codex --source-home /absolute/codex-home`
+or a source profile containing all referenced files. Missing ancestors, invalid
+byte offsets/ordinals, cycles and changed components fail explicitly. Compressed
+files require Python 3.14 or a compatible system libzstd.
+`subagent_history_start_ordinal` remains unsupported; `--format codex` does not
+bypass that guard. Do not strip metadata or flatten a dependent file by hand.
 
 ## Claude sidechain/subagent
 

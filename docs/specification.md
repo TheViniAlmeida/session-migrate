@@ -30,9 +30,11 @@ creates a new independent target session; it does not move/delete the source,
 clone runtime state byte-for-byte, synchronize future turns, or re-execute
 historical tools.
 
-Complete root Codex paginated rollouts are transferable. Codex `history_base`
-lineage, paginated subagent projections, and Claude sidechain import remain
-non-transferable. They are discoverable in the catalog and fail closed.
+Complete root Codex paginated rollouts and bounded `history_base` chains are
+transferable in DEV16, including `.jsonl.zst` storage. Dependent files require an
+authorized root containing their components; transfer/profile workflows provide
+that root. Paginated subagent projections and Claude sidechain import remain
+non-transferable. Persistent trees have the separate [reviewed workflow](tree-migration.md).
 
 ## Functional requirements
 

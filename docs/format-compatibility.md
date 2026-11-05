@@ -326,8 +326,8 @@ Every ordered pair among the eighteen formats is implemented, for 324 routes:
 - experimental text-only adapter: Cursor.
 
 Same-format routes are portable rewrites into new sessions, not byte copies.
-Codex `history_base` lineage and paginated subagent projections remain
-fail-closed. Cursor is experimental, build-pinned, and deliberately transfers
+DEV16 resolves bounded Codex `history_base` chains and compressed rollouts;
+missing/ambiguous dependencies and paginated subagent projections fail closed. Cursor is experimental, build-pinned, and deliberately transfers
 only ordered user/assistant text. The
 detailed table below explains the original Claude/Codex pair; target-specific
 behavior is documented in [Additional native formats](additional-target-formats.md)
@@ -369,7 +369,8 @@ Legend:
 | Claude sidechains/subagents | **Unsupported** | N/A | The catalog indexes nested sidechains as unsupported, but direct lookup/conversion does not import them; transfer the parent session. |
 | Codex legacy linear history | N/A | **Supported** | Ordered response items become one linear Claude UUID graph. |
 | Codex root paginated history | N/A | **Supported** | Contiguous canonical completed TurnItems supply user/assistant turns; provider-context messages are not replayed. Replacement-history compaction uses the expanded-transcript policy above. |
-| Codex paginated forks/subagents | N/A | **Unsupported** | `history_base` and `subagent_history_start_ordinal` require external or projected history and are rejected rather than silently truncating or duplicating a conversation. |
+| Codex persistent paginated forks | N/A | **Supported with limits** | DEV16 resolves `history_base` inside the authorized root, including compressed/reverted physical rollouts. Ancestor private context outside the portable projection remains UNKNOWN. |
+| Codex paginated subagents | N/A | **Unsupported** | `subagent_history_start_ordinal` remains rejected; persistent forks are a distinct contract. |
 | Codex UI-only messages | N/A | **Lossy fallback** | Used as the conversation when no response-item messages exist. In a mixed partial file, exact normalized duplicates are removed and unmatched projections are retained with `message:ui_only_projection`; fuzzy matching is never used. |
 | Turn context, policies, world state, snapshots | **Unsupported** | **Unsupported** | Codex `turn_context` is counted as context; `world_state` and `security_risk_score` become counted opaque events. Shell snapshots, approvals, external credential stores, MCP state, memories, goals, and configuration are outside transcript conversion. |
 | Unknown source records/blocks | **Unsupported** | **Unsupported** | They become content-free opaque/sentinel events where recognized and are counted at write time, including unknown nested tool-result blocks. |
