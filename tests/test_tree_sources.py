@@ -450,3 +450,35 @@ def test_manifest_hardlink_is_refused(tmp_path):
     (tmp_path / "copy").hardlink_to(tmp_path / "project/parent.jsonl")
     with pytest.raises(SessionMigrateError, match="one link"):
         load_manifest(value, tmp_path)
+
+
+def test_known_mixed_claude_versions_keep_identity_without_claiming_one_client(tmp_path):
+    value = manifest(tmp_path)
+    for node in value["nodes"]:
+        path = tmp_path / node["relative_path"]
+        row = json.loads(path.read_text())
+        old = {**row, "uuid": "older-" + row["uuid"], "version": "2.1.209"}
+        row["parentUuid"] = old["uuid"]
+        path.write_text(json.dumps(old) + "\n" + json.dumps(row) + "\n")
+    inventory = load_manifest(value, tmp_path)
+    assert len(inventory.nodes) == 3
+    assert all(edge.provenance == "manual" for edge in inventory.relationships)
+    from session_migrate.lineage import Coverage
+    from session_migrate.model import AgentFormat
+    from session_migrate.native_audit import audit_snapshot
+    from session_migrate.native_snapshots import SourceCaptureContext, capture_source
+
+    captured = capture_source(
+        SourceCaptureContext(AgentFormat.CLAUDE, tmp_path / "project/parent.jsonl")
+    )
+    assert audit_snapshot(captured).coverage is Coverage.UNKNOWN
+
+
+def test_unknown_mixed_claude_version_still_fails_before_inventory(tmp_path):
+    value = manifest(tmp_path)
+    path = tmp_path / value["nodes"][0]["relative_path"]
+    row = json.loads(path.read_text())
+    unknown = {**row, "uuid": "unknown", "version": "2.1.999"}
+    path.write_text(json.dumps(unknown) + "\n" + json.dumps(row) + "\n")
+    with pytest.raises(TreeSourceError, match="ambiguous"):
+        load_manifest(value, tmp_path)

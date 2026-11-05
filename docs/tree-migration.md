@@ -1,6 +1,6 @@
 # Migrar uma árvore de sessões
 
-Disponível na DEV15: selecionar uma sessão, uma subárvore ou a árvore inteira e
+Disponível na DEV16: selecionar uma sessão, uma subárvore ou a árvore inteira e
 publicar sessões novas no OpenCode **2.2.5**, com títulos e vínculos `parentID`.
 O pai é importado antes das filhas. O histórico próprio de cada nó é convertido
 uma vez; um prefixo que já veio copiado no fork não é concatenado de novo.
@@ -18,7 +18,9 @@ Quando a origem não registra o pai, declare as relações num
 IDs, caminhos relativos, títulos e declaração pelos seus dados. A entrada segue
 este [schema de runtime](schemas/session-tree-inventory-v1.schema.json); cada ID
 é conferido nos bytes do arquivo dentro do root escolhido. A declaração é
-proveniência manual e continua identificada assim na revisão.
+proveniência manual e continua identificada assim na revisão. Versões Claude
+conhecidas podem coexistir no mesmo transcript; a identidade é conferida sem
+promover a cobertura UNKNOWN de um histórico com versões mistas.
 
 A descoberta nativa usa `forked_from_id` no Codex e `parentID` em exports públicos
 OpenCode. Inventário offline é parcial em relação ao cliente. Claude Desktop

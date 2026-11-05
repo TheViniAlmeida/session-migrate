@@ -8,7 +8,10 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
-## 05/11/2026 — DEV15
+## 05/11/2026 — DEV16
+
+- DEV15 foi um candidato preparado, sem ativação; a entrega final inclui a
+  aceitação de versões Claude conhecidas misturadas, preservando UNKNOWN.
 
 - Implementada migração de árvores persistentes para OpenCode 2.2.5: seleção de
   sessão/subárvore/árvore, IDs novos estáveis, títulos e importação pai antes das filhas.

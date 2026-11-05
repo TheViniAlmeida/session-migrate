@@ -40,6 +40,7 @@ def tree_native(tmp_path):
     binary = Path(selected).resolve()
     assert hashlib.sha256(binary.read_bytes()).hexdigest() == STOCK_SHA256
     repo = Path(__file__).resolve().parents[1]
+    test_dependencies = Path(pytest.__file__).resolve().parent.parent
     environment = {
         "PATH": os.defpath,
         "LANG": "C.UTF-8",
@@ -96,6 +97,9 @@ def tree_native(tmp_path):
         "--ro-bind",
         str(repo / "tests"),
         "/tmp/session-migrate-tests",
+        "--ro-bind",
+        str(test_dependencies),
+        "/tmp/session-migrate-test-deps",
         "--proc",
         "/proc",
         "--dev",
@@ -113,8 +117,8 @@ def tree_native(tmp_path):
                 "-I",
                 "-B",
                 "-c",
-                "import sys;sys.path[:0]=['/tmp/session-migrate-src','/tmp/session-migrate-tests'];"
-                + script,
+                "import sys;sys.path[:0]=['/tmp/session-migrate-src',"
+                "'/tmp/session-migrate-tests','/tmp/session-migrate-test-deps'];" + script,
                 str(tmp_path),
             ],
             env=environment,
@@ -920,3 +924,26 @@ print(json.dumps({'status':'completed','nodes':len(ids),'cold_export_parent_chai
 """
     result = json.loads(run(f"CONNECTED_SERVER={connected_server!r}\n" + script, worker=True))
     assert result["nodes"] == 4 and result["exact_child_collision_probe"]
+
+
+def test_reviewed_tree_publishes_known_mixed_claude_versions_without_promoting_coverage(setup):
+    from test_tree_cli import declaration
+
+    inventory, selection, options, _, imports = setup
+    for node in inventory.nodes:
+        path = Path(inventory.canonical_root) / node.relative_path
+        row = json.loads(path.read_text())
+        old = {**row, "uuid": "older-" + row["uuid"], "version": "2.1.209"}
+        row["parentUuid"] = old["uuid"]
+        path.write_text(json.dumps(old) + "\n" + json.dumps(row) + "\n")
+    inventory = inventory_from_explicit_manifest(
+        declaration(inventory),
+        root=Path(inventory.canonical_root),
+        source_format="claude",
+        client_version="2.1.318",
+    )
+    prepared = prepare_tree(inventory, selection, **options)
+    assert tree_proposal(prepared)["coverage"] == "unknown"
+    result = commit_tree(prepared).to_dict()
+    assert result["status"] == "completed"
+    assert len(imports) == 3

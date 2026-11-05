@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from session_migrate.errors import SessionMigrateError
+from session_migrate.formats import claude
 from session_migrate.jsonl import DEFAULT_MAX_RECORD_BYTES, DEFAULT_MAX_RECORDS
 from session_migrate.model import AgentFormat
 from session_migrate.native_snapshots import SourceCaptureContext, capture_source
@@ -41,7 +42,11 @@ MAX_DIRECTORY_ENTRIES = 16384
 MAX_DIRECTORY_DEPTH = 32
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z")
 _KEY = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,95}\Z")
-_APPROVED = {"claude": {"2.1.317", "2.1.318"}, "codex": {"0.166.0"}, "opencode": {"2.2.5"}}
+_APPROVED = {
+    "claude": claude.VALIDATED_CLAUDE_VERSIONS,
+    "codex": {"0.166.0"},
+    "opencode": {"2.2.5"},
+}
 
 
 class TreeSourceError(SessionMigrateError):
@@ -268,7 +273,11 @@ def _metadata(data: bytes, source_path: Path, source_format: str, client_version
     except (SessionMigrateError, RecursionError):
         _fail("Invalid tree source transcript metadata")
     if source_format == "claude":
-        if len(identities) != 1 or versions != {client_version}:
+        if (
+            len(identities) != 1
+            or client_version not in versions
+            or not versions <= _APPROVED["claude"]
+        ):
             _fail("Claude transcript identity or client version is ambiguous")
         # parentUuid is a message pointer; isSidechain=false does not prove a root.
         return _Metadata(

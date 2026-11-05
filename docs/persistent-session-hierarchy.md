@@ -1,6 +1,6 @@
 # Árvores de sessões persistentes
 
-Status em 05/11/2026: **runtime implementado na DEV15**, com CLI, TUI e dashboard.
+Status em 05/11/2026: **runtime implementado na DEV16**, com CLI, TUI e dashboard.
 O [guia de uso](tree-migration.md) descreve a entrada compacta, os limites e a retomada.
 O schema de proposta abaixo permanece referência de projeto; a saída de runtime
 é uma visão de revisão, nunca um documento que reconstitui autorização.
@@ -286,7 +286,7 @@ todos os nós e registrar uma falha; excedê-los bloqueia o préflight.
 Critério final: todos os nós selecionados e somente eles são encontrados no
 root/backend escolhido, com IDs novos fixados, relações projetadas verificadas,
 históricos independentes equivalentes à projeção aprovada e diário concluído.
-Qualquer nó incerto torna o resultado parcial. A DEV15 implementa os marcos de runtime para inventários explícitos e contratos
+Qualquer nó incerto torna o resultado parcial. A DEV16 implementa os marcos de runtime para inventários explícitos e contratos
 nativos comprovados, incluindo testes de quatro nós em standalone e servidor conectado.
 A descoberta automática de metadados privados Claude Desktop continua dependente de
 uma fixture/contrato próprio; o manifesto manual cobre essa origem funcionalmente.
