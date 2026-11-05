@@ -26,6 +26,10 @@ from session_migrate.formats import (
 from session_migrate.model import AgentFormat
 
 _OPENCODE_SESSION_ID = re.compile(r"ses_[0-9A-Za-z]{1,128}")
+_CODEX_UUID = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
+_CODEX_NAME = re.compile(
+    rf"rollout-.+-(?P<thread>{_CODEX_UUID})(?:_(?P<rollout>{_CODEX_UUID}))?\.jsonl(?:\.zst)?\Z"
+)
 
 
 def locate_session(
@@ -144,9 +148,42 @@ def _claude_matches(home: Path, session_id: str, cwd: Path | None) -> list[Path]
 
 
 def _codex_matches(home: Path, session_id: str) -> list[Path]:
-    active = home.glob(f"sessions/*/*/*/rollout-*-{session_id}.jsonl")
-    archived = (home / "archived_sessions").glob(f"rollout-*-{session_id}.jsonl")
-    return [*active, *archived]
+    return [path for path in codex_rollout_paths(home) if codex_thread_id(path) == session_id]
+
+
+def codex_thread_id(path: Path) -> str | None:
+    """Read the stable thread ID, retaining historical rollout timestamp spellings."""
+    match = _CODEX_NAME.fullmatch(path.name)
+    return str(uuid.UUID(match["thread"])) if match else None
+
+
+def codex_rollout_paths(home: Path, *, max_entries: int = 100_000) -> list[Path]:
+    """Enumerate bounded active/archived rollout names without reading their bodies."""
+    result: list[Path] = []
+    seen = 0
+    for directory in (home / "sessions", home / "archived_sessions"):
+        if directory.is_symlink():
+            raise SessionMigrateError("Codex session directories cannot be symlinks")
+        if not directory.is_dir():
+            continue
+
+        def walk_error(error: OSError) -> None:
+            raise SessionMigrateError("Codex session directory is unavailable") from error
+
+        for current, subdirectories, filenames in os.walk(
+            directory, followlinks=False, onerror=walk_error
+        ):
+            seen += len(subdirectories) + len(filenames)
+            if seen > max_entries:
+                raise SessionMigrateError("Codex session discovery exceeds the entry safety limit")
+            subdirectories[:] = [
+                name for name in subdirectories if not (Path(current) / name).is_symlink()
+            ]
+            for name in filenames:
+                path = Path(current) / name
+                if name.endswith((".jsonl", ".jsonl.zst")) and not path.is_symlink():
+                    result.append(path)
+    return sorted(result)
 
 
 def _pi_matches(home: Path, session_id: str, cwd: Path | None) -> list[Path]:

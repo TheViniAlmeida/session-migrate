@@ -88,16 +88,18 @@ def test_225_provider_checkpoint_stays_unknown_and_private(kind):
     assert observed.boundary.kind is BoundaryKind.UNPROVEN
 
 
-def test_parent_reference_remains_unproved_raw_metadata(tmp_path):
+def test_parent_reference_is_a_coordinate_not_a_conversation_or_boundary_proof(tmp_path):
     value = bundle_value()
     value["info"]["parentID"] = "ses_parent"
     parsed = parse(tmp_path, value)
     assert parsed.parent_session == "ses_parent"
     _, audit, observed = observe(value, "2.2.5")
-    assert audit.coverage is Coverage.UNKNOWN
+    assert audit.coverage is Coverage.VERIFIED
+    assert observed.fidelity is Coverage.PARTIAL
+    assert "session_relationship_scope_loss" in dict(audit.issue_counts)
     assert (
         next(atom for atom in observed.atoms if atom.path == ("info", "parentID")).category
-        == UNKNOWN
+        == "generated-coordinate"
     )
     assert observed.boundary.kind is BoundaryKind.UNPROVEN
     assert observed.identity is None

@@ -200,7 +200,7 @@ def _authority_state(authority):
             and issued.profile is state.profile
             and authority.identity == state.endpoint.identity
             and authority.authority_sha256 == state.snapshot.authority_sha256
-            and hashlib.sha256(state.snapshot.raw_bytes).hexdigest() == authority.authority_sha256
+            and state.snapshot.integrity_valid()
             and _authority_binding(authority, state) == state.binding,
             "source_changed",
         )

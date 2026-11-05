@@ -36,7 +36,7 @@ from session_migrate.lineage import (
     _encode,
 )
 from session_migrate.model import AgentFormat
-from session_migrate.native_snapshots import SourceCaptureContext, capture_source
+from session_migrate.native_snapshots import SourceCaptureContext, capture_readable_source
 from session_migrate.operations import OperationKind, OperationRequest
 from session_migrate.profiles import Profile, SessionRef, _prepared_profile_binding, resolve_source
 
@@ -459,7 +459,7 @@ def _prepare_context_operation(
         and observer._catalog.path == captured_observer._catalog.path
         and dict(observer._environment) == dict(captured_observer._environment)
         and observer._legacy_runtime_contexts == captured_observer._legacy_runtime_contexts
-        and len(context.authority.snapshot.raw_bytes) <= observer._byte_limit,
+        and context.authority.snapshot.captured_byte_count <= observer._byte_limit,
         "invalid_context",
     )
     base = _base_environment(observer, base_environ)
@@ -561,8 +561,10 @@ def _current_source_client(observer, profile, ref):
         if profile.format in {AgentFormat.CLAUDE, AgentFormat.CODEX}:
             selected = resolve_source(observer._catalog, profile, ref)
             _require(selected.path is not None, "invalid_context")
-            capture = capture_source(
-                SourceCaptureContext(profile.format, selected.path), byte_limit=observer._byte_limit
+            capture = capture_readable_source(
+                SourceCaptureContext(profile.format, selected.path),
+                root=profile.root,
+                byte_limit=observer._byte_limit,
             )
             return capture.parse().cli_version, capture
         if profile.format is AgentFormat.OPENCODE:

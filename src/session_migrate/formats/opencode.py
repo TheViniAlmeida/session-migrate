@@ -82,6 +82,7 @@ def serialize(
     title: str | None = None,
     slug: str | None = None,
     legacy_schema: bool = False,
+    parent_session_id: str | None = None,
 ) -> tuple[bytes, dict[str, int]]:
     """Serialize portable events as an official OpenCode import bundle."""
 
@@ -97,6 +98,7 @@ def serialize(
         title=title or session.title,
         slug=slug,
         legacy_schema=legacy_schema,
+        parent_session_id=parent_session_id,
     )
 
 
@@ -113,11 +115,19 @@ def serialize_events(
     title: str | None = None,
     slug: str | None = None,
     legacy_schema: bool = False,
+    parent_session_id: str | None = None,
 ) -> tuple[bytes, dict[str, int]]:
     """Emit events through the official export shape, including the v2 wrapper."""
 
     if not session_id.startswith("ses_"):
         raise SessionMigrateError("OpenCode session IDs must start with 'ses_'")
+    if parent_session_id is not None and (
+        cli_version != "2.2.5"
+        or not isinstance(parent_session_id, str)
+        or not re.fullmatch(r"ses_[0-9a-f]{32}", parent_session_id)
+        or parent_session_id == session_id
+    ):
+        raise SessionMigrateError("OpenCode parent requires the exact validated 2.2.5 target")
     fallback_timestamp = valid_rfc3339(timestamp) or _utc_now()
     fallback_ms = _timestamp_ms(fallback_timestamp)
     target_model = model_id or "unknown"
@@ -470,6 +480,8 @@ def serialize_events(
     }
     if native_v2_target:
         export_data = opencode_v2.from_legacy(export_data, dropped, tool_content=v2_tool_content)
+    if parent_session_id is not None:
+        export_data["info"]["parentID"] = parent_session_id
     data = (json.dumps(export_data, ensure_ascii=False, indent=2) + "\n").encode()
     return data, dict(sorted(dropped.items()))
 

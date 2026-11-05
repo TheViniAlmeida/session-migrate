@@ -19,16 +19,18 @@ Codex 0.166.0 has per-content `content_item_metadata.provenance` in addition to
 a user message. Literal user text is not filtered by a text-prefix guess.
 Unknown provenance retains the audit's UNKNOWN classification. The native client
 can read compressed `.jsonl.zst` rollouts, including inherited fork history;
-**the migrator's offline reader does not support compressed rollouts or resolve
-shared `history_base` dependencies**. Those native-client probes do not certify
-migration of those sources. Missing/unsupported input remains a reported limit.
+DEV15 now reads compressed rollouts and resolves shared `history_base` dependencies
+inside the selected root, with physical/composite hashes and strict bounded decoding.
+The multi-component projection retains UNKNOWN coverage for ancestor private context.
+See the [tree and storage guide](tree-migration.md) for decoder requirements and limits.
 
 Claude 2.1.317/318 retains the historical portable writer contract. Independent
 fork and cold-resume tests confirm that a CLI fork is a separate persistent
 session, while its transcript does not provide a proven parent-session pointer.
-Desktop nesting metadata requires a separate evidence-backed adapter. The
-[persistent-session hierarchy design](persistent-session-hierarchy.md) specifies
-that work; it does not enable automatic tree migration in this release.
+Desktop nesting metadata requires a separate evidence-backed adapter. DEV15
+implements persistent tree migration through explicit inventories and proven native
+metadata, with an operator-declared manifest when a client does not expose its links.
+See the [tree migration guide](tree-migration.md).
 
 The `claude-nov`, `codex-nov` and `opencode-v22` CI selectors keep the October
 selectors intact; the keyboard migration matrix also includes OpenCode 2.2.5.

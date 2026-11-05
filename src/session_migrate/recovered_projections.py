@@ -38,7 +38,7 @@ from session_migrate.native_snapshots import (
     CaptureProvenance,
     NativeSnapshot,
     SourceCaptureContext,
-    capture_source,
+    capture_readable_source,
     check_source_identity,
 )
 from session_migrate.operations import (
@@ -231,14 +231,17 @@ def _new(cls, values):
 
 def _capture_binding(snapshot: NativeSnapshot) -> dict:
     _require(type(snapshot) is NativeSnapshot, "proof_unavailable")
-    _require(snapshot.provenance is CaptureProvenance.FILE, "proof_unavailable")
+    _require(
+        snapshot.provenance in {CaptureProvenance.FILE, CaptureProvenance.RESOLVED_STORAGE},
+        "proof_unavailable",
+    )
     actual = hashlib.sha256(snapshot.raw_bytes).hexdigest()
-    _require(actual == snapshot.authority_sha256, "binding_changed")
+    _require(snapshot.integrity_valid(), "binding_changed")
     _require(
         snapshot.identity is not None and snapshot.identity.links == 1,
         "proof_unavailable",
     )
-    _require(len(snapshot.raw_bytes) == snapshot.identity.size, "binding_changed")
+    _require(len(snapshot.source_storage_bytes) == snapshot.identity.size, "binding_changed")
     return {
         "format": snapshot.source_format.value,
         "path": str(snapshot.source_path),
@@ -246,12 +249,17 @@ def _capture_binding(snapshot: NativeSnapshot) -> dict:
         "identity": asdict(snapshot.identity),
         "ancestors": [(str(a.path), a.device, a.inode) for a in snapshot.ancestors],
         "body": actual,
+        "storage": snapshot.storage_binding,
+        "authority": snapshot.authority_sha256,
     }
 
 
 def _require_existing_capture(snapshot):
     """Prove an existing FD capture rather than trusting a constructed DTO."""
-    captured = capture_source(SourceCaptureContext(snapshot.source_format, snapshot.source_path))
+    captured = capture_readable_source(
+        SourceCaptureContext(snapshot.source_format, snapshot.source_path),
+        root=snapshot.storage_root,
+    )
     _require(_capture_binding(snapshot) == _capture_binding(captured), "binding_changed")
 
 

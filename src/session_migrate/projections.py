@@ -226,6 +226,7 @@ def _options_dict(options: ConversionOptions) -> dict:
         "model": options.model,
         "title": options.target_title,
         "title_policy": options.title_policy.value if options.title_policy else None,
+        "target_parent_id": options.target_parent_id,
     }
 
 
@@ -304,6 +305,7 @@ def _binding(
     return _sha(
         {
             "source_bytes": hashlib.sha256(source.raw_bytes).hexdigest(),
+            "source_storage": source.storage_binding,
             "source_path": str(source.source_path),
             "source_format": source.source_format.value,
             "source_provenance": source.provenance.value,
@@ -341,6 +343,54 @@ def _observe(snapshot: NativeSnapshot, client: str | None, policy: ProjectionPol
 
 def _same_semantics(first, second) -> bool:
     return first.units == second.units and first.tool_links == second.tool_links
+
+
+def _target_conversation_witness(observation, snapshot, options, policy):
+    """Separate an explicitly bound organizational parent from conversation units.
+
+    The original audit/observation remains intact, including its loss coverage.
+    Only the exact target parent option permits this one metadata unit to be
+    excluded from conversation comparison; it cannot establish a fork boundary.
+    """
+    if options.target_parent_id is None:
+        return observation.witness.prefix_witness
+    from session_migrate.canonical import hash_events
+    from session_migrate.formats import opencode
+    from session_migrate.model import EventKind
+
+    require(
+        options.target_format is TargetFormat.OPENCODE
+        and options.target_cli_version == "2.2.5"
+        and snapshot.source_format is AgentFormat.OPENCODE,
+        "options_mismatch",
+    )
+    require(
+        opencode.parse_import_bytes(snapshot.raw_bytes).parent_session == options.target_parent_id,
+        "target_parent_mismatch",
+    )
+    # Use the audit's normalized projection, retaining its independent raw
+    # accounting for known losses such as the native runtime busy clock.
+    events = observation.events
+    conversation = tuple(
+        event
+        for event in events
+        if not (
+            event.kind is EventKind.OPAQUE
+            and event.payload == {"reason": "opencode_parent_session"}
+            and event.provenance.record_type == "session"
+        )
+    )
+    original_parent_count = sum(
+        event.kind is EventKind.OPAQUE
+        and event.payload == {"reason": "opencode_parent_session"}
+        and event.provenance.record_type == "session"
+        for event in observation.session.events
+    )
+    require(
+        original_parent_count == 1 and len(events) - len(conversation) <= 1,
+        "target_parent_mismatch",
+    )
+    return hash_events(conversation, policy.canonical_policy).prefix_witness
 
 
 def _expectation_coverage(source_obs, artifact_obs, expected) -> Coverage:
@@ -452,7 +502,10 @@ def prepare_projection(
     artifact_obs = _observe(artifact_snapshot, context.target_client, policy)
     require(versions.target_adapter == artifact_obs.audit.audit_policy_id, "unsupported_policy")
     require(
-        _same_semantics(expected.witness.prefix_witness, artifact_obs.witness.prefix_witness),
+        _same_semantics(
+            expected.witness.prefix_witness,
+            _target_conversation_witness(artifact_obs, artifact_snapshot, options, policy),
+        ),
         "semantic_mismatch",
     )
     require(
@@ -575,8 +628,8 @@ def validate_prepared(prepared: PreparedProjection) -> None:
     require(actual == prepared.binding_sha256, "binding_changed")
     require(
         hashlib.sha256(prepared._body).hexdigest() == prepared.artifact_sha256
-        and hashlib.sha256(prepared._source.raw_bytes).hexdigest()
-        == prepared.source_authority_sha256,
+        and prepared._source.integrity_valid()
+        and prepared._source.authority_sha256 == prepared.source_authority_sha256,
         "binding_changed",
     )
     require(prepared.source_coverage is prepared._source_observation.coverage, "binding_changed")
@@ -630,7 +683,10 @@ def verify_projection(
     )
     observed = _observe(observed_snapshot, context.target_client, prepared._policy)
     semantic = _same_semantics(
-        prepared.expected.witness.prefix_witness, observed.witness.prefix_witness
+        prepared.expected.witness.prefix_witness,
+        _target_conversation_witness(
+            observed, observed_snapshot, prepared._options, prepared._policy
+        ),
     )
     metadata = observed.session.session_id == prepared._artifact.session_id and (
         observed.session.cwd == prepared._artifact.cwd

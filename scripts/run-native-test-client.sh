@@ -60,7 +60,7 @@ case "$client" in
     ;;
   codex-nov)
     isolate_network=1
-    tests=(tests/test_codex_nov_native.py)
+    tests=(tests/test_codex_nov_native.py tests/test_codex_storage_native.py)
     ;;
   copilot)
     tests=(tests/test_copilot_source_native.py)
@@ -142,7 +142,10 @@ case "$client" in
     if [[ "$client" == opencode-v21 ]]; then
       tests+=(tests/test_opencode_v21_native.py)
     elif [[ "$client" == opencode-v22 ]]; then
-      tests+=(tests/test_opencode_v22_native.py)
+      tests+=(
+        tests/test_opencode_v22_native.py
+        tests/test_tree_operations.py::test_stock_225_three_levels_cold_export_and_child_collision
+      )
     fi
     ;;
   openhands)

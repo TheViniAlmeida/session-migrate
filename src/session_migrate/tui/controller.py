@@ -375,7 +375,9 @@ class Controller:
             )
         else:
             path = source.path
-        paths = source_read_paths(selected.format, path, selected.root)
+        paths = source_read_paths(
+            selected.format, path, selected.root, max_source_bytes=self.source_bytes
+        )
         witnesses = [("profile", selected.fingerprint)]
         total = 0
         for candidate in dict.fromkeys(paths):
@@ -605,6 +607,18 @@ class Controller:
         except Exception:
             catalog.close()
             raise
+
+    def open_tree(self, *, profiles_file=None):
+        """Resolve only current existing profiles, on the dedicated tree worker."""
+        from session_migrate.tree_cli import TreeWorkflow
+
+        return TreeWorkflow(
+            self.continuity_profiles(profiles_file),
+            state_home=self._continuity_path().parent,
+            base_environ=self.environ,
+            max_source_bytes=self.source_bytes,
+            max_total_source_bytes=self.source_bytes,
+        )
 
     def list_operations(self, *, offset=0, limit=50, cancel_event=None) -> OperationPage:
         if (

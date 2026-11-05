@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "kind": "session-tree-inventory",
+  "root_node_key": "parent",
+  "completeness": "declared_complete",
+  "nodes": [
+    {
+      "key": "parent",
+      "source_native_id": "11111111-1111-4111-8111-111111111111",
+      "relative_path": "projects/PROJECT_KEY/11111111-1111-4111-8111-111111111111.jsonl",
+      "source_parent_status": "known_root",
+      "title": "Parent"
+    },
+    {
+      "key": "child",
+      "source_native_id": "22222222-2222-4222-8222-222222222222",
+      "relative_path": "projects/PROJECT_KEY/22222222-2222-4222-8222-222222222222.jsonl",
+      "source_parent_status": "known_parent",
+      "title": "Child"
+    },
+    {
+      "key": "sibling",
+      "source_native_id": "33333333-3333-4333-8333-333333333333",
+      "relative_path": "projects/PROJECT_KEY/33333333-3333-4333-8333-333333333333.jsonl",
+      "source_parent_status": "known_parent",
+      "title": "Sibling"
+    },
+    {
+      "key": "grandchild",
+      "source_native_id": "44444444-4444-4444-8444-444444444444",
+      "relative_path": "projects/PROJECT_KEY/44444444-4444-4444-8444-444444444444.jsonl",
+      "source_parent_status": "known_parent",
+      "title": "Grandchild"
+    }
+  ],
+  "relationships": [
+    {
+      "key": "edge_child",
+      "parent_node_key": "parent",
+      "child_node_key": "child",
+      "kind": "fork_origin"
+    },
+    {
+      "key": "edge_sibling",
+      "parent_node_key": "parent",
+      "child_node_key": "sibling",
+      "kind": "fork_origin"
+    },
+    {
+      "key": "edge_grandchild",
+      "parent_node_key": "child",
+      "child_node_key": "grandchild",
+      "kind": "fork_origin"
+    }
+  ],
+  "declaration": {
+    "declaration_id": "selected_family",
+    "declared_at": "2026-11-05T10:00:00-03:00",
+    "operator": "operator",
+    "statement": "Explicitly selected persistent sessions and their declared parent relationships.",
+    "confirmed": true
+  }
+}

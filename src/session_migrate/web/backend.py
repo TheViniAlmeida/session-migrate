@@ -134,6 +134,7 @@ class WorkspaceBackend:
             "summary",
             "return_new_summary",
             "return_new_full",
+            "tree",
         }:
             raise BackendError("launch_invalid")
         self._runtime_actions = runtime_actions
@@ -174,6 +175,8 @@ class WorkspaceBackend:
 
         if native_action not in self._runtime_actions:
             raise BackendError("capability_unavailable")
+        if native_action == "tree":
+            return self._resolve_tree(parameters)
         run_id = parameters.get("_run_id")
         self.registry.check_run(run_id, scope="publish")
         selected, source = self._selected(parameters.get("source_session_id"))
@@ -783,6 +786,58 @@ class WorkspaceBackend:
             )
             return metadata_dict(result)
 
+    def _resolve_tree(self, parameters):
+        from session_migrate.web.runtime_jobs import TreeRuntimeRequest
+
+        run_id = parameters.get("_run_id")
+        self.registry.check_run(run_id, scope="publish")
+        source = self._profile(parameters.get("source_profile_id"))
+        target = self._profile(parameters.get("target_profile_id"))
+        project = parameters.get("project_id")
+        if project not in self.projects:
+            raise BackendError("project_unavailable")
+        manifest = parameters.get("manifest")
+        if type(manifest) is not dict:
+            raise BackendError("tree_declaration_required")
+        if type(manifest.get("nodes")) is not list or not 1 <= len(manifest["nodes"]) <= 16:
+            raise BackendError("tree_interactive_node_limit")
+        # A claimed root may only repeat the selected launch-owned source root.
+        # The source adapter subsequently captures every relative path under it.
+        if manifest.get("canonical_root", str(source.root)) != str(source.root):
+            raise BackendError("tree_source_root_mismatch")
+        if manifest.get("source_format", source.format.value) != source.format.value:
+            raise BackendError("tree_source_format_mismatch")
+        source_fingerprint, target_fingerprint = source.fingerprint, target.fingerprint
+        project_selection = self.projects[project]
+
+        def binding_check():
+            self.registry.check_run(run_id, scope="publish")
+            if (
+                self._profile(parameters["source_profile_id"]).fingerprint != source_fingerprint
+                or self._profile(parameters["target_profile_id"]).fingerprint != target_fingerprint
+                or self.projects.get(project) != project_selection
+            ):
+                raise BackendError("profile_changed")
+
+        return TreeRuntimeRequest(
+            source,
+            target,
+            self.projects[project][1],
+            self.state_home,
+            dict(self.base_environ),
+            parameters["source_client_version"],
+            manifest,
+            parameters["mode"],
+            parameters.get("anchor"),
+            parameters["detach"],
+            parameters["acknowledge_partial"],
+            parameters["model_provider"],
+            parameters["model"],
+            tuple(parameters["hierarchy_keys"]) if "hierarchy_keys" in parameters else None,
+            binding_check,
+            project_name=project_selection[0],
+        )
+
     async def dispatch(self, action, context, parameters, identifiers):
         service_prepare = {
             "prepare_adopt": "adopt",
@@ -798,11 +853,13 @@ class WorkspaceBackend:
             "capture_handoff": "summary",
             "capture_return_new": "return_new_summary",
             "prepare_return_new": "return_new_full",
+            "prepare_tree": "tree",
         }
         runtime_confirm = {
             "confirm_handoff": "summary",
             "confirm_return_summary": "return_new_summary",
             "confirm_return_full": "return_new_full",
+            "confirm_tree": "tree",
         }
         runtime_mutations = (
             {"accept_handoff", "discard_handoff"} | runtime_prepare.keys() | runtime_confirm.keys()
@@ -851,6 +908,7 @@ class WorkspaceBackend:
                 "summary_available": "summary" in self._runtime_actions,
                 "return_new_available": "return_new_full" in self._runtime_actions,
                 "return_summary_available": "return_new_summary" in self._runtime_actions,
+                "tree_available": "tree" in self._runtime_actions,
                 "adoption_available": "adopt" in self._service_actions,
                 "cancel_ready_available": "cancel_ready" in self._service_actions,
                 "reconcile_available": "reconcile" in self._service_actions
@@ -883,7 +941,7 @@ class WorkspaceBackend:
             request = {**parameters, "_run_id": run.run_id}
             method = (
                 self.jobs.prepare_runtime
-                if native_action == "return_new_full"
+                if native_action in {"return_new_full", "tree"}
                 else self.jobs.capture
             )
             return method(request, context, native_action=native_action).to_dict()

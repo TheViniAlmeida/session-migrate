@@ -36,6 +36,7 @@ KNOWN_LOSS_ISSUES = frozenset(
         "phase_context_loss",
         "empty_text_carrier_loss",
         "opaque_result_carrier_loss",
+        "session_relationship_scope_loss",
     }
 )
 

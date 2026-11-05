@@ -163,6 +163,8 @@ def _snapshot_binding(snapshot: NativeSnapshot) -> str:
             hashlib.sha256(snapshot.raw_bytes).hexdigest(),
             asdict(snapshot.identity) if snapshot.identity is not None else None,
             [asdict(item) | {"path": str(item.path)} for item in snapshot.ancestors],
+            snapshot.decoded_sha256,
+            snapshot.storage_binding,
         ]
     )
 
@@ -237,7 +239,10 @@ def validate_audit(snapshot: NativeSnapshot, audit: NativeAudit) -> None:
             or state.policy.sha256 != audit.audit_policy_sha256
             or state.selection.policy_id != audit.selection_policy_id
             or _snapshot_binding(snapshot) != state.snapshot_binding
-            or hashlib.sha256(snapshot.raw_bytes).hexdigest() != audit.authority_sha256
+            or (
+                not snapshot.integrity_valid()
+                or snapshot.authority_sha256 != audit.authority_sha256
+            )
             or _audit_metadata(audit) != state.metadata_binding
             or _session_binding(state.original) != state.session_binding
             or _session_binding(state.normalized) != state.normalized_binding
@@ -316,8 +321,10 @@ def _normalize(result: AdapterResult, snapshot: NativeSnapshot) -> Session | Non
             ):
                 continue
             if snapshot.source_format == AgentFormat.OPENCODE and _known_opencode_opaque(
-                raw_opencode, event
+                raw_opencode, event, client=result.client_id
             ):
+                if event.payload.get("reason") == "opencode_parent_session":
+                    taxonomy.issue("session_relationship_scope_loss", record_index)
                 continue
             if (
                 snapshot.source_format == AgentFormat.OPENCODE
@@ -337,11 +344,23 @@ def _normalize(result: AdapterResult, snapshot: NativeSnapshot) -> Session | Non
     return replace(result.session, events=tuple(events))
 
 
-def _known_opencode_opaque(raw: dict, event: Event) -> bool:
+def _known_opencode_opaque(raw: dict, event: Event, *, client: str | None = None) -> bool:
     """Explicit raw-span recovery rules, never removal by a reason prefix."""
 
     reason = event.payload.get("reason")
     info = raw.get("info", {})
+    if reason == "opencode_parent_session":
+        parent = info.get("parentID")
+        return (
+            client == "2.2.5"
+            and event.provenance.record_type == "session"
+            and event.provenance.record_index == 0
+            and type(parent) is str
+            and parent.startswith("ses_")
+            and 0 < len(parent[4:]) <= 64
+            and parent[4:].isascii()
+            and parent[4:].isalnum()
+        )
     if reason == "opencode_v2_session_model_variant":
         return type(info.get("model")) is dict and type(info["model"].get("variant")) is str
     messages = raw.get("messages", [])
@@ -415,7 +434,7 @@ def audit_snapshot(
     selection.__post_init__()
     try:
         binding = _snapshot_binding(snapshot)
-        if hashlib.sha256(snapshot.raw_bytes).hexdigest() != snapshot.authority_sha256:
+        if not snapshot.integrity_valid():
             raise NativeAuditError()
         from session_migrate.audit_adapters import claude, codex, opencode_v2
 
@@ -430,6 +449,11 @@ def audit_snapshot(
             result = opencode_v2.audit(raw, snapshot, audit_policy)
         else:
             raise NativeAuditError()
+        # A resolved chain intentionally omits ancestor headers and history after
+        # the selected cutoffs. Auditing its projection cannot certify complete
+        # coverage of every physical component's private context.
+        if len(snapshot.storage_components) > 1:
+            result.taxonomy.issue("codex_materialized_history_context_unproven", 0)
         normalized = _normalize(result, snapshot)
         taxonomy = result.taxonomy
         blocking_codes = set(taxonomy.issue_counts) - KNOWN_LOSS_ISSUES

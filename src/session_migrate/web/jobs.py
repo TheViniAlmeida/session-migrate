@@ -271,7 +271,7 @@ class JobManager:
     def _runtime_enqueue(self, request, context, action, native_action):
         if type(native_action) is not str or native_action not in NATIVE_ACTIONS:
             raise JobError("action_invalid")
-        if (action == "capture") != (native_action != "return_new_full"):
+        if (action == "capture") != (native_action not in {"return_new_full", "tree"}):
             raise JobError("action_invalid")
         if type(request) is not dict:
             raise JobError("request_invalid")
@@ -940,7 +940,13 @@ class JobManager:
                             ),
                         )
                         with self._condition:
-                            job.state, job.result_json = "completed", _document(result)
+                            job.state = "completed"
+                            if job.native_action == "tree":
+                                if result.get("status") in {"partial", "needs_reconcile"}:
+                                    job.state = "uncertain"
+                                elif result.get("status") == "cancelled":
+                                    job.state = "cancelled"
+                            job.result_json = _document(result)
                         continue
                     if job.service_action != "transfer":
                         result = commit_service(handle, job.auth_lease)

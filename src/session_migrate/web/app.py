@@ -87,6 +87,22 @@ def validate_parameters(action, parameters, identifiers):
             raise WebInputError("identifier_invalid")
     nullable = {"project_id", "target_title", "title_policy"}
     for name, value in parameters.items():
+        if action == "prepare_tree" and name == "manifest":
+            if type(value) is not dict:
+                raise WebInputError("tree_declaration_required")
+            continue
+        if action == "prepare_tree" and name in {"detach", "acknowledge_partial"}:
+            if type(value) is not bool:
+                raise WebInputError("field_type_invalid")
+            continue
+        if action == "prepare_tree" and name == "hierarchy_keys":
+            if (
+                type(value) is not list
+                or len(value) > 2048
+                or any(type(item) is not str or _OPAQUE.fullmatch(item) is None for item in value)
+            ):
+                raise WebInputError("selection_invalid")
+            continue
         if value is None and name in nullable:
             continue
         if name == "selection":
@@ -118,7 +134,7 @@ def validate_parameters(action, parameters, identifiers):
         if name == "document":
             if not value or len(value.encode("utf-8")) > 60000:
                 raise WebInputError("document_invalid")
-        elif name in {"model", "model_provider", "target_cli_version"}:
+        elif name in {"model", "model_provider", "target_cli_version", "source_client_version"}:
             if not 0 < len(value.encode("utf-8")) <= 256 or any(
                 ord(c) < 32 or ord(c) == 127 for c in value
             ):
@@ -147,6 +163,25 @@ def validate_parameters(action, parameters, identifiers):
     }
     if action in required and set(parameters) != required[action]:
         raise WebInputError("fields_missing")
+    if action == "prepare_tree":
+        required_tree = {
+            "source_profile_id",
+            "target_profile_id",
+            "project_id",
+            "source_client_version",
+            "manifest",
+            "mode",
+            "detach",
+            "acknowledge_partial",
+            "model_provider",
+            "model",
+        }
+        if not required_tree <= parameters.keys() or parameters["mode"] not in {
+            "single",
+            "subtree",
+            "full_tree",
+        }:
+            raise WebInputError("fields_missing")
     runtime_required = {
         "source_session_id",
         "target_profile_id",
@@ -170,6 +205,7 @@ def validate_parameters(action, parameters, identifiers):
         "confirm_handoff",
         "confirm_return_summary",
         "confirm_return_full",
+        "confirm_tree",
     } and set(parameters) != {"body_fingerprint", "idempotency_key"}:
         raise WebInputError("fields_missing")
 
@@ -371,6 +407,33 @@ def create_app(registry: RunRegistry, origin: str, backend):
     )
     routes.extend(
         [
+            api_route(
+                "/api/trees/prepare",
+                "prepare_tree",
+                "POST",
+                "publish",
+                (
+                    "source_profile_id",
+                    "target_profile_id",
+                    "project_id",
+                    "source_client_version",
+                    "manifest",
+                    "mode",
+                    "anchor",
+                    "detach",
+                    "acknowledge_partial",
+                    "model_provider",
+                    "model",
+                    "hierarchy_keys",
+                ),
+            ),
+            api_route(
+                "/api/trees/{proposal_id}/confirm",
+                "confirm_tree",
+                "POST",
+                "publish",
+                ("body_fingerprint", "idempotency_key"),
+            ),
             api_route(
                 "/api/handoffs/capture",
                 "capture_handoff",

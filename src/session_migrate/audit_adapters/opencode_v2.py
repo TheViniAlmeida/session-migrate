@@ -236,6 +236,9 @@ def audit(value, snapshot, policy) -> AdapterResult:
                 {
                     "id": ID,
                     "projectID": ID,
+                    # The public 2.2.5 parent coordinate is checked separately
+                    # by the tree publisher; it does not prove a fork boundary.
+                    **({"parentID": ID} if client == "2.2.5" else {}),
                     "title": scalar(ACCOUNTING, str),
                     "agent": scalar(ACCOUNTING, str),
                     "model": MODEL,

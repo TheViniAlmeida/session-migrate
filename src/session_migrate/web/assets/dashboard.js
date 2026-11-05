@@ -16,6 +16,9 @@
   let usageCursor = null;
   let operationCursor = null;
   let confirmationPending = false;
+  let treeManifest = null;
+  let treeGeneration = 0;
+  let treePreparing = false;
   const readable = (value, fallback = "Unknown") => typeof value === "string" && value.length ? value : fallback;
   const notice = (message, error = false) => {
     byId("notice").textContent = message;
@@ -26,7 +29,7 @@
   const isConnected = () => connection !== null && Date.now() < Date.parse(connection.expires_at);
   const setEnabled = () => {
     const connected = isConnected();
-    const busy = confirmationPending || (activeJob !== null && !terminalStates.has(activeJob.state));
+    const busy = treePreparing || confirmationPending || (activeJob !== null && !terminalStates.has(activeJob.state));
     for (const id of ["source-profile", "target-profile", "target-project", "target-title", "title-policy", "refresh-sessions"])
       byId(id).disabled = !connected || busy;
     byId("transfer-mode").disabled = !connected || busy;
@@ -38,6 +41,9 @@
     byId("discard-handoff").disabled = !connected || busy;
     byId("prepare-transfer").disabled = !connected || !capabilities.publish_enabled || busy || selected === null || !byId("target-profile").value;
     byId("adoption-controls").hidden = !capabilities.adoption_available;
+    byId("tree-controls").hidden = !capabilities.tree_available;
+    for (const id of ["tree-manifest", "tree-source-version", "tree-mode", "tree-anchor", "tree-edges", "tree-detach", "tree-partial", "tree-provider", "tree-model"]) byId(id).disabled = !connected || busy;
+    byId("prepare-tree").disabled = !connected || !capabilities.publish_enabled || !capabilities.tree_available || busy || !treeManifest || !byId("source-profile").value || !byId("target-profile").value || !byId("target-project").value;
     byId("adopt-target-session").disabled = !connected || busy;
     byId("preview-adoption").disabled = !connected || busy || !byId("adopt-target-session").value;
     byId("prepare-adoption").disabled = !connected || !capabilities.publish_enabled || !capabilities.adoption_available || busy || selected === null || !byId("adopt-target-session").value;
@@ -87,6 +93,7 @@
     review = null;
     activeJob = null;
     confirmationPending = false;
+    treeManifest = null; treePreparing = false; treeGeneration += 1; byId("tree-file-name").textContent = "Choose a session-tree-inventory JSON file.";
     clearTimeout(pollTimer);
     sessionCursor = usageCursor = operationCursor = null;
     byId("connection-state").textContent = "Disconnected";
@@ -202,7 +209,7 @@
     } catch { notice("Sessions could not be loaded. Refresh after checking the current profile.", true); }
   };
   const selectSession = async (session, button) => {
-    if (confirmationPending || (activeJob && !terminalStates.has(activeJob.state))) return;
+    if (treePreparing || confirmationPending || (activeJob && !terminalStates.has(activeJob.state))) return;
     selected = session; selectionGeneration += 1; const expectedSelection = selectionGeneration; usageCursor = null;
     clearReview();
     for (const item of document.querySelectorAll(".session-button")) item.setAttribute("aria-pressed", String(item === button));
@@ -320,13 +327,42 @@
     setEnabled();
     byId("confirm-transfer").disabled = true;
     try {
-      const resource = { transfer: "proposals", summary: "handoffs", return_new_summary: "return-new-summary", return_new_full: "return-new-full" }[currentReview.action] || currentReview.action.replaceAll("_", "-");
+      const resource = { transfer: "proposals", summary: "handoffs", return_new_summary: "return-new-summary", return_new_full: "return-new-full", tree: "trees" }[currentReview.action] || currentReview.action.replaceAll("_", "-");
       const job = await api(`/api/${resource}/${encodeURIComponent(currentReview.proposal.proposal_id)}/confirm`, { method: "POST", body: { body_fingerprint: currentReview.proposal.fingerprint, idempotency_key: currentReview.key } });
       if (review !== currentReview) return;
       showJob(job); pollJob(job.job_id);
     } catch { notice("Confirmation could not be observed. Reusing this review checks the same confirmation; it does not request another import.", true); setEnabled(); }
   });
   for (const id of ["transfer-mode", "handoff-model", "handoff-provider", "handoff-version", "handoff-first", "handoff-last", "handoff-parent"]) byId(id).addEventListener("input", clearReview);
+  for (const id of ["tree-source-version", "tree-mode", "tree-anchor", "tree-edges", "tree-detach", "tree-partial", "tree-provider", "tree-model"]) byId(id).addEventListener("input", () => { treeGeneration += 1; clearReview(); });
+  for (const id of ["source-profile", "target-profile", "target-project"]) byId(id).addEventListener("change", () => { treeGeneration += 1; });
+  byId("tree-manifest").addEventListener("change", async (event) => {
+    const file = event.target.files[0], expected = ++treeGeneration;
+    event.target.value = ""; treeManifest = null; clearReview();
+    if (!file) return;
+    try {
+      if (file.size > 50000) throw new Error("tree_declaration_limit");
+      const value = JSON.parse(await file.text());
+      if (expected !== treeGeneration) return;
+      if (!value || Array.isArray(value) || value.kind !== "session-tree-inventory" || value.schema_version !== 1) throw new Error("tree_declaration_invalid");
+      treeManifest = value; byId("tree-file-name").textContent = file.name; setEnabled();
+    } catch { if (expected === treeGeneration) { notice("Choose a bounded manual inventory declaration. Saved proposals and claimed native verification cannot authorize a tree.", true); setEnabled(); } }
+  });
+  byId("prepare-tree").addEventListener("click", async () => {
+    if (confirmationPending || !treeManifest || (activeJob && !terminalStates.has(activeJob.state))) return;
+    clearReview();
+    const expected = treeGeneration, expectedSelection = selectionGeneration;
+    const request = { source_profile_id: byId("source-profile").value, target_profile_id: byId("target-profile").value, project_id: byId("target-project").value, source_client_version: byId("tree-source-version").value, manifest: treeManifest, mode: byId("tree-mode").value, detach: byId("tree-detach").checked, acknowledge_partial: byId("tree-partial").checked, model_provider: byId("tree-provider").value, model: byId("tree-model").value };
+    if (byId("tree-anchor").value) request.anchor = byId("tree-anchor").value;
+    if (byId("tree-edges").value.trim()) request.hierarchy_keys = byId("tree-edges").value.split(",").map((value) => value.trim()).filter(Boolean);
+    treePreparing = true; setEnabled();
+    try {
+      const job = await api("/api/trees/prepare", { method: "POST", body: request });
+      if (expected !== treeGeneration || expectedSelection !== selectionGeneration) { await api(`/api/jobs/${encodeURIComponent(job.job_id)}/cancel`, { method: "POST", body: {} }); return; }
+      showJob(job); pollJob(job.job_id);
+    } catch { notice("The tree review could not be prepared. Check the declaration, selected profiles, project and selection boundary.", true); }
+    finally { treePreparing = false; setEnabled(); }
+  });
   byId("handoff-document").addEventListener("input", () => { review = null; byId("proposal").hidden = true; });
   byId("load-handoff-parents").addEventListener("click", async () => {
     try {

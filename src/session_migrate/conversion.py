@@ -321,6 +321,7 @@ class ConversionOptions:
     model: str | None = None
     target_title: str | None = None
     title_policy: TitlePolicy | None = None
+    target_parent_id: str | None = None
 
     def __post_init__(self) -> None:
         value = (
@@ -329,6 +330,10 @@ class ConversionOptions:
             else self.target_format
         )
         object.__setattr__(self, "target_format", TargetFormat(value))
+        if self.target_parent_id is not None and (
+            self.target_format is not TargetFormat.OPENCODE or self.target_cli_version != "2.2.5"
+        ):
+            raise SessionMigrateError("Session parents require the exact OpenCode 2.2.5 target")
         if self.target_title is not None:
             validate_title(self.target_title)
         if self.title_policy is not None:
@@ -1063,6 +1068,7 @@ def convert_session(
             provider_id=provider,
             model_id=options.model,
             timestamp=timestamp,
+            parent_session_id=options.target_parent_id,
             **(
                 {"title": title_plan.native_effective}
                 if title_plan is not None and title_plan.policy == TitlePolicy.NATIVE
@@ -2136,7 +2142,7 @@ def install_opencode_artifact(
     collision = (
         openchamber.session_exists(server, artifact.session_id, values)
         if server
-        else artifact.session_id in _opencode_session_ids(cli, values)
+        else _opencode_session_exists(cli, artifact.session_id, values, version=observed_version)
     )
     if collision:
         raise SessionMigrateError(
@@ -2171,13 +2177,26 @@ def install_opencode_artifact(
         collision = (
             openchamber.session_exists(server, artifact.session_id, values)
             if server
-            else artifact.session_id in _opencode_session_ids(cli, values)
+            else _opencode_session_exists(
+                cli, artifact.session_id, values, version=observed_version
+            )
         )
         if collision:
             raise SessionMigrateError(
                 "OpenCode session ID appeared during import preflight; refusing to continue: "
                 f"{artifact.session_id}"
             )
+
+        parent = opencode.parse_import_bytes(artifact.native_bytes).parent_session
+        if parent is not None:
+            with tempfile.TemporaryDirectory(
+                prefix="session-migrate-parent-", dir=values.get("TMPDIR")
+            ) as parent_directory:
+                parent_export = Path(parent_directory) / "parent.json"
+                _invoke_opencode_export(cli, parent, parent_export, values)
+                parsed_parent = opencode.parse_import(parent_export)
+                if parsed_parent.session_id != parent or parsed_parent.cwd != artifact.cwd:
+                    raise SessionMigrateError("OpenCode tree parent belongs to another project")
 
         temporary_root = values.get("TMPDIR")
         with tempfile.TemporaryDirectory(
@@ -2205,6 +2224,9 @@ def install_opencode_artifact(
                 exported = opencode.parse_import(Path(name) / "verify.json")
                 if exported.session_id != artifact.session_id:
                     raise SessionMigrateError("OpenCode imported a different session ID")
+                planned_parent = opencode.parse_import_bytes(artifact.native_bytes).parent_session
+                if exported.parent_session != planned_parent or exported.cwd != artifact.cwd:
+                    raise SessionMigrateError("OpenCode imported a different parent or project")
             if server:
                 if (
                     openchamber.assert_backend_matches(server, values, observed_version)
@@ -2608,6 +2630,56 @@ def _opencode_session_ids(cli: Path, environ: Mapping[str, str]) -> set[str]:
             raise SessionMigrateError("OpenCode session list contains invalid metadata")
         result.add(item["id"])
     return result
+
+
+def _opencode_session_exists(
+    cli: Path, session_id: str, environ: Mapping[str, str], *, version: str | None = None
+) -> bool:
+    """Use exact public export in 2.2.5: its root list deliberately omits children.
+
+    Only the stock, version-pinned diagnostic proves absence. Transport errors,
+    invalid exports and unexpected diagnostics fail closed. No transcript reaches
+    the exception or a pipe kept in memory.
+    """
+    server = environ.get("SESSION_MIGRATE_OPENCODE_SERVER")
+    if server:
+        return openchamber.session_exists(server, session_id, environ)
+    if (version or _opencode_version(cli, environ)) != "2.2.5":
+        return session_id in _opencode_session_ids(cli, environ)
+    if (
+        not isinstance(session_id, str)
+        or not session_id.startswith("ses_")
+        or not session_id[4:].isalnum()
+    ):
+        raise SessionMigrateError("OpenCode exact session identity is invalid")
+    with tempfile.TemporaryDirectory(
+        prefix="session-migrate-exists-", dir=environ.get("TMPDIR")
+    ) as directory:
+        path = Path(directory) / "export.json"
+        try:
+            with path.open("xb") as output:
+                os.chmod(path, 0o600)
+                result = subprocess.run(
+                    [str(cli), "session", "export", session_id, "--standalone"],
+                    env=_opencode_process_environment(environ),
+                    stdout=output,
+                    stderr=subprocess.PIPE,
+                    timeout=OPENCODE_EXPORT_TIMEOUT_SECONDS,
+                    check=False,
+                )
+        except (OSError, subprocess.TimeoutExpired):
+            raise SessionMigrateError("OpenCode exact session probe failed") from None
+        if (
+            result.returncode == 1
+            and path.stat().st_size == 0
+            and result.stderr == (f"Session not found: {session_id}\n".encode())
+        ):
+            return False
+        if result.returncode != 0 or not 0 < path.stat().st_size <= opencode.MAX_NATIVE_BYTES:
+            raise SessionMigrateError("OpenCode exact session probe could not prove absence")
+        if opencode.parse_import(path).session_id != session_id:
+            raise SessionMigrateError("OpenCode exact session probe returned another identity")
+        return True
 
 
 def _invoke_opencode_import(
