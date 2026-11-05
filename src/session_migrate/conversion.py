@@ -812,6 +812,14 @@ def convert_session(
     session: Session, options: ConversionOptions, *, environ: Mapping[str, str] | None = None
 ) -> ConversionArtifact:
     target_format = TargetFormat(options.target_format.value)
+    if options.cwd is None and any(
+        event.kind is EventKind.OPAQUE
+        and event.payload.get("reason") == "duplicate_envelope_cwd_conflict"
+        for event in session.events
+    ):
+        raise SessionMigrateError(
+            "Claude duplicate envelopes disagree on cwd; specify an explicit destination --cwd"
+        )
     title_plan = None
     if options.target_title is not None:
         title_plan = plan_target_title(

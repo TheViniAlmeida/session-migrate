@@ -43,7 +43,7 @@ MAX_DIRECTORY_DEPTH = 32
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}\Z")
 _KEY = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,95}\Z")
 _APPROVED = {
-    "claude": claude.VALIDATED_CLAUDE_VERSIONS,
+    "claude": claude.READABLE_CLAUDE_VERSIONS,
     "codex": {"0.166.0"},
     "opencode": {"2.2.5"},
 }

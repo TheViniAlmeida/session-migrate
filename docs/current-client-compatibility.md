@@ -39,6 +39,13 @@ November primary releases: [OpenCode 2.2.5](https://github.com/anomalyco/opencod
 [Claude 2.1.318](https://github.com/anthropics/claude-code/releases/tag/v2.1.318),
 [Codex 0.166.0](https://github.com/openai/codex/releases/tag/rust-v0.166.0).
 
+## Claude Desktop 2.1.309 source projection
+
+The [309 reader contract](claude-desktop-309.md) admits exact-309 tree inventories
+and narrowly matching duplicate envelopes. This is separate from the validated
+client registry: coverage stays UNKNOWN, native writer/usage certification is not
+added, conflicting content/ancestry and missing active parents remain errors.
+
 ## October contracts retained
 
 DEV13 adds exact tested contracts for Claude Code **2.1.303 / 2.1.306** and

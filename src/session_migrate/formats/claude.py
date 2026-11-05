@@ -29,6 +29,8 @@ PINNED_CLAUDE_VERSION = "2.1.209"
 VALIDATED_CLAUDE_VERSIONS = frozenset(
     {PINNED_CLAUDE_VERSION, "2.1.303", "2.1.306", "2.1.317", "2.1.318"}
 )
+# Read-only metadata compatibility does not grant writer or audit authority.
+READABLE_CLAUDE_VERSIONS = VALIDATED_CLAUDE_VERSIONS | {"2.1.309"}
 TITLE_TYPES = {"custom-title": "customTitle", "ai-title": "aiTitle"}
 
 
@@ -53,7 +55,8 @@ def parse_records(
     """Project records whose digest and location were bound by the capture caller."""
 
     records = list(records)
-    selected_records = _active_conversation_records(records)
+    logical_records, duplicate_indices, ambiguous_cwd = _collapse_desktop_envelopes(records)
+    selected_records = _active_conversation_records(logical_records)
     selected = {record.index for record in selected_records}
     selected_session_ids = {
         string(record.value.get("sessionId"))
@@ -159,6 +162,14 @@ def parse_records(
     for record in records:
         if record.index in selected:
             continue
+        if record.index in duplicate_indices:
+            reason = (
+                "duplicate_envelope_cwd_conflict"
+                if record.index in ambiguous_cwd
+                else "duplicate_desktop_message_envelope"
+            )
+            events.append(_opaque_event(record, reason))
+            continue
         value = record.value
         record_type = string(value.get("type"))
         if record_type in {"user", "assistant"} and isinstance(value.get("message"), dict):
@@ -171,7 +182,7 @@ def parse_records(
         source_path=source_path,
         source_sha256=source_sha256,
         session_id=session_id,
-        cwd=Path(cwd) if cwd else None,
+        cwd=Path(cwd) if cwd and not ambiguous_cwd else None,
         started_at=started_at,
         cli_version=cli_version,
         model=model,
@@ -407,6 +418,9 @@ def project_directory_name(cwd: Path) -> str:
 
 
 def _active_conversation_records(records: list[JsonlRecord]) -> list[JsonlRecord]:
+    # Keep the first physical representative and first-unique order. A repeated
+    # old envelope at EOF must not rewind the fallback conversation leaf.
+    records, _duplicates, _ambiguous_cwd = _collapse_desktop_envelopes(records)
     candidates = [
         record
         for record in records
@@ -481,6 +495,91 @@ def _active_conversation_records(records: list[JsonlRecord]) -> list[JsonlRecord
             raise SessionMigrateError("Claude active graph contains an ancestry cycle")
         cursor = logical_parent
     return list(reversed(leaf_to_root))
+
+
+def _type_exact_json_equal(left: Any, right: Any) -> bool:
+    """JSON equality must distinguish booleans, integers and floating values."""
+
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _type_exact_json_equal(left[key], right[key]) for key in left
+        )
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _type_exact_json_equal(a, b) for a, b in zip(left, right, strict=True)
+        )
+    return left == right
+
+
+def _same_desktop_message(first: JsonlRecord, repeated: JsonlRecord) -> bool:
+    """Recognize only the captured 2.1.309 message-envelope repetition shape."""
+
+    for row in (first.value, repeated.value):
+        kind = row.get("type")
+        if kind not in {"user", "assistant", "attachment"} or row.get("version") != "2.1.309":
+            return False
+        if not {"uuid", "parentUuid", "sessionId", "timestamp", "version", "type"} <= row.keys():
+            return False
+        if any(type(row[key]) is not str or not row[key] for key in ("uuid", "sessionId")):
+            return False
+        parent = row["parentUuid"]
+        if parent is not None and (type(parent) is not str or not parent):
+            return False
+        if type(row["timestamp"]) is not str or not valid_rfc3339(row["timestamp"]):
+            return False
+        if kind == "attachment":
+            # Attachment nodes already project as OPAQUE. Equality only permits
+            # graph traversal; neither physical envelope becomes replay text.
+            if type(row.get("attachment")) is not dict or "message" in row:
+                return False
+            continue
+        message = row.get("message")
+        if type(message) is not dict or message.get("role") != kind:
+            return False
+        content = message.get("content")
+        if type(content) not in {str, list}:
+            return False
+        if type(content) is list and any(
+            type(block) is not dict or type(block.get("type")) is not str or not block["type"]
+            for block in content
+        ):
+            return False
+    # Unknown fields are compared too, never stripped. Only these four observed
+    # wrapper fields may differ; toolUseResult never becomes replay content.
+    wrapper_fields = {"cwd", "slug", "promptId", "toolUseResult"}
+    return _type_exact_json_equal(
+        {key: value for key, value in first.value.items() if key not in wrapper_fields},
+        {key: value for key, value in repeated.value.items() if key not in wrapper_fields},
+    )
+
+
+def _collapse_desktop_envelopes(
+    records: Sequence[JsonlRecord],
+) -> tuple[list[JsonlRecord], set[int], set[int]]:
+    """Build a logical graph without mutating or losing physical accounting."""
+
+    unique: list[JsonlRecord] = []
+    by_uuid: dict[str, JsonlRecord] = {}
+    duplicates: set[int] = set()
+    ambiguous_cwd: set[int] = set()
+    for record in records:
+        uid = string(record.value.get("uuid"))
+        first = by_uuid.get(uid) if uid else None
+        if first is not None:
+            if not _same_desktop_message(first, record):
+                raise SessionMigrateError("Claude transcript contains a duplicate record UUID")
+            duplicates.add(record.index)
+            if ("cwd" in first.value) != ("cwd" in record.value) or (
+                not _type_exact_json_equal(first.value.get("cwd"), record.value.get("cwd"))
+            ):
+                ambiguous_cwd.add(record.index)
+            continue
+        if uid:
+            by_uuid[uid] = record
+        unique.append(record)
+    return unique, duplicates, ambiguous_cwd
 
 
 def _valid_preserved_compaction_back_edge(

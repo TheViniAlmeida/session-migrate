@@ -118,3 +118,11 @@ componentes mantém `coverage=unknown` para contextos privados dos headers
 ancestrais fora da projeção. Isso permite revisar o histórico visível sem
 alegar preservação integral de estado privado, custos, checkpoints ou janela
 nativa. Vínculo `parentID` organizacional também não prova fronteira de fork.
+
+## Claude Desktop 2.1.309
+
+Use the actual `--source-client-version 2.1.309` with an explicit inventory.
+Matching duplicate envelopes have a [bounded reader contract](claude-desktop-309.md);
+coverage remains UNKNOWN and requires acknowledgement. Session links are still
+operator-declared. Missing active parents and conflicting copies are refused
+before publication.

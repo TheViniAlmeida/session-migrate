@@ -1509,7 +1509,9 @@ def _prepare_lineage_projection(state: _PreparedState):
 
     artifact = state.built.artifact
     known_sources = {
-        AgentFormat.CLAUDE: claude.VALIDATED_CLAUDE_VERSIONS,
+        # Readable sources can produce UNKNOWN portable projections; this does
+        # not certify the source client or permit it as a native writer target.
+        AgentFormat.CLAUDE: claude.READABLE_CLAUDE_VERSIONS,
         AgentFormat.CODEX: codex.VALIDATED_LEGACY_VERSIONS | codex.VALIDATED_PAGINATED_VERSIONS,
         AgentFormat.OPENCODE: opencode_v2.VALIDATED_VERSIONS,
     }
