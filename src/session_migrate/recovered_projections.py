@@ -54,8 +54,12 @@ from session_migrate.operations import (
 from session_migrate.profiles import Profile, SessionRef, resolve_source
 from session_migrate.projection_policies import (
     ExpectedProjection,
+    ProjectionError,
     ProjectionPolicy,
+    archived_tools_match,
     expected_from_source,
+    policy_from_id,
+    validate_policy_target,
 )
 from session_migrate.projections import (
     ProjectionContext,
@@ -67,6 +71,7 @@ from session_migrate.projections import (
     _options_dict,
     _same_semantics,
     _sha,
+    _target_conversation_witness,
 )
 
 _SEAL = object()
@@ -754,7 +759,7 @@ def _issue_recovery_context(
     )
     _require(request.source_cli is None and request.target_cli is None, "context_unavailable")
     _validate_title_request(request)
-    policy = policy if policy is not None else ProjectionPolicy()
+    policy = policy if policy is not None else policy_from_id(record.versions.projection_policy)
     _require(type(policy) is ProjectionPolicy, "unsupported_policy")
     policy.__post_init__()
     profiles = _profiles(source_profile, target_profile)
@@ -764,6 +769,9 @@ def _issue_recovery_context(
             observer, request, source_capture, record, source_profile, policy, on_read_effect
         )
     versions = record.versions
+    validate_policy_target(
+        policy, TargetFormat(input_file_capture.source_format.value), versions.target_client
+    )
     _require(
         versions.canonical_algorithm == policy.canonical_policy.algorithm
         and versions.projection_policy == policy.policy_id
@@ -889,6 +897,7 @@ def _issue_recovery_context(
         model=request.model,
         target_title=request.target_title,
         title_policy=request.title_policy,
+        target_parent_id=request.target_parent_id,
     )
     if input_file_capture.source_format is AgentFormat.CODEX:
         _require(
@@ -965,6 +974,8 @@ def _prepare_recovery_context(
         )
     except RecoveryProjectionError:
         raise
+    except ProjectionError as exc:
+        raise RecoveryProjectionError(exc.code) from None
     except (
         SessionMigrateError,
         OSError,
@@ -1015,8 +1026,12 @@ def prepare_recovered_projection(source_capture, input_file_capture, record, con
         policy=policy,
     )
     input_obs = _observe(input_file_capture, versions.target_client, policy)
+    _require(archived_tools_match(expected, input_file_capture), "semantic_mismatch")
     _require(
-        _same_semantics(expected.witness.prefix_witness, input_obs.witness.prefix_witness),
+        _same_semantics(
+            expected.witness.prefix_witness,
+            _target_conversation_witness(input_obs, input_file_capture, context._options, policy),
+        ),
         "semantic_mismatch",
     )
     _require(
@@ -1141,8 +1156,12 @@ def verify_recovered_projection(prepared, observed_snapshot, *, context):
     actual, original = observed.session, prepared._artifact_observation.session
     _native_metadata(observed_snapshot, actual, context.target_client)
     metadata = actual.session_id == original.session_id and actual.cwd == original.cwd
-    semantic = _same_semantics(
-        prepared.expected.witness.prefix_witness, observed.witness.prefix_witness
+    validate_policy_target(prepared._context._policy, context.target_format, context.target_client)
+    semantic = archived_tools_match(prepared.expected, observed_snapshot) and _same_semantics(
+        prepared.expected.witness.prefix_witness,
+        _target_conversation_witness(
+            observed, observed_snapshot, prepared._context._options, prepared._context._policy
+        ),
     )
     structure = observed.audit.structure == prepared._artifact_observation.audit.structure
     fidelity = (

@@ -78,6 +78,8 @@ compatibility, new commands and HTTP endpoints.
 
 See [current client compatibility](docs/current-client-compatibility.md) for
 exact tested releases and native replay limits.
+DEV17 adds a Claude Desktop 2.1.309 [bounded source-reader contract](docs/claude-desktop-309.md)
+for matching duplicate envelopes, with explicit UNKNOWN coverage and loss accounting.
 
 See the [terminal interface](docs/terminal-ui.md) for installation, profile roots
 and destination titles. Real imports and transfers write private

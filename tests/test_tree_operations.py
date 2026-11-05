@@ -753,7 +753,10 @@ def test_two_clean_cancellations_can_resume_with_each_fresh_artifact_hash(setup,
 
 
 @pytest.mark.parametrize("connected_server", [False, True])
-def test_stock_225_three_levels_cold_export_and_child_collision(tree_native, connected_server):
+@pytest.mark.parametrize("source_version", ["2.1.318", "2.1.309"])
+def test_stock_225_three_levels_cold_export_and_child_collision(
+    tree_native, connected_server, source_version
+):
     _, run = tree_native
     script = r"""
 import json, os, subprocess, sys
@@ -803,8 +806,31 @@ declaration={'kind':'session-tree-inventory','schema_version':1,'root_node_key':
     'declaration':{'declaration_id':'four_nodes','declared_at':'2026-11-05T12:00:00Z',
         'operator':'test','statement':'synthetic persistent forks with a copied child prefix',
         'confirmed':True}}
+# Exercise Desktop envelope copies on the real importer without reading a user store.
+for path in source_root.glob('*.jsonl'):
+    rows=[json.loads(line) for line in path.read_text().splitlines()]
+    for row in rows:
+        row['version']=SOURCE_VERSION
+    if SOURCE_VERSION=='2.1.309':
+        hook={**rows[0],'type':'system','subtype':'stop_hook_summary',
+            'uuid':rows[0]['uuid']+'-hook','parentUuid':rows[0]['uuid'],
+            'content':'HOOK_ONLY_SENTINEL','hookInfos':[{'status':'synthetic'}]}
+        hook.pop('message')
+        if len(rows)>1:
+            rows[1]['parentUuid']=hook['uuid']
+        rows.insert(1,hook)
+        last=next(row for row in reversed(rows) if row['type'] in ('user','assistant'))
+        rows.append({**rows[0],'type':'assistant','uuid':rows[0]['uuid']+'-open-call',
+            'parentUuid':last['uuid'],'message':{'role':'assistant','content':[{
+                'type':'tool_use','id':'archived-call','name':'Read',
+                'input':{'file_path':'ARCHIVE_INPUT_SENTINEL'}}]}})
+        # Late copies must not rewind the fallback leaf or become conversation.
+        rows.append({**rows[0],'cwd':'/fixture/other','slug':'copied-envelope',
+            'promptId':'copied-prompt','toolUseResult':{'unprojected':'WRAPPER_ONLY_SENTINEL'}})
+        rows.append({**hook,'slug':'repeated-hook'})
+    path.write_text(''.join(json.dumps(row)+'\n' for row in rows))
 inventory=inventory_from_explicit_manifest(declaration,root=source_root,source_format='claude',
-    client_version='2.1.318')
+    client_version=SOURCE_VERSION)
 selection=TreeSelection('full_tree','parent',('parent','child','grandchild','sibling'),
     ('edge_child','edge_grandchild','edge_sibling'))
 options['target']=replace(options['target'],cli=Path('/tmp/opencode-v22'))
@@ -851,6 +877,9 @@ if CONNECTED_SERVER:
 mark('preparing')
 prepared=prepare_tree(inventory,selection,**options)
 proposal=tree_proposal(prepared)
+if SOURCE_VERSION=='2.1.309':
+    assert proposal['coverage']=='unknown'
+    assert all(node['coverage']=='unknown' and node['losses'] for node in proposal['nodes'])
 mark('committing')
 result=commit_tree(prepared,progress=lambda event: mark(event.stage.value)).to_dict()
 assert result['status']=='completed',result
@@ -876,6 +905,14 @@ for index,native_id in enumerate(ids):
     document=json.loads(export.stdout)
     assert document['info'].get('parentID')==proposal['nodes'][index]['parent_target_id']
     assert document['messages']
+    if SOURCE_VERSION=='2.1.309':
+        tools=[part for message in document['messages'] for part in message.get('content',[])
+            if isinstance(part,dict) and part.get('type')=='tool']
+        assert len(tools)==1
+        assert tools[0]['id']=='archived-call' and tools[0]['name']=='Read'
+        assert tools[0]['state']=={'status':'error','input':{'file_path':'ARCHIVE_INPUT_SENTINEL'},
+            'error':{'type':'ImportedIncompleteTool',
+                'message':'Imported call had no completed result'}}
     if index==0: parent_before=document
     if index==1: child_before=document
 assert json.dumps(child_before).count('PRIVATE_BODY_SENTINEL parent')==1
@@ -915,6 +952,11 @@ assert 'PRIVATE_BODY_SENTINEL child' in replay
 assert replay.count('PRIVATE_BODY_SENTINEL parent')==1
 assert 'PRIVATE_BODY_SENTINEL grandchild' not in replay
 assert 'PRIVATE_BODY_SENTINEL sibling' not in replay
+assert 'WRAPPER_ONLY_SENTINEL' not in replay
+assert 'HOOK_ONLY_SENTINEL' not in replay
+if SOURCE_VERSION=='2.1.309':
+    assert 'ARCHIVE_INPUT_SENTINEL' in replay
+    assert 'Imported call had no completed result' in replay
 if server is not None:
     server.terminate()
     server.wait(timeout=10)
@@ -922,7 +964,12 @@ provider_context.__exit__(None,None,None)
 print(json.dumps({'status':'completed','nodes':len(ids),'cold_export_parent_chain':True,
     'exact_child_collision_probe':True,'private_journal':True,'independent_child_resumable':True}))
 """
-    result = json.loads(run(f"CONNECTED_SERVER={connected_server!r}\n" + script, worker=True))
+    result = json.loads(
+        run(
+            f"CONNECTED_SERVER={connected_server!r}\nSOURCE_VERSION={source_version!r}\n" + script,
+            worker=True,
+        )
+    )
     assert result["nodes"] == 4 and result["exact_child_collision_probe"]
 
 

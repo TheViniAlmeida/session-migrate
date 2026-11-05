@@ -8,6 +8,31 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
+## 05/11/2026 — DEV17
+
+- Adicionado [contrato limitado de leitura Claude Desktop 2.1.309](docs/claude-desktop-309.md)
+  para migração individual e árvore, sem alterar versões nos arquivos nem
+  certificar emissão nativa, completude ou uso de tokens nessa versão.
+- Cópias de mensagens/attachments e system/stop_hook_summary com conteúdo
+  e ancestrais idênticos admitem
+  diferenças apenas em cwd/slug/promptId/toolUseResult. Cada envelope omitido
+  fica contabilizado; o hash e a contagem físicos são preservados.
+- Cópias tardias não rebobinam a mensagem final. Cwd conflitante exige destino
+  explícito; ancestrais ausentes, ciclos e conteúdo/vínculos conflitantes são recusados.
+- Mantida cobertura UNKNOWN com fidelidade parcial para envelopes omitidos;
+  preparado registro de projeção/ledger para essa origem sem promovê-la a FULL.
+- Validação local: 668 testes selecionados passaram, incluindo dois gates nativos
+  OpenCode 2.2.5 em isolamento e revisão independente. Os cinco casos com
+  compactação não reconstruída continuam explicitamente recusados.
+- Adicionada prova versionada para arquivamento de chamadas realmente abertas
+  em árvores revisadas para OpenCode 2.2.5. Valida erro ImportedIncompleteTool
+  bruto e relação gerada independente, exige confirmação de perdas e conserva
+  UNKNOWN/PARTIAL sem certificado/FULL. A política padrão continua estrita;
+  órfãos, duplicidades e identidades conflitantes continuam recusados.
+- Nenhum comando ou endpoint novo; o fluxo de árvore existente usa a versão
+  real 2.1.309 e exige confirmação das limitações. A atualização da instalação
+  é separada da publicação desta versão.
+
 ## 05/11/2026 — DEV16
 
 - Consolidada a [referência da atualização](docs/dev16-release.md) com versão,

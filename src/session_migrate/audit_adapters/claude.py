@@ -171,8 +171,19 @@ def audit(records, snapshot, policy) -> AdapterResult:
         policy.client_version is not None and policy.client_version != client
     ):
         taxonomy.issue("unsupported_client_version", 0)
+    duplicate_indices = set()
+    try:
+        logical_records, duplicate_indices, _ambiguous_cwd = parser._collapse_desktop_envelopes(
+            records
+        )
+    except (SessionMigrateError, TypeError, ValueError, RecursionError):
+        taxonomy.issue("invalid_graph", 0)
+        logical_records = records
+    for index in sorted(duplicate_indices):
+        taxonomy.issue("duplicate_envelope_unproven", index)
+        taxonomy.issue("duplicate_envelope_loss", index)
     by_uuid = {}
-    for record in records:
+    for record in logical_records:
         value = record.value
         uid = value.get("uuid")
         if uid is not None:
