@@ -73,6 +73,9 @@ the TUI. See the [tree migration guide](docs/tree-migration.md) for inventories,
 selection, review and explicit partial recovery. Codex compressed rollouts and
 shared history are read through bounded storage captures.
 
+See the [DEV16 release reference](docs/dev16-release.md) for the update summary,
+compatibility, new commands and HTTP endpoints.
+
 See [current client compatibility](docs/current-client-compatibility.md) for
 exact tested releases and native replay limits.
 

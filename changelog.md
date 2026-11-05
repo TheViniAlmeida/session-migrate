@@ -10,6 +10,10 @@ publicação no PyPI nem atualização automática das instalações existentes.
 
 ## 05/11/2026 — DEV16
 
+- Consolidada a [referência da atualização](docs/dev16-release.md) com versão,
+  compatibilidade, comandos, endpoints HTTP, campos e limites; README e guia
+  do dashboard atualizados.
+
 - DEV15 foi um candidato preparado, sem ativação; a entrega final inclui a
   aceitação de versões Claude conhecidas misturadas, preservando UNKNOWN.
 

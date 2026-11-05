@@ -86,7 +86,8 @@ smigrate tree inspect OPERATION_UUID
 smigrate tree reconcile OPERATION_UUID
 ```
 
-`inspect` lê o diário; `reconcile` observa os destinos sem importar. Para continuar
+`inspect` lê o diário; `reconcile` inspeciona a situação sem importar nem
+autorizar repetição automática. Para continuar
 nós comprovadamente não iniciados, execute `tree resume` com os mesmos argumentos
 de seleção/destino e `--operation-id OPERATION_UUID`, revise e confirme novamente.
 Nós concluídos são conferidos contra os ledgers reais, fonte, opções, IDs, hashes,

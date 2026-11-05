@@ -47,6 +47,25 @@ current profile namespaces and fingerprints. Readonly inspection does not
 initialize a ledger or refresh/migrate the catalog. Refresh the catalog through
 the ordinary CLI when required.
 
+## Persistent session trees
+
+DEV16 adds tree preparation/publication when launched with both `--allow-tree`
+and `--allow-publish`. Choose authorized source/destination profiles and a project,
+upload an explicit inventory, select one node/subtree/full tree, review the
+structure/coverage/losses and confirm once. Changing the selection requires a fresh review.
+
+The new routes are `POST /api/trees/prepare` and
+`POST /api/trees/{proposal_id}/confirm`; existing job/proposal routes provide
+progress, review and cancellation. `/api/capabilities` exposes `tree_available`.
+The same authentication, Origin, CSRF and one-shot/idempotency rules apply.
+Only launch-selected namespaces are available; limits are 16 nodes, 4 MiB per
+source and 8 MiB total. Partial/uncertain results retain their original IDs and
+receipts. Persistent inspection/reconciliation/resume use the CLI `tree` commands;
+there are no separate HTTP tree-resume or tree-reconcile routes.
+
+See the [DEV16 endpoint reference](dev16-release.md#endpoints-http-do-migrador)
+for request fields and responses, and the [tree guide](tree-migration.md) for examples.
+
 ## Usage observations
 
 Usage is extracted from an independently captured native source. Counter fields
