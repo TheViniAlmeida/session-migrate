@@ -225,7 +225,12 @@ def confirm(workspace, proposal, *, key="http-native-once"):
     data = {"body_fingerprint": proposal["fingerprint"], "idempotency_key": key}
     job = response_json(workspace.request("POST", path, json=data))
     job = wait_job(workspace, job, {"completed", "failed", "uncertain", "cancelled"})
-    assert job["state"] == "completed", job
+    assert job["state"] == "completed", {
+        "state": job["state"],
+        "reason": (job.get("result") or {}).get("reason"),
+        "phase": (job.get("result") or {}).get("phase"),
+        "status": (job.get("result") or {}).get("status"),
+    }
     replay = response_json(workspace.request("POST", path, json=data))
     assert replay["job_id"] == job["job_id"]
     return job

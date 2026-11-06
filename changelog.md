@@ -8,7 +8,7 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
-## 06/11/2026 — DEV18 (em validação)
+## 06/11/2026 — DEV18
 
 - Acrescentado contrato fechado de contexto nativo Claude 2.1.309, com seleção
   imutável, carriers tipados e recusa de controles/autoridade sem prova.
@@ -20,6 +20,8 @@ publicação no PyPI nem atualização automática das instalações existentes.
   recusa de comunicação entre peers são separadas das provas de API e histórico.
 - As cinco fontes privadas de compactação não estão certificadas; faltam shapes
   do recorte ativo. Falha do runtime real de schema continua não reproduzida no stock.
+- Entrega do contrato validado autorizada com o diagnóstico real registrado como
+  pendência; essa decisão preserva as recusas de entradas não comprovadas.
 - Validação local final: 1.372 testes selecionados passaram com pytest 9.1.1 do lock,
   sem falhas/erros/skips; gates nativos e browser executados separadamente.
   Revisões independentes aprovadas no contrato fechado; instalação segue separada.

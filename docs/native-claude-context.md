@@ -168,3 +168,18 @@ prepared capability. No new HTTP endpoint or web resume endpoint is introduced.
 
 The changes do not update existing installations, native frontends, MCP servers,
 credentials or permission policies automatically.
+
+## Pending runtime investigation
+
+On 6 November 2026, the operator authorized deployment of the validated DEV18
+contract while keeping the real-runtime incident as a follow-up. This does not
+certify the five private sources or remove the reader's refusal checks.
+
+The metadata report received that day confirms the same stock OpenCode 2.2.5
+executable hash used by the gates and nine original user messages containing only
+text, without structured files, agents or skills. It does not establish whether
+the gateway received an HTTP request during the failed attempt. That question
+needs correlated gateway metadata or a separate instrumented reproduction; a
+generic error cannot prove either answer. No message bodies, attachment
+names/paths, headers or credentials are needed. Active-region carrier shapes
+remain a separate compatibility follow-up.
