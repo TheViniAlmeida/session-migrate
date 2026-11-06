@@ -23,6 +23,7 @@ from session_migrate.lineage import Coverage, PolicyVersions
 from session_migrate.model import AgentFormat, EventKind, Session, TargetFormat
 from session_migrate.native_snapshots import NativeSnapshot, SourceCaptureContext
 from session_migrate.projection_policies import (
+    _REVIEWED_MEDIA_POLICIES,
     _REVIEWED_POLICIES,
     ExpectedProjection,
     ProjectionError,
@@ -308,6 +309,11 @@ def _expectation_sha(expected: ExpectedProjection) -> str:
                 if expected.policy.policy_id in _REVIEWED_POLICIES
                 else {}
             ),
+            **(
+                {"reviewed_media_results": expected.reviewed_media_results}
+                if expected.policy.policy_id in _REVIEWED_MEDIA_POLICIES
+                else {}
+            ),
             "losses": list(expected.loss_counts),
             "metadata_losses": list(expected.metadata_loss_counts),
             "relation_complete": expected.relation_complete,
@@ -394,7 +400,11 @@ def _observe(
     audit = audit_snapshot(
         snapshot,
         audit_policy=AuditPolicy(client_version=client),
-        selection=AuditSelection("claude309-reviewed-conversation-v1")
+        selection=AuditSelection(
+            "claude309-reviewed-inline-png-v1"
+            if policy.policy_id in _REVIEWED_MEDIA_POLICIES
+            else "claude309-reviewed-conversation-v1"
+        )
         if reviewed_portability
         else AuditSelection(),
     )
@@ -791,8 +801,16 @@ def verify_projection(
         }
         try:
             semantic = semantic and (
-                _native_target_order(strict_decode(observed_snapshot.raw_bytes), archived)
-                == _native_target_order(strict_decode(prepared._body), archived)
+                _native_target_order(
+                    strict_decode(observed_snapshot.raw_bytes),
+                    archived,
+                    inline_png=prepared._policy.policy_id in _REVIEWED_MEDIA_POLICIES,
+                )
+                == _native_target_order(
+                    strict_decode(prepared._body),
+                    archived,
+                    inline_png=prepared._policy.policy_id in _REVIEWED_MEDIA_POLICIES,
+                )
             )
         except (SessionMigrateError, ValueError, TypeError, KeyError, AttributeError):
             semantic = False
@@ -907,5 +925,14 @@ def reviewed_portability_report(prepared: PreparedProjection) -> dict | None:
                     ),
                 }
             )
+    if prepared._policy.policy_id in _REVIEWED_MEDIA_POLICIES:
+        report["native_image_result_blocks"] = [
+            {
+                "call_reference_sha256": _sha(call_id),
+                "ordered_blocks": [{"kind": kind, "sha256": digest} for kind, digest in blocks],
+            }
+            for call_id, blocks in prepared.expected.reviewed_media_results
+        ]
+        report["image_transport_binding_sha256"] = _sha(prepared.expected.reviewed_media_results)
     report["projection_policy"] = prepared._policy.policy_id
     return report

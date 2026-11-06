@@ -6,12 +6,16 @@ This plan selects historical conversation, not the native request normalizer.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import hashlib
 import json
+import struct
+import zlib
 from collections import Counter, defaultdict, deque
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, NoReturn
 
@@ -23,6 +27,12 @@ from session_migrate.model import Event, EventKind, Provenance, Role
 
 SOURCE_REVIEWED_POLICY_ID = "claude-2.1.309-reviewed-conversation-v1"
 REVIEWED_AUDIT_SELECTION_ID = "claude309-reviewed-conversation-v1"
+SOURCE_REVIEWED_MEDIA_POLICY_ID = "claude-2.1.309-reviewed-inline-png-v1"
+REVIEWED_MEDIA_AUDIT_SELECTION_ID = "claude309-reviewed-inline-png-v1"
+MAX_REVIEWED_PNG_BYTES = 16 * 1024 * 1024
+MAX_REVIEWED_PNG_DIMENSION = 8192
+MAX_REVIEWED_PNG_PIXELS = 16 * 1024 * 1024
+MAX_REVIEWED_PNG_INFLATED_BYTES = 64 * 1024 * 1024
 _RENDERED_CLASSES = frozenset(
     {
         "instructions",
@@ -94,6 +104,173 @@ def _sha(value: Any) -> str:
     return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
 
 
+def validate_inline_png_data_uri(uri: object) -> dict:
+    """Validate a bounded static PNG without rendering or reading external data.
+
+    The closed, non-indexed subset admits critical chunks and sRGB/gAMA/pHYs/tRNS.
+    Unsupported chunks, animation and trailing/compressed surplus fail closed.
+    The capture caller separately enforces its complete source byte budget.
+    """
+    prefix = "data:image/png;base64,"
+    if type(uri) is not str or not uri.startswith(prefix):
+        _fail("unsupported inline PNG data URI")
+    encoded = uri[len(prefix) :]
+    if not encoded or len(encoded) > ((MAX_REVIEWED_PNG_BYTES + 2) // 3) * 4:
+        _fail("inline PNG exceeds the image byte limit")
+    try:
+        data = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (ValueError, UnicodeError, binascii.Error):
+        _fail("invalid inline PNG base64")
+    if base64.b64encode(data).decode("ascii") != encoded:
+        _fail("noncanonical inline PNG base64")
+    if len(data) > MAX_REVIEWED_PNG_BYTES or not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        _fail("invalid or oversized inline PNG")
+    offset, chunk_count = 8, 0
+    header = None
+    palette = None
+    compressed = bytearray()
+    saw_data = False
+    ended = False
+    ancillary: set[bytes] = set()
+    while offset < len(data):
+        chunk_count += 1
+        if chunk_count > 4096 or len(data) - offset < 12:
+            _fail("invalid inline PNG chunk framing")
+        length = struct.unpack_from(">I", data, offset)[0]
+        end = offset + 12 + length
+        if end > len(data):
+            _fail("invalid inline PNG chunk length")
+        kind = data[offset + 4 : offset + 8]
+        body = data[offset + 8 : end - 4]
+        crc = struct.unpack_from(">I", data, end - 4)[0]
+        if zlib.crc32(kind + body) != crc:
+            _fail("invalid inline PNG chunk checksum")
+        if header is None:
+            if kind != b"IHDR" or length != 13:
+                _fail("invalid inline PNG header")
+            header = struct.unpack(">IIBBBBB", body)
+            width, height, depth, color, compression, filtering, interlace = header
+            if color == 3:
+                _fail("indexed inline PNG is unsupported")
+            depths = {0: {1, 2, 4, 8, 16}, 2: {8, 16}, 4: {8, 16}, 6: {8, 16}}
+            if (
+                not 0 < width <= MAX_REVIEWED_PNG_DIMENSION
+                or not 0 < height <= MAX_REVIEWED_PNG_DIMENSION
+                or width * height > MAX_REVIEWED_PNG_PIXELS
+                or depth not in depths.get(color, set())
+                or compression != 0
+                or filtering != 0
+                or interlace not in {0, 1}
+            ):
+                _fail("unsupported inline PNG dimensions or encoding")
+        elif kind == b"PLTE":
+            if (
+                palette is not None
+                or saw_data
+                or b"tRNS" in ancillary
+                or color in {0, 4}
+                or not length
+                or length % 3
+                or length > 768
+            ):
+                _fail("invalid inline PNG palette")
+            if color == 3 and length // 3 > 2**depth:
+                _fail("invalid inline PNG palette depth")
+            palette = length // 3
+        elif kind == b"IDAT":
+            if color == 3 and palette is None:
+                _fail("invalid inline PNG image data order")
+            compressed.extend(body)
+            saw_data = True
+        elif kind == b"IEND":
+            if length or not compressed or end != len(data):
+                _fail("invalid inline PNG end")
+            ended = True
+            break
+        elif kind in {b"sRGB", b"gAMA", b"pHYs", b"tRNS"}:
+            if kind in ancillary or saw_data:
+                _fail("invalid inline PNG ancillary order")
+            ancillary.add(kind)
+            if (
+                (kind == b"sRGB" and (length != 1 or body[0] > 3 or palette is not None))
+                or (
+                    kind == b"gAMA"
+                    and (length != 4 or int.from_bytes(body) == 0 or palette is not None)
+                )
+                or (kind == b"pHYs" and (length != 9 or body[8] > 1))
+                or (
+                    kind == b"tRNS"
+                    and not (
+                        (color == 0 and length == 2 and int.from_bytes(body) < 2**depth)
+                        or (
+                            color == 2
+                            and length == 6
+                            and all(int.from_bytes(body[i : i + 2]) < 2**depth for i in (0, 2, 4))
+                        )
+                        or (color == 3 and palette is not None and 0 < length <= palette)
+                    )
+                )
+            ):
+                _fail("invalid inline PNG ancillary data")
+        else:
+            _fail("unsupported inline PNG chunk")
+        offset = end
+    if header is None or not ended:
+        _fail("incomplete inline PNG")
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color]
+    passes = [(width, height)]
+    if interlace:
+        passes = [
+            (max(0, (width - x + dx - 1) // dx), max(0, (height - y + dy - 1) // dy))
+            for x, y, dx, dy in (
+                (0, 0, 8, 8),
+                (4, 0, 8, 8),
+                (0, 4, 4, 8),
+                (2, 0, 4, 4),
+                (0, 2, 2, 4),
+                (1, 0, 2, 2),
+                (0, 1, 1, 2),
+            )
+        ]
+    spans = [((w * channels * depth + 7) // 8, h) for w, h in passes if w and h]
+    expected = sum((row + 1) * count for row, count in spans)
+    if expected > MAX_REVIEWED_PNG_INFLATED_BYTES:
+        _fail("inline PNG exceeds the raster safety limit")
+    rows = (row for row, count in spans for _ in range(count))
+    remaining = 0
+    total = 0
+    decoder = zlib.decompressobj()
+    tail = compressed
+    try:
+        while tail:
+            output = decoder.decompress(tail, 64 * 1024)
+            tail = decoder.unconsumed_tail
+            total += len(output)
+            if total > expected or decoder.unused_data:
+                _fail("invalid inline PNG raster length")
+            position = 0
+            while position < len(output):
+                if not remaining:
+                    remaining = next(rows, None)
+                    if remaining is None or output[position] > 4:
+                        _fail("invalid inline PNG scanline")
+                    position += 1
+                consumed = min(remaining, len(output) - position)
+                remaining -= consumed
+                position += consumed
+        if not decoder.eof or total != expected or remaining or next(rows, None) is not None:
+            _fail("incomplete inline PNG raster")
+    except zlib.error:
+        _fail("invalid inline PNG compressed data")
+    return {
+        "mime": "image/png",
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "decoded_bytes": len(data),
+        "width": width,
+        "height": height,
+    }
+
+
 def reviewed_context_payload(**metadata: Any) -> dict:
     return {
         "block_type": "synthetic_text",
@@ -140,13 +317,13 @@ def _data_event(
     )
 
 
-def _result_blocks(value: Any) -> list[dict]:
+def _result_blocks(value: Any, images: list[dict]) -> list[dict]:
     if type(value) is str:
         return [{"type": "text", "text": value}]
     if type(value) is not list:
         _fail("unsupported displayed tool result content")
     blocks = []
-    for block in value:
+    for index, block in enumerate(value):
         if type(block) is str:
             blocks.append({"type": "text", "text": block})
         elif (
@@ -161,12 +338,28 @@ def _result_blocks(value: Any) -> list[dict]:
             and block["tool_name"]
         ):
             blocks.append(dict(block))
+        elif type(block) is dict and set(block) == {"type", "source"} and block["type"] == "image":
+            source = block["source"]
+            if (
+                type(source) is not dict
+                or set(source) != {"type", "media_type", "data"}
+                or source["type"] != "base64"
+                or source["media_type"] != "image/png"
+                or type(source["data"]) is not str
+            ):
+                _fail("unsupported displayed inline PNG source")
+            uri = f"data:image/png;base64,{source['data']}"
+            metadata = validate_inline_png_data_uri(uri)
+            images.append({"content_block_index": index, **metadata, "source_sha256": _sha(block)})
+            blocks.append({"type": "image", "image_url": uri})
         else:
             _fail("unsupported displayed tool result block or media")
     return blocks
 
 
-def _conversation_events(record: JsonlRecord, difference, thinking: list[dict]) -> list[Event]:
+def _conversation_events(
+    record: JsonlRecord, difference, thinking: list[dict], images: list[dict]
+) -> list[Event]:
     value = record.value
     message = value["message"]
     content = message.get("content")
@@ -264,7 +457,14 @@ def _conversation_events(record: JsonlRecord, difference, thinking: list[dict]) 
                 _fail("malformed displayed tool result")
             if "is_error" in block and type(block["is_error"]) is not bool:
                 _fail("malformed displayed tool error flag")
-            blocks = _result_blocks(block["content"])
+            result_images: list[dict] = []
+            blocks = _result_blocks(block["content"], result_images)
+            if result_images and block.get("is_error") is True:
+                _fail("inline PNG in an error tool result is unsupported")
+            images.extend(
+                {"record_index": record.index, "block_index": index, **item}
+                for item in result_images
+            )
             for item in blocks:
                 if item["type"] == "tool_reference":
                     difference("tool_registry_reference_not_restored", record.index)
@@ -404,6 +604,7 @@ def plan_reviewed_carriers(
     references: list[dict] = []
     wire: list[dict] = []
     tool_references: list[dict] = []
+    images: list[dict] = []
     events_by_record: dict[int, tuple[Event, ...]] = {}
     calls: dict[str, Event] = {}
     results: set[str] = set()
@@ -412,7 +613,7 @@ def plan_reviewed_carriers(
         kind = value["type"]
         events: list[Event] = []
         if kind in {"user", "assistant"}:
-            events = _conversation_events(record, difference, thinking)
+            events = _conversation_events(record, difference, thinking, images)
             for event in events:
                 if event.kind is EventKind.TOOL_CALL:
                     if event.tool_call_id in calls:
@@ -573,6 +774,33 @@ def plan_reviewed_carriers(
         difference("open_tool_call_requires_explicit_archive", call["record_index"])
     difference("reviewed_runtime_not_preserved", selection.boundary_index)
     difference("source_order_not_reconstructed", selection.boundary_index)
+    policy_id = SOURCE_REVIEWED_POLICY_ID
+    if images:
+        policy_id = SOURCE_REVIEWED_MEDIA_POLICY_ID
+        for item in images:
+            for code in (
+                "tool_result_inline_png_transport",
+                "chat_tool_images_relocated_to_user",
+                "chat_tool_images_have_positional_association",
+                "chat_tool_result_text_before_images",
+            ):
+                difference(code, item["record_index"])
+        for index, events in events_by_record.items():
+            rewritten = []
+            for event in events:
+                if event.kind is EventKind.CONTEXT:
+                    text = event.text
+                    if event.payload.get("reviewed_data_class") != "summary":
+                        quoted = json.loads(text)
+                        quoted["policy_id"] = policy_id
+                        text = _json(quoted)
+                    event = replace(
+                        event,
+                        text=text,
+                        payload={**event.payload, "reviewed_context_policy": policy_id},
+                    )
+                rewritten.append(event)
+            events_by_record[index] = tuple(rewritten)
     context = {
         index: tuple(event.text for event in events if event.kind is EventKind.CONTEXT)
         for index, events in events_by_record.items()
@@ -594,7 +822,7 @@ def plan_reviewed_carriers(
     replay_indices = tuple(record.index for record in replay)
     excluded = tuple(record.index for record in records if record.index not in seen)
     report = {
-        "policy_id": SOURCE_REVIEWED_POLICY_ID,
+        "policy_id": policy_id,
         "source_record_count": len(records),
         "logical_record_count": len(records),
         "duplicate_record_count": 0,
@@ -632,6 +860,27 @@ def plan_reviewed_carriers(
             "archived_indices": [item["record_index"] for item in archived],
         },
     }
+    if images:
+        report["inline_tool_result_images"] = {"count": len(images), "provenance": images}
+        report["image_transport"] = {
+            "media_type": "image/png",
+            "native_store": "Image bytes and their tool call/result association are preserved.",
+            "chat": (
+                "Chat emits tool text first and moves images to a following USER message; original "
+                "text/image interleaving is not preserved on wire. Their wire association "
+                "is positional; the image has no explicit tool call ID."
+            ),
+            "responses": (
+                "Responses keeps each image inside function_call_output with its tool call ID."
+            ),
+            "limits": {
+                "max_decoded_png_bytes": MAX_REVIEWED_PNG_BYTES,
+                "max_dimension": MAX_REVIEWED_PNG_DIMENSION,
+                "max_pixels": MAX_REVIEWED_PNG_PIXELS,
+                "max_inflated_bytes": MAX_REVIEWED_PNG_INFLATED_BYTES,
+                "indexed_color_supported": False,
+            },
+        }
     return ReviewedCarrierPlan(
         tuple(replay),
         replay_indices,
@@ -639,4 +888,5 @@ def plan_reviewed_carriers(
         MappingProxyType(events_by_record),
         MappingProxyType(provenance),
         report,
+        policy_id=policy_id,
     )
