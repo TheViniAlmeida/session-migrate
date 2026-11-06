@@ -712,6 +712,11 @@ def _issue_recovery_context(
         "context_unavailable",
     )
     record.__post_init__()
+    _require(
+        not request.reviewed_portability
+        and not record.versions.projection_policy.startswith("portable-claude309-reviewed-"),
+        "unsupported_policy",
+    )
     _require(record.transformation is None, "unsupported_policy")
     parent_binding = None
     if record.return_link is not None:

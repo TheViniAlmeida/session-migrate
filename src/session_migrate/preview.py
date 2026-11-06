@@ -100,8 +100,11 @@ class PreviewKey:
     profile_id: str
     root: str
     native_id: str
+    reviewed_portability: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.reviewed_portability) is not bool:
+            raise ValueError("preview portability mode must be boolean")
         object.__setattr__(self, "source_format", AgentFormat(self.source_format))
         if not all(
             isinstance(value, str) and value

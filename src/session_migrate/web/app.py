@@ -87,6 +87,16 @@ def validate_parameters(action, parameters, identifiers):
             raise WebInputError("identifier_invalid")
     nullable = {"project_id", "target_title", "title_policy"}
     for name, value in parameters.items():
+        if action == "preview" and name == "reviewed_portability":
+            if type(value) is not str or value not in {"true", "false"}:
+                raise WebInputError("field_type_invalid")
+            continue
+        if (action in {"prepare", "prepare_tree"} and name == "reviewed_portability") or (
+            action == "confirm" and name == "acknowledge_reviewed_portability"
+        ):
+            if type(value) is not bool:
+                raise WebInputError("field_type_invalid")
+            continue
         if action == "prepare_tree" and name == "publication_mode":
             if type(value) is not str or value not in {"independent", "native-subagent"}:
                 raise WebInputError("publication_mode_invalid")
@@ -202,8 +212,13 @@ def validate_parameters(action, parameters, identifiers):
             runtime_required.add("selection")
         if not runtime_required <= parameters.keys():
             raise WebInputError("fields_missing")
+    if action == "confirm" and (
+        not {"body_fingerprint", "idempotency_key"} <= parameters.keys()
+        or set(parameters)
+        - {"body_fingerprint", "idempotency_key", "acknowledge_reviewed_portability"}
+    ):
+        raise WebInputError("fields_missing")
     if action in {
-        "confirm",
         "confirm_adopt",
         "confirm_reconcile",
         "confirm_cancel_ready",
@@ -300,7 +315,22 @@ def create_app(registry: RunRegistry, origin: str, backend):
             return public_json(
                 {"reason": str(error)}, 413 if str(error) == "request_too_large" else 400
             )
-        except Exception:
+        except Exception as error:
+            from session_migrate.web.backend import BackendError
+
+            if (
+                type(error) is BackendError
+                and error.reason == "source_read_limit_exceeded"
+                and type(error.read_limit_bytes) is int
+                and error.read_limit_bytes > 0
+            ):
+                return public_json(
+                    {
+                        "reason": "source_read_limit_exceeded",
+                        "read_limit_bytes": error.read_limit_bytes,
+                    },
+                    413,
+                )
             return public_json({"reason": "operation_unavailable"}, 500)
 
     def api_route(path, action, method="GET", scope="readonly", allowed=()):
@@ -316,7 +346,9 @@ def create_app(registry: RunRegistry, origin: str, backend):
         api_route("/api/profiles", "profiles"),
         api_route("/api/capabilities", "capabilities"),
         api_route("/api/sessions", "sessions", allowed=("profile_id", "cursor", "limit")),
-        api_route("/api/sessions/{session_id}/preview", "preview"),
+        api_route(
+            "/api/sessions/{session_id}/preview", "preview", allowed=("reviewed_portability",)
+        ),
         api_route("/api/sessions/{session_id}/usage", "usage", allowed=("cursor", "limit")),
         api_route("/api/lineage", "lineage", allowed=("cursor", "limit")),
         api_route("/api/lineage/{operation_id}", "inspect_lineage"),
@@ -344,6 +376,7 @@ def create_app(registry: RunRegistry, origin: str, backend):
                 "project_id",
                 "target_title",
                 "title_policy",
+                "reviewed_portability",
             ),
         ),
         api_route(
@@ -351,7 +384,7 @@ def create_app(registry: RunRegistry, origin: str, backend):
             "confirm",
             "POST",
             "publish",
-            ("body_fingerprint", "idempotency_key"),
+            ("body_fingerprint", "idempotency_key", "acknowledge_reviewed_portability"),
         ),
         api_route(
             "/api/adopt/prepare",
@@ -431,6 +464,7 @@ def create_app(registry: RunRegistry, origin: str, backend):
                     "model",
                     "hierarchy_keys",
                     "publication_mode",
+                    "reviewed_portability",
                 ),
             ),
             api_route(

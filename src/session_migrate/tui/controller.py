@@ -34,6 +34,11 @@ from session_migrate.errors import (
 )
 from session_migrate.lineage import CompletionReceipt, LineageStore, RecoveryOperation
 from session_migrate.model import AgentFormat
+from session_migrate.native_snapshots import (
+    SourceCaptureContext,
+    capture_readable_source,
+    check_source_identity,
+)
 from session_migrate.operations import (
     CancellationToken,
     OperationRequest,
@@ -63,6 +68,14 @@ from session_migrate.profiles import (
 
 class SourceChangedError(SessionMigrateError):
     """Selected authoritative content no longer matches the reviewed source."""
+
+
+class ReviewedReadLimitError(SourceReadLimitError):
+    def __init__(self, byte_limit: int):
+        super().__init__(
+            f"Reviewed source exceeds the selected {byte_limit}-byte read budget. "
+            "Use the CLI for larger sessions."
+        )
 
 
 class ContinuityReadError(SessionMigrateError):
@@ -167,6 +180,8 @@ class Worker:
                     kind,
                     error="Source changed. Return to the destination step and prepare again.",
                 )
+            except ReviewedReadLimitError as exc:
+                result = JobResult(generation, kind, error=str(exc))
             except SourceReadLimitError:
                 result = JobResult(
                     generation,
@@ -222,25 +237,29 @@ class Draft:
 
 
 def fingerprint(
-    source: Profile, ref: SessionRef, target: Profile, request: OperationRequest
+    source: Profile,
+    ref: SessionRef,
+    target: Profile,
+    request: OperationRequest,
+    *,
+    source_bytes: int | None = None,
 ) -> str:
-    return sha256(
-        repr(
-            (
-                source.fingerprint,
-                ref,
-                target.fingerprint,
-                request.cwd,
-                request.target_cli_version,
-                request.model_provider,
-                request.model,
-                request.session_id,
-                request.target_title,
-                request.title_policy,
-                request.require_native_title,
-            )
-        ).encode()
-    ).hexdigest()
+    values = (
+        source.fingerprint,
+        ref,
+        target.fingerprint,
+        request.cwd,
+        request.target_cli_version,
+        request.model_provider,
+        request.model,
+        request.session_id,
+        request.target_title,
+        request.title_policy,
+        request.require_native_title,
+    )
+    if request.reviewed_portability:
+        values += ("reviewed_portability", True, "source_bytes", source_bytes)
+    return sha256(repr(values).encode()).hexdigest()
 
 
 class Controller:
@@ -251,11 +270,14 @@ class Controller:
         catalog: Path,
         *,
         environ: Mapping[str, str] | None = None,
-        source_bytes: int = 8 * 1024 * 1024,
+        source_bytes: int | None = None,
     ):
         self.catalog = catalog
         self.environ = dict(os.environ if environ is None else environ)
-        self.source_bytes = source_bytes
+        if source_bytes is not None and (type(source_bytes) is not int or source_bytes <= 0):
+            raise SessionMigrateError("Source read budget must be a positive integer")
+        self._explicit_source_bytes = source_bytes is not None
+        self.source_bytes = 8 * 1024 * 1024 if source_bytes is None else source_bytes
         self.preview = PreviewService(max_workers=1)
         self._draft_lock = threading.Lock()
         self._active_draft: tuple[str, str] | None = None
@@ -359,7 +381,21 @@ class Controller:
                 )
             return rows
 
-    def _metadata_revision(self, selected: Profile, ref: SessionRef) -> str:
+    def source_limit(self, *, reviewed_portability: bool = False) -> int:
+        if type(reviewed_portability) is not bool:
+            raise SessionMigrateError("Reviewed portability must be boolean")
+        if (
+            reviewed_portability
+            and not self._explicit_source_bytes
+            and self.source_bytes == 8 * 1024 * 1024
+        ):
+            return 64 * 1024 * 1024
+        return self.source_bytes
+
+    def _metadata_revision(
+        self, selected: Profile, ref: SessionRef, *, reviewed_portability: bool = False
+    ) -> str:
+        limit = self.source_limit(reviewed_portability=reviewed_portability)
         with Catalog(self.catalog) as catalog:
             source = resolve_source(catalog, selected, ref)
         if source.path is None:
@@ -375,10 +411,15 @@ class Controller:
             )
         else:
             path = source.path
-        paths = source_read_paths(
-            selected.format, path, selected.root, max_source_bytes=self.source_bytes
-        )
+        try:
+            paths = source_read_paths(selected.format, path, selected.root, max_source_bytes=limit)
+        except SourceReadLimitError:
+            if reviewed_portability:
+                raise ReviewedReadLimitError(limit) from None
+            raise
         witnesses = [("profile", selected.fingerprint)]
+        if reviewed_portability:
+            witnesses.append(("reviewed_source_read_limit", limit))
         total = 0
         for candidate in dict.fromkeys(paths):
             if not candidate.exists():
@@ -388,10 +429,12 @@ class Controller:
                 raise SessionMigrateError("Source path is unavailable.")
             info = candidate.stat()
             total += info.st_size if candidate.is_file() else 0
-            if total > self.source_bytes and selected.format not in {
+            if total > limit and selected.format not in {
                 AgentFormat.OPENCODE,
                 AgentFormat.KILO,
             }:
+                if reviewed_portability:
+                    raise ReviewedReadLimitError(limit)
                 raise SourceReadLimitError("Source exceeds the interactive read budget.")
             witnesses.append(
                 (
@@ -427,33 +470,92 @@ class Controller:
         ).hexdigest()
         return revision, session
 
-    def revision(self, source: Profile, ref: SessionRef) -> str:
+    def revision(
+        self, source: Profile, ref: SessionRef, *, reviewed_portability: bool = False
+    ) -> str:
+        if type(reviewed_portability) is not bool:
+            raise SessionMigrateError("Reviewed portability must be boolean")
+        if reviewed_portability:
+            if source.format is not AgentFormat.CLAUDE:
+                raise SessionMigrateError("Reviewed preview requires compacted Claude 2.1.309")
+            return self._metadata_revision(source, ref, reviewed_portability=True)
         if source.format in {AgentFormat.OPENCODE, AgentFormat.KILO}:
             return self._native_snapshot(source, ref)[0]
         return self._metadata_revision(source, ref)
 
-    def _read(self, source: Profile, ref: SessionRef, revision: str):
-        if self.revision(source, ref) != revision:
+    def _read(
+        self, source: Profile, ref: SessionRef, revision: str, *, reviewed_portability: bool = False
+    ):
+        if type(reviewed_portability) is not bool:
+            raise SessionMigrateError("Reviewed portability must be boolean")
+        if reviewed_portability and source.format is not AgentFormat.CLAUDE:
+            raise SessionMigrateError("Reviewed preview requires compacted Claude 2.1.309")
+        mode = {"reviewed_portability": True} if reviewed_portability else {}
+        if self.revision(source, ref, **mode) != revision:
             raise SourceChangedError("Source changed.")
-        with Catalog(self.catalog) as catalog:
-            session = read_session(
-                catalog, source, ref, base_environ=self.environ, max_source_bytes=self.source_bytes
+        if reviewed_portability:
+            with Catalog(self.catalog) as catalog:
+                selected = resolve_source(catalog, source, ref)
+            if selected.path is None or selected.format is not AgentFormat.CLAUDE:
+                raise SessionMigrateError("Reviewed source path is unavailable")
+            captured = capture_readable_source(
+                SourceCaptureContext(source.format, selected.path),
+                root=source.root,
+                byte_limit=self.source_limit(reviewed_portability=True),
             )
-        if self.revision(source, ref) != revision:
+            session = captured.parse(reviewed_portability=True)
+            check_source_identity(captured)
+            if session.source_format is not source.format or session.session_id != ref.native_id:
+                raise SourceChangedError("Source identity changed during reviewed read.")
+            if session.cli_version != "2.1.309" or type(session.reviewed_report) is not dict:
+                raise SessionMigrateError("Reviewed source contract is unavailable")
+        else:
+            with Catalog(self.catalog) as catalog:
+                session = read_session(
+                    catalog,
+                    source,
+                    ref,
+                    base_environ=self.environ,
+                    max_source_bytes=self.source_bytes,
+                )
+        if self.revision(source, ref, **mode) != revision:
             raise SourceChangedError("Source changed during read.")
         return session
 
     def start_preview(
-        self, source: Profile, ref: SessionRef, *, expand_tools: bool = False
+        self,
+        source: Profile,
+        ref: SessionRef,
+        *,
+        expand_tools: bool = False,
+        reviewed_portability: bool = False,
     ) -> PreviewRequest:
+        if type(reviewed_portability) is not bool:
+            raise SessionMigrateError("Reviewed portability must be boolean")
+        if reviewed_portability and source.format is not AgentFormat.CLAUDE:
+            raise SessionMigrateError("Reviewed preview requires compacted Claude 2.1.309")
+
         def resolve():
             if source.format in {AgentFormat.OPENCODE, AgentFormat.KILO}:
                 return self._native_snapshot(source, ref)
-            revision = self.revision(source, ref)
-            return revision, self._read(source, ref, revision)
+            revision = self.revision(
+                source, ref, **({"reviewed_portability": True} if reviewed_portability else {})
+            )
+            return revision, self._read(
+                source,
+                ref,
+                revision,
+                **({"reviewed_portability": True} if reviewed_portability else {}),
+            )
 
         return self.preview.request_authoritative(
-            PreviewKey(source.format, source.id, str(source.root), ref.native_id),
+            PreviewKey(
+                source.format,
+                source.id,
+                str(source.root),
+                ref.native_id,
+                **({"reviewed_portability": True} if reviewed_portability else {}),
+            ),
             resolve,
             timeout=10.0,
             expand_tools=expand_tools,
@@ -478,7 +580,17 @@ class Controller:
         cancellation: CancellationToken,
     ) -> Draft:
         self.discard()
-        revision = self.revision(source, ref)
+        if request.reviewed_portability and (
+            source.format is not AgentFormat.CLAUDE
+            or target.format is not AgentFormat.OPENCODE
+            or request.target_cli_version != "2.2.5"
+        ):
+            raise SessionMigrateError(
+                "Reviewed portability requires Claude 2.1.309 to OpenCode 2.2.5"
+            )
+        mode = {"reviewed_portability": True} if request.reviewed_portability else {}
+        limit = self.source_limit(**mode)
+        revision = self.revision(source, ref, **mode)
         reserved = replace(request, cwd=request.cwd.resolve() if request.cwd is not None else None)
         with Catalog(self.catalog) as catalog:
             prepared = prepare_profile_operation(
@@ -489,13 +601,21 @@ class Controller:
                 reserved,
                 base_environ=self.environ,
                 cancellation=cancellation,
-                max_source_bytes=self.source_bytes,
+                max_source_bytes=limit,
             )
         try:
-            if revision != self.revision(source, ref):
+            if revision != self.revision(source, ref, **mode):
                 raise SourceChangedError("Source changed during preparation.")
             proposal = proposal_metadata(prepared)
             metadata = proposal.to_dict()
+            if request.reviewed_portability and (
+                metadata.get("requires_reviewed_portability_acknowledgement") is not True
+                or type(metadata.get("source", {}).get("reviewed_report")) is not dict
+                or type(metadata.get("reviewed_archive")) is not dict
+            ):
+                raise SessionMigrateError(
+                    "Reviewed proposal differences and archive are unavailable"
+                )
             result = OperationResult(**metadata["legacy_result"])
             reserved = replace(
                 reserved,
@@ -504,7 +624,13 @@ class Controller:
                 cwd=Path(result.cwd),
             )
             nonce = proposal.proposal_id
-            options = fingerprint(source, ref, target, reserved)
+            options = fingerprint(
+                source,
+                ref,
+                target,
+                reserved,
+                **({"source_bytes": limit} if request.reviewed_portability else {}),
+            )
             with self._draft_lock:
                 self._active_draft, self._active_prepared = (nonce, options), prepared
             return Draft(
@@ -519,7 +645,13 @@ class Controller:
         draft: Draft,
         cancellation: CancellationToken,
         progress: Callable[[ProgressEvent], None],
+        *,
+        acknowledge_reviewed_portability: bool = False,
     ) -> TransferReceipt:
+        if type(acknowledge_reviewed_portability) is not bool:
+            raise SessionMigrateError("Reviewed portability acknowledgement must be boolean")
+        if draft.request.reviewed_portability and not acknowledge_reviewed_portability:
+            raise SessionMigrateError("Accept the displayed reviewed portability differences first")
         with self._draft_lock:
             if (
                 draft.nonce,
@@ -528,11 +660,42 @@ class Controller:
                 raise SessionMigrateError("Confirmation already consumed or handle changed.")
             self._active_draft = self._active_prepared = None
         try:
-            if fingerprint(draft.source, draft.ref, draft.target, draft.request) != draft.options:
+            if (
+                fingerprint(
+                    draft.source,
+                    draft.ref,
+                    draft.target,
+                    draft.request,
+                    **(
+                        {"source_bytes": self.source_limit(reviewed_portability=True)}
+                        if draft.request.reviewed_portability
+                        else {}
+                    ),
+                )
+                != draft.options
+            ):
                 raise SessionMigrateError("Prepared options changed; prepare again.")
-            if self.revision(draft.source, draft.ref) != draft.revision:
+            if (
+                self.revision(
+                    draft.source,
+                    draft.ref,
+                    **(
+                        {"reviewed_portability": True} if draft.request.reviewed_portability else {}
+                    ),
+                )
+                != draft.revision
+            ):
                 raise SourceChangedError("Source changed; prepare again.")
-            receipt = commit_operation(draft.prepared, cancellation=cancellation, progress=progress)
+            receipt = commit_operation(
+                draft.prepared,
+                cancellation=cancellation,
+                progress=progress,
+                **(
+                    {"acknowledge_reviewed_portability": True}
+                    if draft.request.reviewed_portability
+                    else {}
+                ),
+            )
             if (
                 type(receipt) is TransferReceipt
                 and type(receipt.lineage_receipt) is CompletionReceipt
@@ -608,16 +771,17 @@ class Controller:
             catalog.close()
             raise
 
-    def open_tree(self, *, profiles_file=None):
+    def open_tree(self, *, profiles_file=None, reviewed_portability: bool = False):
         """Resolve only current existing profiles, on the dedicated tree worker."""
         from session_migrate.tree_cli import TreeWorkflow
 
+        limit = self.source_limit(reviewed_portability=reviewed_portability)
         return TreeWorkflow(
             self.continuity_profiles(profiles_file),
             state_home=self._continuity_path().parent,
             base_environ=self.environ,
-            max_source_bytes=self.source_bytes,
-            max_total_source_bytes=self.source_bytes,
+            max_source_bytes=limit,
+            max_total_source_bytes=limit,
         )
 
     def list_operations(self, *, offset=0, limit=50, cancel_event=None) -> OperationPage:

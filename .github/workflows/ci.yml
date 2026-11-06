@@ -42,7 +42,7 @@ jobs:
       - run: uv sync --locked --extra tui
       - name: Headless TUI tests (skips fail)
         run: |
-          uv run --locked --extra tui pytest tests/test_tui.py tests/test_operation_cancellation.py tests/test_f5a_tui.py tests/test_tree_tui.py -q --junitxml=tui-results.xml
+          uv run --locked --extra tui pytest tests/test_tui.py tests/test_operation_cancellation.py tests/test_f5a_tui.py tests/test_tree_tui.py tests/test_reviewed_tui.py tests/test_reviewed_tree_tui.py -q --basetemp=/tmp/session-migrate-tui-ci --junitxml=tui-results.xml
           uv run --locked --extra tui python -c "import xml.etree.ElementTree as E; assert not E.parse('tui-results.xml').findall('.//skipped'), 'TUI tests must not skip'"
 
   web:

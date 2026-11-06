@@ -241,15 +241,20 @@ class NativeSnapshot:
         except (SessionMigrateError, RecursionError):
             raise SessionMigrateError("native capture JSONL decoding failed") from None
 
-    def parse(self) -> Session:
+    def parse(self, *, reviewed_portability: bool = False) -> Session:
         from session_migrate.formats import claude, codex, opencode
 
+        if type(reviewed_portability) is not bool:
+            raise SessionMigrateError("reviewed portability mode must be boolean")
+        if reviewed_portability and self.source_format is not AgentFormat.CLAUDE:
+            raise SessionMigrateError("reviewed portability requires Claude 2.1.309")
         try:
             if self.source_format == AgentFormat.CLAUDE:
                 return claude.parse_records(
                     self.decoded_records(),
                     source_path=self.source_path,
                     source_sha256=self.authority_sha256,
+                    reviewed_portability=reviewed_portability,
                 )
             if self.source_format == AgentFormat.CODEX:
                 return codex.parse_records(

@@ -215,6 +215,7 @@ class OperationRequest:
     target_server: str | None = None
     target_parent_id: str | None = None
     reviewed_tree_projection: bool = False
+    reviewed_portability: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "command", OperationKind(self.command))
@@ -222,6 +223,16 @@ class OperationRequest:
             object.__setattr__(self, "source_format", AgentFormat(self.source_format))
         if self.target_format is not None:
             object.__setattr__(self, "target_format", TargetFormat(self.target_format))
+        if type(self.reviewed_portability) is not bool:
+            raise SessionMigrateError("Reviewed portability must be boolean")
+        if self.reviewed_portability and (
+            self.target_format is not TargetFormat.OPENCODE
+            or self.target_cli_version != "2.2.5"
+            or self.source_format not in {None, AgentFormat.CLAUDE}
+        ):
+            raise SessionMigrateError(
+                "Reviewed portability requires Claude 2.1.309 to OpenCode 2.2.5"
+            )
         if self.target_parent_id is not None and (
             self.target_format is not TargetFormat.OPENCODE
             or self.target_cli_version != "2.2.5"
@@ -295,6 +306,9 @@ class OperationResult:
     target_client: str | None = None
     target_server: str | None = None
     backend_discovery_verified: bool | None = None
+    mode: str | None = None
+    reviewed_report: dict[str, Any] | None = field(default=None, repr=False)
+    reviewed_archive: dict[str, Any] | None = field(default=None, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
 
@@ -303,7 +317,15 @@ class OperationResult:
             for field in fields(self)
             if field.name != "lineage_receipt"
             and not (
-                field.name in {"target_client", "target_server", "backend_discovery_verified"}
+                field.name
+                in {
+                    "target_client",
+                    "target_server",
+                    "backend_discovery_verified",
+                    "mode",
+                    "reviewed_report",
+                    "reviewed_archive",
+                }
                 and getattr(self, field.name) is None
             )
         }
@@ -451,7 +473,9 @@ def _public_options(
         "request": {
             item.name: str(value) if isinstance(value, Path) else value
             for item in fields(request)
-            if item.name != "dry_run" and (value := getattr(request, item.name)) is not None
+            if item.name != "dry_run"
+            and (value := getattr(request, item.name)) is not None
+            and not (item.name == "reviewed_portability" and value is False)
         },
         "target_environment": {key: target[key] for key in _PUBLIC_ENVIRONMENT if key in target},
         "source_environment": {key: source[key] for key in _PUBLIC_ENVIRONMENT if key in source},
@@ -722,6 +746,9 @@ class _PreparedState:
     )
     catalog_opener: Callable[[Path], Catalog] | None = None
     backend_binding: str | None = None
+    reviewed_archive_receipts: list[dict[str, Any]] = field(
+        default_factory=list, repr=False, compare=False
+    )
 
 
 def _title_preflight(state: _PreparedState) -> tuple[TitleAliasStore | None, AliasIdentity | None]:
@@ -761,10 +788,16 @@ def _read_prepared_source(state: _PreparedState) -> None:
         expected_root=state.source_root,
         on_capture=captures.append if state.built.source_snapshot is not None else None,
         catalog_opener=state.catalog_opener,
-        readonly_catalog=state.built.runtime_context is not None,
+        readonly_catalog=(
+            state.built.runtime_context is not None or state.built.request.reviewed_portability
+        ),
     )
     if root is not None and root.resolve() != state.source_root:
         raise SessionMigrateError("prepared source root changed; prepare again")
+    if state.built.request.reviewed_portability and (
+        session.reviewed_report != state.built.artifact.source.reviewed_report
+    ):
+        raise SessionMigrateError("Prepared reviewed source report changed; prepare again")
     if _source_witness(session, state.source_root) != state.source_witness:
         raise SessionMigrateError("prepared source changed; prepare again")
     if state.built.source_snapshot is not None and (
@@ -813,6 +846,11 @@ def _artifact_fingerprint(built: _OperationBuild) -> str:
             "source_root": str(built.source_root),
         },
     }
+    if built.request.reviewed_portability:
+        value["reviewed_portability"] = {
+            "report": source.reviewed_report,
+            "archive": artifact.reviewed_archive,
+        }
     if built.runtime_context is not None:
         from session_migrate.handoff_operations import validate_runtime_context
 
@@ -883,6 +921,8 @@ def _client_epoch(path: Path | None) -> tuple | None:
 
 
 def _verify_prepared_options(state: _PreparedState) -> None:
+    if state.reviewed_archive_receipts:
+        _verify_reviewed_archive(state)
     if state.backend_binding is not None:
         from session_migrate.openchamber import assert_backend_matches
 
@@ -1062,6 +1102,31 @@ def _prepare_operation(
                 built.artifact.source.source_format, built.source_root, source
             )
         built = _pin_clients(built, target, source)
+        proposal_id = uuid.uuid4().hex
+        if request.reviewed_portability:
+            if state_home is None or built.source_snapshot is None:
+                raise SessionMigrateError(
+                    "Reviewed portability requires a private managed archive location"
+                )
+            archive_path = (
+                state_home.absolute() / "reviewed-portability" / "v1" / proposal_id / "source.jsonl"
+            )
+            built = replace(
+                built,
+                artifact=replace(
+                    built.artifact,
+                    reviewed_archive={
+                        "status": "planned",
+                        "kind": "private_original_source_capture",
+                        "scope": "complete_selected_source_file",
+                        "path": str(archive_path),
+                        "sha256": built.source_snapshot.authority_sha256,
+                        "bytes": len(built.source_snapshot.raw_bytes),
+                        "mode": "0600",
+                        "runtime_configuration_restored": False,
+                    },
+                ),
+            )
         root = _source_root(built, source)
         witness = _source_witness(built.artifact.source, root)
         options = _public_options(
@@ -1144,12 +1209,17 @@ def _prepare_operation(
             if target_format in {TargetFormat.PI, TargetFormat.OMP}
             else capabilities_for(target_format).schema
         )
-        proposal_id = uuid.uuid4().hex
         metadata = {
             "schema_version": 1,
             "migration_version": __version__,
             "proposal_id": proposal_id,
-            "mode": "summary" if built.artifact.transformation is not None else "full",
+            "mode": (
+                "reviewed_portability"
+                if built.request.reviewed_portability
+                else "summary"
+                if built.artifact.transformation is not None
+                else "full"
+            ),
             "operation": request.command.value,
             "source": {
                 "format": built.artifact.source.source_format.value,
@@ -1243,6 +1313,14 @@ def _prepare_operation(
                 "client_revisions": state.client_revisions,
             },
         }
+        if built.request.reviewed_portability:
+            from session_migrate.projections import reviewed_portability_report
+
+            metadata["source"]["reviewed_report"] = deepcopy(built.artifact.source.reviewed_report)
+            metadata["reviewed_portability"] = reviewed_portability_report(state.projection)
+            metadata["reviewed_archive"] = deepcopy(built.artifact.reviewed_archive)
+            metadata["requires_reviewed_portability_acknowledgement"] = True
+            metadata["effects"].append("private_original_source_archive_before_native_publication")
         if built.artifact.transformation is not None or built.artifact.return_link is not None:
             from session_migrate.lineage import _encode
 
@@ -1498,7 +1576,10 @@ def _prepare_lineage_projection(state: _PreparedState):
             else Path(state.built.manifest),
         )
         return prepared, prepared.versions, None
-    if state.built.request.command == OperationKind.CONVERT or state.built.source_snapshot is None:
+    if state.built.source_snapshot is None or (
+        state.built.request.command == OperationKind.CONVERT
+        and not state.built.request.reviewed_portability
+    ):
         return None, None, None
     from session_migrate.formats.claude_compaction import is_native_context_policy
     from session_migrate.formats.context_text import is_synthetic_text_context
@@ -1532,7 +1613,11 @@ def _prepare_lineage_projection(state: _PreparedState):
     ) or artifact.target_cli_version not in known_targets.get(artifact.target_format, ()):
         return None, None, None
     policy = ProjectionPolicy()
-    source_events = state.built.source_snapshot.parse().events
+    source_events = (
+        state.built.source_snapshot.parse(reviewed_portability=True)
+        if state.built.request.reviewed_portability
+        else state.built.source_snapshot.parse()
+    ).events
     native_context = (
         artifact.target_format is TargetFormat.OPENCODE
         and artifact.target_cli_version == "2.2.5"
@@ -1557,6 +1642,17 @@ def _prepare_lineage_projection(state: _PreparedState):
             policy = ProjectionPolicy(
                 NATIVE_CONTEXT_ARCHIVE_POLICY_ID if native_context else OPENCODE_ARCHIVE_POLICY_ID
             )
+    if state.built.request.reviewed_portability:
+        from session_migrate.projection_policies import (
+            REVIEWED_ARCHIVE_POLICY_ID,
+            REVIEWED_POLICY_ID,
+        )
+
+        policy = ProjectionPolicy(
+            REVIEWED_ARCHIVE_POLICY_ID
+            if state.built.request.reviewed_tree_projection and source_tools.get("open_tool_call")
+            else REVIEWED_POLICY_ID
+        )
     versions = PolicyVersions(
         policy.canonical_policy.algorithm,
         policy.policy_id,
@@ -1569,7 +1665,14 @@ def _prepare_lineage_projection(state: _PreparedState):
         artifact.target_format,
         artifact.target_cli_version,
         _profile_fingerprint(state, "target"),
-        _digest(asdict(_native_namespace(state))),
+        _digest(
+            {
+                "artifact_path": str(state.built.output),
+                "output_parent": str(state.built.output.parent),
+            }
+        )
+        if state.built.request.command is OperationKind.CONVERT
+        else _digest(asdict(_native_namespace(state))),
     )
     request = state.built.request
     options = ConversionOptions(
@@ -1582,6 +1685,7 @@ def _prepare_lineage_projection(state: _PreparedState):
         target_title=request.target_title,
         title_policy=request.title_policy,
         target_parent_id=request.target_parent_id,
+        reviewed_portability=request.reviewed_portability,
     )
     source_context = None
     if (
@@ -1667,10 +1771,16 @@ def _source_identity(state):
 
 def _planned_references(state):
     path = str(state.built.output) if isinstance(state.built.output, Path) else None
-    return (
+    references = (
         EvidenceReference("artifact", "planned", "unknown", path, state.artifact_sha256),
         EvidenceReference("manifest", "planned", "unknown", str(state.built.manifest), None),
     )
+    if state.built.request.reviewed_portability:
+        archive = _reviewed_archive_metadata(state)
+        references += (
+            EvidenceReference("artifact", "planned", "unknown", archive["path"], archive["sha256"]),
+        )
+    return references
 
 
 def _ready_record(state, operation_id):
@@ -1863,6 +1973,16 @@ def _observed_references(state, session=None):
             references.append(reference)
             continue
         path = Path(reference.path)
+        if state.built.request.reviewed_portability and state.reviewed_archive_receipts:
+            archive = _reviewed_archive_metadata(state)
+            if reference.path == archive["path"]:
+                _verify_reviewed_archive(state)
+                references.append(
+                    EvidenceReference(
+                        "artifact", "observed", "available", archive["path"], archive["sha256"]
+                    )
+                )
+                continue
         try:
             descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
             with os.fdopen(descriptor, "rb") as stream:
@@ -1931,23 +2051,254 @@ def _open_lineage_store(state):
     )
 
 
+def _reviewed_archive_metadata(state: _PreparedState) -> dict[str, Any]:
+    archive = state.built.artifact.reviewed_archive
+    snapshot = state.built.source_snapshot
+    if (
+        not state.built.request.reviewed_portability
+        or type(archive) is not dict
+        or snapshot is None
+        or archive.get("sha256") != snapshot.authority_sha256
+        or archive.get("bytes") != len(snapshot.raw_bytes)
+        or type(archive.get("path")) is not str
+        or state.migration_state_home is None
+    ):
+        raise SessionMigrateError("Reviewed source archive binding is unavailable")
+    path = Path(archive["path"])
+    root = state.migration_state_home.absolute() / "reviewed-portability" / "v1"
+    if (
+        path.parent.parent != root
+        or path.name != "source.jsonl"
+        or re.fullmatch(r"[0-9a-f]{32}", path.parent.name) is None
+        or ".." in path.parts
+    ):
+        raise SessionMigrateError("Reviewed source archive namespace changed")
+    return archive
+
+
+def verify_reviewed_source_archive(
+    path: Path,
+    *,
+    state_home: Path,
+    operation_id: str,
+    expected_sha256: str,
+    expected_bytes: int | None = None,
+) -> None:
+    """Read-only proof of an original archive in its exact private operation namespace."""
+    from session_migrate.jsonl import DEFAULT_MAX_TOTAL_BYTES
+    from session_migrate.titles import _directory_current, _private_directory
+
+    if (
+        not isinstance(path, Path)
+        or not isinstance(state_home, Path)
+        or not path.is_absolute()
+        or not state_home.is_absolute()
+        or ".." in path.parts
+        or ".." in state_home.parts
+        or type(operation_id) is not str
+        or re.fullmatch(r"[0-9a-f]{32}", operation_id) is None
+        or type(expected_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+        or (
+            expected_bytes is not None
+            and (
+                type(expected_bytes) is not int or not 0 < expected_bytes <= DEFAULT_MAX_TOTAL_BYTES
+            )
+        )
+        or path != state_home / "reviewed-portability" / "v1" / operation_id / "source.jsonl"
+    ):
+        raise SessionMigrateError("Reviewed source archive namespace or binding changed")
+    managed_directories = (
+        state_home,
+        state_home / "reviewed-portability",
+        state_home / "reviewed-portability" / "v1",
+        path.parent,
+    )
+    for component in managed_directories:
+        checked = _private_directory(component, create=False)
+        os.close(checked)
+    directory = _private_directory(path.parent, create=False)
+    try:
+        descriptor = os.open(
+            path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory
+        )
+        with os.fdopen(descriptor, "rb") as stream:
+            before = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_nlink != 1
+                or before.st_uid != os.getuid()
+                or stat.S_IMODE(before.st_mode) != 0o600
+                or not 0 < before.st_size <= DEFAULT_MAX_TOTAL_BYTES
+                or (expected_bytes is not None and before.st_size != expected_bytes)
+            ):
+                raise SessionMigrateError("Reviewed source archive is not a private bounded file")
+            digest = hashlib.sha256()
+            remaining = before.st_size
+            while remaining:
+                block = stream.read(min(65536, remaining))
+                if not block:
+                    raise SessionMigrateError("Reviewed source archive is incomplete")
+                remaining -= len(block)
+                digest.update(block)
+            after = os.fstat(stream.fileno())
+            named = os.stat(path.name, dir_fd=directory, follow_symlinks=False)
+            if (
+                stream.read(1)
+                or digest.hexdigest() != expected_sha256
+                or (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+                or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                raise SessionMigrateError("Reviewed source archive changed or digest mismatched")
+        _directory_current(path.parent, directory)
+        for component in managed_directories:
+            checked = _private_directory(component, create=False)
+            os.close(checked)
+    except OSError:
+        raise SessionMigrateError("Reviewed source archive is unavailable or unsafe") from None
+    finally:
+        os.close(directory)
+
+
+def _verify_reviewed_archive(state: _PreparedState) -> None:
+    archive = _reviewed_archive_metadata(state)
+    path = Path(archive["path"])
+    verify_reviewed_source_archive(
+        path,
+        state_home=state.migration_state_home.absolute(),
+        operation_id=path.parent.name,
+        expected_sha256=archive["sha256"],
+        expected_bytes=archive["bytes"],
+    )
+
+
+def _publish_reviewed_archive(state: _PreparedState) -> None:
+    """Persist original capture after consent, before any native publication; never roll it back."""
+    if not state.built.request.reviewed_portability:
+        return
+    from session_migrate.native_namespaces import ensure_migration_state_home
+    from session_migrate.titles import _directory_current, _private_directory
+
+    archive = _reviewed_archive_metadata(state)
+    path = Path(archive["path"])
+
+    ensure_migration_state_home(path.parent)
+    directory = _private_directory(path.parent, create=False)
+    temporary = ".source-" + uuid.uuid4().hex + ".tmp"
+    own_identity = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
+        )
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            info = os.fstat(stream.fileno())
+            own_identity = (info.st_dev, info.st_ino)
+            stream.write(state.built.source_snapshot.raw_bytes)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _directory_current(path.parent, directory)
+        staged = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+        if (staged.st_dev, staged.st_ino) != own_identity:
+            raise SessionMigrateError("Reviewed source archive staging changed")
+        os.link(
+            temporary,
+            path.name,
+            src_dir_fd=directory,
+            dst_dir_fd=directory,
+            follow_symlinks=False,
+        )
+        os.unlink(temporary, dir_fd=directory)
+        os.fsync(directory)
+        _directory_current(path.parent, directory)
+        _verify_reviewed_archive(state)
+        state.reviewed_archive_receipts.append({**deepcopy(archive), "status": "retained"})
+    except OSError:
+        raise SessionMigrateError(
+            "Reviewed source archive publication failed; native import blocked"
+        ) from None
+    finally:
+        if own_identity is not None:
+            with suppress(FileNotFoundError):
+                staged = os.stat(temporary, dir_fd=directory, follow_symlinks=False)
+                if (staged.st_dev, staged.st_ino) == own_identity:
+                    os.unlink(temporary, dir_fd=directory)
+        os.close(directory)
+
+
+def _reviewed_result(state: _PreparedState, result: dict[str, Any]) -> dict[str, Any]:
+    if not state.built.request.reviewed_portability:
+        return result
+    if not state.reviewed_archive_receipts:
+        raise SessionMigrateError("Reviewed source archive retention is unavailable")
+    _verify_reviewed_archive(state)
+    result = dict(result)
+    result["reviewed_archive"] = deepcopy(state.reviewed_archive_receipts[-1])
+    return result
+
+
 def commit_operation(
     prepared: PreparedOperation,
     *,
     cancellation: CancellationToken | None = None,
     progress: ProgressCallback | None = None,
+    acknowledge_reviewed_portability: bool = False,
 ) -> TransferReceipt:
     """Consume once; revalidate authority/preflight and publish the SAME artifact."""
+    if type(acknowledge_reviewed_portability) is not bool:
+        raise SessionMigrateError("Reviewed portability acknowledgement must be boolean")
+    if (
+        isinstance(prepared, PreparedOperation)
+        and prepared._state is not None
+        and prepared._state.built.request.reviewed_portability
+        and not acknowledge_reviewed_portability
+    ):
+        raise SessionMigrateError(
+            "Reviewed portability requires explicit acknowledgement of the fresh proposal"
+        )
     token = cancellation or CancellationToken()
     token.claim()
-    return _commit_operation(prepared, token, progress)
+    return _commit_operation(
+        prepared,
+        token,
+        progress,
+        acknowledge_reviewed_portability=acknowledge_reviewed_portability,
+    )
 
 
 def _commit_operation(
     prepared: PreparedOperation,
     token: CancellationToken,
     progress: ProgressCallback | None,
+    *,
+    acknowledge_reviewed_portability: bool = False,
 ) -> TransferReceipt:
+    if (
+        isinstance(prepared, PreparedOperation)
+        and prepared._state is not None
+        and prepared._state.built.request.reviewed_portability
+        and acknowledge_reviewed_portability is not True
+    ):
+        token.close()
+        raise SessionMigrateError(
+            "Reviewed portability requires explicit acknowledgement of the fresh proposal"
+        )
     if (
         isinstance(prepared, PreparedOperation)
         and prepared._state is not None
@@ -1985,6 +2336,9 @@ def _commit_operation(
         token.check()
         token.begin_publication()
         _notify(progress, ProgressStage.INSTALLING)
+        stage = "reviewed_source_archive"
+        _publish_reviewed_archive(state)
+        _quick_publication_guards(state)
         stage = "native_install"
         _install(
             built.request,
@@ -2040,6 +2394,7 @@ def _commit_operation(
         result = content_free_result(
             built.artifact, output_path=built.output, manifest_path=built.manifest, dry_run=False
         )
+        result = _reviewed_result(state, result)
         result = _client_result(result, built.request, completed=True)
         _notify(progress, ProgressStage.COMPLETED)
         return TransferReceipt(
@@ -2127,7 +2482,7 @@ def _quick_publication_guards(state):
     ):
         raise SessionMigrateError("prepared source root or CWD changed; prepare again")
     if not _target_epoch_matches(
-        state.target_root,
+        state.target_root or state.built.output.parent,
         state.target_epoch,
         database_file=state.built.artifact.target_format is TargetFormat.MASTRACODE,
     ):
@@ -2319,6 +2674,8 @@ def _commit_native_operation(prepared, token, progress):
                 store.check_guard(operation_id, guard, expected_state=OperationState.PUBLISHING)
                 _notify(progress, ProgressStage.INSTALLING)
                 _quick_publication_guards(state)
+                _publish_reviewed_archive(state)
+                _quick_publication_guards(state)
                 phase, reason = "installing", "native_result_unknown"
                 native_state = NativeState.ATTEMPTED_UNKNOWN
                 built = state.built
@@ -2421,6 +2778,7 @@ def _commit_native_operation(prepared, token, progress):
                     manifest_path=built.manifest,
                     dry_run=False,
                 )
+                result = _reviewed_result(state, result)
                 result = _client_result(result, built.request, completed=True)
                 _notify(progress, ProgressStage.COMPLETED)
                 return TransferReceipt(
@@ -2574,8 +2932,13 @@ def run_operation(
     Omitted source_environ preserves the legacy single-environment contract.
     """
 
+    if request.reviewed_portability and not request.dry_run:
+        raise SessionMigrateError(
+            "Reviewed portability requires prepare_operation and explicit commit acknowledgement"
+        )
     if (
-        request.target_title is not None
+        request.reviewed_portability
+        or request.target_title is not None
         or request.require_native_title
         or (
             request.command in {OperationKind.IMPORT, OperationKind.TRANSFER}
@@ -2596,7 +2959,9 @@ def run_operation(
                 migration_state_home=migration_state_home,
                 profile_context=profile_context,
             )
-            if request.dry_run and request.command != OperationKind.CONVERT:
+            if request.dry_run and (
+                request.command != OperationKind.CONVERT or request.reviewed_portability
+            ):
                 token.check()
                 proposal = proposal_metadata(prepared)
                 prepared.discard()
@@ -2857,6 +3222,8 @@ def _resolve_source(
                 entry = catalog.get_session(catalog_id, include_paths=True)
                 source_reference = catalog.session_source_for_transfer(catalog_id)
             source_format = source_reference.format
+            if request.reviewed_portability and source_format is not AgentFormat.CLAUDE:
+                raise SessionMigrateError("Reviewed portability requires Claude 2.1.309 source")
             source_path = source_reference.path
             source_root = source_reference.root
             if expected_root is not None and source_root.resolve() != expected_root:
@@ -2983,6 +3350,7 @@ def _resolve_source(
                     source_environ,
                     max_source_bytes,
                     on_capture,
+                    reviewed_portability=request.reviewed_portability,
                 )
         if not session.session_id:
             raise SessionMigrateError("discovered transcript has no native session ID metadata")
@@ -3008,9 +3376,23 @@ def _resolve_source(
             request.source_home if request.reviewed_tree_projection else None
         )
         session = _load_path_source(
-            request.path, source_format, source_root, source_environ, max_source_bytes, on_capture
+            request.path,
+            source_format,
+            source_root,
+            source_environ,
+            max_source_bytes,
+            on_capture,
+            reviewed_portability=request.reviewed_portability,
         )
         target_format = TargetFormat(request.target_format)
+    if request.reviewed_portability and (
+        session.source_format is not AgentFormat.CLAUDE
+        or session.cli_version != "2.1.309"
+        or target_format is not TargetFormat.OPENCODE
+        or request.target_cli_version != "2.2.5"
+        or session.reviewed_report is None
+    ):
+        raise SessionMigrateError("Reviewed portability requires Claude 2.1.309 to OpenCode 2.2.5")
     return session, target_format, source_root
 
 
@@ -3036,13 +3418,16 @@ def _build_operation(
         source_environ,
         max_source_bytes,
         on_capture=captures.append
-        if observe_target and request.command != OperationKind.CONVERT
+        if (
+            request.reviewed_portability
+            or (observe_target and request.command != OperationKind.CONVERT)
+        )
         else None,
         on_native_observation=export_proofs.append
         if observe_target and request.command != OperationKind.CONVERT
         else None,
         catalog_opener=catalog_opener,
-        readonly_catalog=runtime_context is not None,
+        readonly_catalog=runtime_context is not None or request.reviewed_portability,
     )
     target_cli_version = request.target_cli_version
     if cancellation is not None:
@@ -3161,6 +3546,7 @@ def _build_operation(
                 target_title=request.target_title,
                 title_policy=request.title_policy,
                 target_parent_id=request.target_parent_id,
+                reviewed_portability=request.reviewed_portability,
             ),
             environ=environ,
         )
@@ -3320,12 +3706,18 @@ def _load_path_source(
     max_source_bytes: int | None,
     on_capture: Callable[[NativeSnapshot], None] | None = None,
     on_native_observation: Callable[[Any], None] | None = None,
+    *,
+    reviewed_portability: bool = False,
 ) -> Session:
-    if on_capture is not None:
+    if type(reviewed_portability) is not bool:
+        raise SessionMigrateError("Reviewed portability must be boolean")
+    if on_capture is not None or reviewed_portability:
         from session_migrate.inspection import detect_path_format
         from session_migrate.jsonl import DEFAULT_MAX_TOTAL_BYTES
 
         selected_format = source_format or detect_path_format(path)
+        if reviewed_portability and selected_format is not AgentFormat.CLAUDE:
+            raise SessionMigrateError("Reviewed portability requires Claude 2.1.309 source")
         if selected_format in {AgentFormat.CLAUDE, AgentFormat.CODEX, AgentFormat.OPENCODE}:
             from session_migrate.native_snapshots import capture_readable_source
 
@@ -3353,8 +3745,13 @@ def _load_path_source(
                         "Source exceeds the interactive read budget."
                     ) from None
                 raise
-            session = snapshot.parse()
-            on_capture(snapshot)
+            session = (
+                snapshot.parse(reviewed_portability=True)
+                if reviewed_portability
+                else snapshot.parse()
+            )
+            if on_capture is not None:
+                on_capture(snapshot)
             return session
     if max_source_bytes is None:
         session = load_session(path, source_format)

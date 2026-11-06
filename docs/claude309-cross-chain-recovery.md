@@ -4,6 +4,10 @@ Status: **unreleased, partial compatibility work**. This document does not certi
 the five reported private sources. Their new synthetic reproductions preserve
 identifier relationships, but replace content, signatures and some enum values.
 
+The operator subsequently selected [reviewed portability](reviewed-portability.md).
+That opt-in contract permits only differences disclosed before publication; the
+strict-path limitations below continue to apply to strict migration.
+
 ## Changes implemented in this branch
 
 The preserved-context selector follows the native order: retirement/relink,
@@ -63,7 +67,7 @@ does not manufacture such a window or declare a false producer identity.
 
 ## Remaining source-control work
 
-All five structural reproductions now reach the persisted-control guard. Each
+Under the strict policy, all five structural reproductions reach the persisted-control guard. Each
 still contains active prompt snapshots and nonempty deferred-tool records. The
 selection fix therefore does **not** make those five sessions migratable.
 
@@ -101,8 +105,8 @@ requests, cold exports, normal human continuation, and no execution of historica
 tools. System-baseline and renderer semantics need their own decision and proof;
 an ordering extension alone does not solve them.
 
-A less strict portable mode is a separate product choice: every runtime or ordering
-difference would need an explicit loss description and review. It must not reuse
-the claim of faithful native-context migration.
+A less strict portable mode was selected as the next product contract. Every
+runtime or ordering difference requires an explicit description and review; it
+must not reuse the claim of faithful native-context migration.
 
 No OpenCode code, installation or running server is changed by this proposal.

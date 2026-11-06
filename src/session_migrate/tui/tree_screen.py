@@ -69,6 +69,10 @@ class TreeScreen(Screen):
             )
             yield Checkbox("Explicitly detach anchor from omitted parent", id="tree-detach")
             yield Checkbox("Acknowledge partial inventory or omitted nodes", id="tree-partial")
+            yield Checkbox(
+                "Reviewed conversation portability: compacted Claude 2.1.309 → OpenCode 2.2.5",
+                id="tree-reviewed-portability",
+            )
             yield Select(
                 [
                     ("Independent sessions — editable; external organizational map", "independent"),
@@ -158,9 +162,12 @@ class TreeScreen(Screen):
             self.workflow.close()
             self.workflow = None
 
-    def _open(self, selection):
+    def _open(self, selection, *, reviewed_portability=False):
         self._close()
-        self.workflow = self.controller.open_tree(profiles_file=selection["profiles_file"])
+        self.workflow = self.controller.open_tree(
+            profiles_file=selection["profiles_file"],
+            **({"reviewed_portability": True} if reviewed_portability else {}),
+        )
         self.workflow.load(
             source_profile_id=selection["source"],
             client_version=selection["version"],
@@ -216,6 +223,12 @@ class TreeScreen(Screen):
     def on_checkbox_changed(self, event: Checkbox.Changed):
         event.stop()
         if not self._loading and self.is_mounted and self.pending is None:
+            if event.checkbox.id == "tree-reviewed-portability":
+                self.query_one("#tree-partial", Checkbox).label = (
+                    "Acknowledge partial inventory, omissions and displayed portability differences"
+                    if event.value
+                    else "Acknowledge partial inventory or omitted nodes"
+                )
             self._invalidate()
 
     def on_button_pressed(self, event: Button.Pressed):
@@ -262,6 +275,7 @@ class TreeScreen(Screen):
             ] or None
             detach = self.query_one("#tree-detach", Checkbox).value
             partial = self.query_one("#tree-partial", Checkbox).value
+            reviewed = self.query_one("#tree-reviewed-portability", Checkbox).value
             target, cwd = self.value("target"), Path(self.value("cwd"))
             provider, model = self.value("provider"), self.value("model")
             operation_id = self.value("operation") or None
@@ -277,7 +291,18 @@ class TreeScreen(Screen):
             return
 
         def work():
-            workflow = self._open(selection)
+            effective_reviewed = reviewed
+            if kind == "resume":
+                from session_migrate.tree_operations import inspect_tree
+
+                recorded = inspect_tree(self.controller._continuity_path().parent, operation_id)
+                if (
+                    type(recorded) is not dict
+                    or type(recorded.get("reviewed_portability", False)) is not bool
+                ):
+                    raise ValueError("tree_reviewed_mode_unavailable")
+                effective_reviewed = recorded.get("reviewed_portability", False)
+            workflow = self._open(selection, reviewed_portability=effective_reviewed)
             if kind == "inventory":
                 return workflow.inventory_metadata()
             workflow.select(mode=mode, anchor=anchor, detach=detach, hierarchy_keys=edges)
@@ -290,6 +315,7 @@ class TreeScreen(Screen):
                 operation_id=operation_id,
                 resume=kind == "resume",
                 **({"publication_mode": publication_mode} if kind != "resume" else {}),
+                **({"reviewed_portability": True} if kind != "resume" and reviewed else {}),
             )
 
         self.launch("prepare" if kind in {"prepare", "resume"} else kind, work)
@@ -319,10 +345,30 @@ class TreeScreen(Screen):
         elif error is not None:
             self.status("Action blocked. Check current inputs and review again.")
         elif kind == "prepare":
-            self.query_one("#tree-confirm", Button).disabled = False
+            reviewed = result.get("reviewed_portability", False) is True
+            self._loading = True
+            try:
+                with self.prevent(Checkbox.Changed):
+                    self.query_one("#tree-reviewed-portability", Checkbox).value = reviewed
+            finally:
+                self._loading = False
+            self.query_one("#tree-confirm", Button).label = (
+                "Accept displayed differences and publish tree once"
+                if reviewed
+                else "Confirm reviewed tree once"
+            )
+            needs_ack = result.get("requires_partial_acknowledgement", False) is True
+            self.query_one("#tree-confirm", Button).disabled = (
+                needs_ack and not self.query_one("#tree-partial", Checkbox).value
+            )
+            self.query_one("#tree-partial", Checkbox).label = (
+                "Acknowledge partial inventory, omissions and displayed portability differences"
+                if reviewed
+                else "Acknowledge partial inventory or omitted nodes"
+            )
             publication_mode = result.get("publication_mode", "native-subagent")
             self.status(
-                f"Publication mode: {publication_mode}. "
+                f"Publication mode: {publication_mode}. Reviewed portability: {reviewed}. "
                 "Review titles, exact selected nodes, relationships, IDs and losses; "
                 "then confirm once."
             )

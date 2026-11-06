@@ -21,6 +21,7 @@ from session_migrate.model import AgentFormat, TargetFormat
 from session_migrate.operations import (
     OperationKind,
     OperationRequest,
+    commit_operation,
     prepare_operation,
     proposal_metadata,
     run_operation,
@@ -332,14 +333,61 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_inspection(result.to_dict())
             return 0
         if args.command == "proposal":
-            prepared = prepare_operation(_operation_request(args, args.proposal_command))
+            request = _operation_request(args, args.proposal_command)
+            prepared = prepare_operation(
+                request,
+                **(
+                    {"migration_state_home": args.state_home}
+                    if request.reviewed_portability and args.state_home is not None
+                    else {}
+                ),
+            )
             try:
                 print(json.dumps(proposal_metadata(prepared).to_dict(), indent=2, sort_keys=True))
             finally:
                 prepared.discard()
             return 0
         if args.command in {"convert", "import", "transfer"}:
-            result = run_operation(_operation_request(args, args.command)).to_dict()
+            request = _operation_request(args, args.command)
+            acknowledge = getattr(args, "acknowledge_reviewed_portability", False)
+            if acknowledge and not request.reviewed_portability:
+                raise SessionMigrateError(
+                    "Reviewed acknowledgement requires --reviewed-portability"
+                )
+            if request.reviewed_portability and not request.dry_run:
+                prepared = prepare_operation(request, migration_state_home=args.state_home)
+                try:
+                    print(
+                        json.dumps(proposal_metadata(prepared).to_dict(), indent=2, sort_keys=True),
+                        flush=True,
+                    )
+                    if not acknowledge and sys.stdin.isatty():
+                        print(
+                            "Accept the displayed runtime/order differences? Type yes to publish: ",
+                            file=sys.stderr,
+                            end="",
+                            flush=True,
+                        )
+                        acknowledge = sys.stdin.readline().strip().lower() == "yes"
+                    if not acknowledge:
+                        raise SessionMigrateError(
+                            "Review the proposal and explicitly acknowledge reviewed portability "
+                            "before publication"
+                        )
+                    result = commit_operation(
+                        prepared, acknowledge_reviewed_portability=True
+                    ).to_dict()
+                finally:
+                    prepared.discard()
+            else:
+                result = run_operation(
+                    request,
+                    **(
+                        {"migration_state_home": args.state_home}
+                        if request.reviewed_portability and args.state_home is not None
+                        else {}
+                    ),
+                ).to_dict()
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
         parser.error(f"{args.command!r} is specified but not implemented yet")
@@ -457,10 +505,24 @@ def _operation_request(args: argparse.Namespace, command: str) -> OperationReque
         target_title=args.target_title,
         title_policy=TitlePolicy.LOCAL_ALIAS if args.local_title_alias else None,
         require_native_title=args.require_native_title,
+        reviewed_portability=getattr(args, "reviewed_portability", False),
     )
 
 
 def _add_operation_arguments(parser: argparse.ArgumentParser, command: str) -> None:
+    parser.add_argument(
+        "--reviewed-portability",
+        action="store_true",
+        help=(
+            "preserve compacted Claude 2.1.309 conversation with reviewed "
+            "runtime/order differences (OpenCode 2.2.5)"
+        ),
+    )
+    parser.add_argument(
+        "--acknowledge-reviewed-portability",
+        action="store_true",
+        help="explicitly accept the displayed reviewed-portability differences before publication",
+    )
     if command in {"convert", "import"}:
         parser.add_argument(
             "path",

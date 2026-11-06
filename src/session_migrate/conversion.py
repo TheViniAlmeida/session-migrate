@@ -12,6 +12,7 @@ import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -322,6 +323,7 @@ class ConversionOptions:
     target_title: str | None = None
     title_policy: TitlePolicy | None = None
     target_parent_id: str | None = None
+    reviewed_portability: bool = False
 
     def __post_init__(self) -> None:
         value = (
@@ -330,6 +332,14 @@ class ConversionOptions:
             else self.target_format
         )
         object.__setattr__(self, "target_format", TargetFormat(value))
+        if type(self.reviewed_portability) is not bool:
+            raise SessionMigrateError("Reviewed portability must be boolean")
+        if self.reviewed_portability and (
+            self.target_format is not TargetFormat.OPENCODE or self.target_cli_version != "2.2.5"
+        ):
+            raise SessionMigrateError(
+                "Reviewed portability requires the exact OpenCode 2.2.5 target"
+            )
         if self.target_parent_id is not None and (
             self.target_format is not TargetFormat.OPENCODE or self.target_cli_version != "2.2.5"
         ):
@@ -361,6 +371,7 @@ class ConversionArtifact:
     transformation: Any = None
     authority_identity: Any = None
     return_link: Any = None
+    reviewed_archive: dict[str, Any] | None = field(default=None, repr=False)
 
     @property
     def effective_target_title(self) -> str | None:
@@ -402,6 +413,10 @@ class ConversionArtifact:
             "dropped_events": self.dropped,
             "warnings": list(self.warnings),
         }
+        if self.source.reviewed_report is not None:
+            document["mode"] = "reviewed_portability"
+            document["source"]["reviewed_report"] = deepcopy(self.source.reviewed_report)
+            document["reviewed_archive"] = deepcopy(self.reviewed_archive)
         if self.transformation is not None:
             from session_migrate.lineage import QualifiedIdentity, TransformationV1, _encode
 
@@ -589,7 +604,21 @@ def decode_derived_manifest(payload: bytes) -> dict[str, Any]:
         raise SessionMigrateError("Derived manifest is invalid or unsupported.") from None
 
 
-def load_session(path: Path, source_format: AgentFormat | None = None) -> Session:
+def load_session(
+    path: Path, source_format: AgentFormat | None = None, *, reviewed_portability: bool = False
+) -> Session:
+    if type(reviewed_portability) is not bool:
+        raise SessionMigrateError("Reviewed portability must be boolean")
+    if reviewed_portability:
+        from session_migrate.jsonl import DEFAULT_MAX_TOTAL_BYTES
+        from session_migrate.native_snapshots import SourceCaptureContext, capture_source
+
+        selected = source_format or detect_path_format(path)
+        if selected is not AgentFormat.CLAUDE:
+            raise SessionMigrateError("Reviewed portability requires Claude 2.1.309 source")
+        return capture_source(
+            SourceCaptureContext(selected, path), byte_limit=DEFAULT_MAX_TOTAL_BYTES
+        ).parse(reviewed_portability=True)
     source_format = source_format or detect_path_format(path)
     if source_format == AgentFormat.ANTIGRAVITY:
         # The adapter makes a transactionally consistent SQLite backup that
@@ -808,10 +837,64 @@ def load_devin_session(
     return session
 
 
+def _reviewed_emission_source(session: Session) -> Session:
+    """Quote closed historical tool references for the writer without changing source authority."""
+    from session_migrate.projection_policies import reviewed_tool_reference_text
+
+    events = []
+    for event in session.events:
+        blocks = event.payload.get("content_blocks")
+        if event.kind is not EventKind.TOOL_RESULT or type(blocks) is not list:
+            events.append(event)
+            continue
+        normalized = []
+        changed = False
+        for block in blocks:
+            if type(block) is dict and block.get("type") == "tool_reference":
+                if set(block) != {"type", "tool_name"}:
+                    raise SessionMigrateError("Reviewed tool reference shape is unsupported")
+                normalized.append(
+                    {"type": "text", "text": reviewed_tool_reference_text(block["tool_name"])}
+                )
+                changed = True
+            else:
+                normalized.append(block)
+        events.append(
+            replace(
+                event,
+                text="\n".join(
+                    block["text"]
+                    for block in normalized
+                    if type(block) is dict
+                    and block.get("type") == "text"
+                    and type(block.get("text")) is str
+                ),
+                payload={**event.payload, "content_blocks": normalized},
+            )
+            if changed
+            else event
+        )
+    return replace(session, events=tuple(events))
+
+
 def convert_session(
     session: Session, options: ConversionOptions, *, environ: Mapping[str, str] | None = None
 ) -> ConversionArtifact:
     target_format = TargetFormat(options.target_format.value)
+    reviewed = session.reviewed_report is not None
+    if not reviewed and any(
+        event.payload.get("reviewed_context_policy") for event in session.events
+    ):
+        raise SessionMigrateError("Reviewed context requires its parsed source report")
+    if options.reviewed_portability != reviewed:
+        raise SessionMigrateError("Reviewed portability source and options must agree")
+    if reviewed and (
+        session.source_format is not AgentFormat.CLAUDE
+        or session.cli_version != "2.1.309"
+        or target_format is not TargetFormat.OPENCODE
+        or options.target_cli_version != "2.2.5"
+    ):
+        raise SessionMigrateError("Reviewed portability requires Claude 2.1.309 to OpenCode 2.2.5")
     from session_migrate.formats.claude_compaction import is_native_context_policy
 
     if (
@@ -853,6 +936,16 @@ def convert_session(
     else:
         target_id = portable_id
     warnings: list[dict[str, Any]] = []
+    if reviewed:
+        warnings.append(
+            {
+                "code": "reviewed_runtime_not_preserved",
+                "message": (
+                    "Conversation portability reviewed; source runtime and native wire order "
+                    "are not restored."
+                ),
+            }
+        )
     if same_format_rewrite:
         warnings.append(
             {
@@ -1080,7 +1173,7 @@ def convert_session(
     else:
         target_version = options.target_cli_version or opencode.PINNED_OPENCODE_VERSION
         native_bytes, dropped = opencode.serialize(
-            session,
+            _reviewed_emission_source(session) if reviewed else session,
             session_id=target_id,
             cwd=target_cwd,
             cli_version=target_version,
@@ -2394,7 +2487,7 @@ def content_free_result(
     manifest_path: Path,
     dry_run: bool,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "dry_run": dry_run,
         "source_format": artifact.source.source_format.value,
         "target_format": artifact.target_format.value,
@@ -2407,6 +2500,11 @@ def content_free_result(
         "dropped_events": artifact.dropped,
         "warnings": list(artifact.warnings),
     }
+    if artifact.source.reviewed_report is not None:
+        result["mode"] = "reviewed_portability"
+        result["reviewed_report"] = deepcopy(artifact.source.reviewed_report)
+        result["reviewed_archive"] = deepcopy(artifact.reviewed_archive)
+    return result
 
 
 def _validated_uuid(value: str) -> str:

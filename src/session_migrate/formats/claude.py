@@ -37,32 +37,59 @@ READABLE_CLAUDE_VERSIONS = VALIDATED_CLAUDE_VERSIONS | {"2.1.309"}
 TITLE_TYPES = {"custom-title": "customTitle", "ai-title": "aiTitle"}
 
 
-def parse(path: Path) -> Session:
+def parse(path: Path, *, reviewed_portability: bool = False) -> Session:
+    if type(reviewed_portability) is not bool:
+        raise SessionMigrateError("reviewed portability mode must be boolean")
     source_path = path.resolve()
-    return parse_bytes(read_jsonl_bytes(path), source_path)
+    return parse_bytes(
+        read_jsonl_bytes(path), source_path, reviewed_portability=reviewed_portability
+    )
 
 
-def parse_bytes(data: bytes, source_path: Path) -> Session:
+def parse_bytes(data: bytes, source_path: Path, *, reviewed_portability: bool = False) -> Session:
     """Parse one captured authority without resolving or rereading its source path."""
 
+    if type(reviewed_portability) is not bool:
+        raise SessionMigrateError("reviewed portability mode must be boolean")
     return parse_records(
         list(iter_jsonl_bytes(data)),
         source_path=source_path,
         source_sha256=hashlib.sha256(data).hexdigest(),
+        reviewed_portability=reviewed_portability,
     )
 
 
 def parse_records(
-    records: Sequence[JsonlRecord], *, source_path: Path, source_sha256: str
+    records: Sequence[JsonlRecord],
+    *,
+    source_path: Path,
+    source_sha256: str,
+    reviewed_portability: bool = False,
 ) -> Session:
     """Project records whose digest and location were bound by the capture caller."""
 
+    if type(reviewed_portability) is not bool:
+        raise SessionMigrateError("reviewed portability mode must be boolean")
     records = list(records)
     logical_records, duplicate_indices, ambiguous_cwd = _collapse_desktop_envelopes(records)
+    if reviewed_portability and any(
+        record.value.get("version") != "2.1.309"
+        for record in logical_records
+        if type(record.value.get("type")) is str
+        and record.value["type"] in {"user", "assistant", "attachment", "system"}
+    ):
+        raise SessionMigrateError("reviewed portability requires Claude 2.1.309")
     context_selection = select_compaction(logical_records)
-    carriers = (
-        plan_carriers(logical_records, context_selection) if context_selection is not None else None
-    )
+    if reviewed_portability:
+        from session_migrate.formats.claude_reviewed import plan_reviewed_carriers
+
+        carriers = plan_reviewed_carriers(logical_records, context_selection)
+    else:
+        carriers = (
+            plan_carriers(logical_records, context_selection)
+            if context_selection is not None
+            else None
+        )
     selected_records = (
         list(carriers.replay_records)
         if carriers is not None
@@ -125,6 +152,12 @@ def parse_records(
     for record in selected_records:
         value = record.value
         record_type = string(value.get("type"))
+        if reviewed_portability:
+            events.extend(carriers.events_by_record[record.index])
+            if record_type == "assistant":
+                message = object_value(value.get("message"))
+                model = model or string(message.get("model"))
+            continue
         if carriers is not None and record.index in carriers.context_text:
             for block_index, text in enumerate(carriers.context_text[record.index]):
                 events.append(
@@ -240,6 +273,11 @@ def parse_records(
         elif record_type not in set(TITLE_TYPES) | {"last-prompt", "queue-operation"}:
             events.append(_opaque_event(record, "non_conversation_record"))
 
+    reviewed_report = None
+    if reviewed_portability:
+        reviewed_report = dict(carriers.report)
+        reviewed_report["source_record_count"] = len(records)
+        reviewed_report["duplicate_record_count"] = len(duplicate_indices)
     return Session(
         source_format=AgentFormat.CLAUDE,
         source_path=source_path,
@@ -253,6 +291,7 @@ def parse_records(
         events=tuple(events),
         raw_record_count=len(records),
         model_provider="anthropic",
+        reviewed_report=reviewed_report,
     )
 
 

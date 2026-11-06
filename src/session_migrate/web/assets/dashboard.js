@@ -36,13 +36,14 @@
     const modes = { summary: capabilities.summary_available, return_new_full: capabilities.return_new_available, return_new_summary: capabilities.return_summary_available };
     for (const option of byId("transfer-mode").options) if (option.value !== "full") option.disabled = !modes[option.value];
     byId("handoff-options").hidden = byId("transfer-mode").value === "full";
+    byId("reviewed-portability").disabled = !connected || busy || byId("transfer-mode").value !== "full";
     for (const id of ["handoff-model", "handoff-provider", "handoff-version", "handoff-first", "handoff-last", "handoff-parent", "load-handoff-parents"]) byId(id).disabled = !connected || busy;
     byId("accept-handoff").disabled = !connected || !draft || busy;
     byId("discard-handoff").disabled = !connected || busy;
     byId("prepare-transfer").disabled = !connected || !capabilities.publish_enabled || busy || selected === null || !byId("target-profile").value;
     byId("adoption-controls").hidden = !capabilities.adoption_available;
     byId("tree-controls").hidden = !capabilities.tree_available;
-    for (const id of ["tree-manifest", "tree-source-version", "tree-mode", "tree-publication-mode", "tree-anchor", "tree-edges", "tree-detach", "tree-partial", "tree-provider", "tree-model"]) byId(id).disabled = !connected || busy;
+    for (const id of ["tree-manifest", "tree-source-version", "tree-mode", "tree-publication-mode", "tree-anchor", "tree-edges", "tree-detach", "tree-partial", "tree-reviewed-portability", "tree-provider", "tree-model"]) byId(id).disabled = !connected || busy;
     byId("prepare-tree").disabled = !connected || !capabilities.publish_enabled || !capabilities.tree_available || busy || !treeManifest || !byId("source-profile").value || !byId("target-profile").value || !byId("target-project").value;
     byId("adopt-target-session").disabled = !connected || busy;
     byId("preview-adoption").disabled = !connected || busy || !byId("adopt-target-session").value;
@@ -208,6 +209,16 @@
       sessionCursor = data.next_cursor || null; byId("more-sessions").hidden = sessionCursor === null;
     } catch { notice("Sessions could not be loaded. Refresh after checking the current profile.", true); }
   };
+  const loadSelectedPreview = async (session, expectedSelection) => {
+    const reviewed = byId("transfer-mode").value === "full" && byId("reviewed-portability").checked;
+    const query = reviewed ? "?reviewed_portability=true" : "";
+    try {
+      const data = await api(`/api/sessions/${encodeURIComponent(session.id)}/preview${query}`);
+      if (expectedSelection !== selectionGeneration) return;
+      byId("preview").textContent = readable(data.text, "No preview available.");
+      byId("preview-note").textContent = data.truncated ? "This is a bounded preview. The full session is checked when preparing a transfer." : reviewed ? "Reviewed conversation and historical DATA shown as literal text. Review runtime/order differences in the prepared proposal." : "Preview content is shown as literal text.";
+    } catch { if (expectedSelection === selectionGeneration) byId("preview").textContent = "Preview unavailable. Select reviewed portability explicitly for supported compacted Claude 2.1.309 sources, or refresh the source."; }
+  };
   const selectSession = async (session, button) => {
     if (treePreparing || confirmationPending || (activeJob && !terminalStates.has(activeJob.state))) return;
     selected = session; selectionGeneration += 1; const expectedSelection = selectionGeneration; usageCursor = null;
@@ -216,8 +227,7 @@
     byId("selected-session").textContent = readable(session.title, "Untitled session"); byId("usage-selection").textContent = readable(session.title, "Untitled session");
     byId("preview").textContent = "Loading preview…"; byId("usage-rows").replaceChildren(); byId("usage-context").replaceChildren(); byId("more-usage").hidden = true;
     setEnabled();
-    try { const data = await api(`/api/sessions/${encodeURIComponent(session.id)}/preview`); if (expectedSelection !== selectionGeneration) return; byId("preview").textContent = readable(data.text, "No preview available."); byId("preview-note").textContent = data.truncated ? "This is a bounded preview. The full session is checked when preparing a transfer." : "Preview content is shown as literal text."; }
-    catch { if (expectedSelection === selectionGeneration) byId("preview").textContent = "Preview unavailable. The source may need to be refreshed."; }
+    await loadSelectedPreview(session, expectedSelection);
   };
   byId("source-profile").addEventListener("change", () => { selected = null; selectionGeneration += 1; clearReview(); loadSessions(); });
   const loadAdoptionSessions = async () => {
@@ -272,7 +282,8 @@
         const action = proposal.native_action || proposal.service_action || "transfer";
         review = { proposal, key: crypto.randomUUID(), action };
         byId("proposal-heading").textContent = action === "transfer" ? "Review this transfer" : `Review ${action.replaceAll("_", " ")}`;
-        byId("confirm-transfer").textContent = action === "transfer" ? "Confirm transfer" : "Confirm reviewed action";
+        const reviewedPortability = proposal.metadata?.mode === "reviewed_portability" || proposal.metadata?.reviewed_portability === true;
+        byId("confirm-transfer").textContent = reviewedPortability ? "Accept displayed runtime/order differences and publish" : action === "transfer" ? "Confirm transfer" : "Confirm reviewed action";
         byId("proposal-details").textContent = metadata(proposal.metadata);
         byId("proposal-expiry").textContent = `Review expires: ${readable(proposal.expires_at)}`;
         byId("proposal").hidden = false;
@@ -299,6 +310,7 @@
     try {
       const mode = byId("transfer-mode").value;
       let route = "/api/proposals";
+      if (mode === "full" && byId("reviewed-portability").checked) request.reviewed_portability = true;
       if (mode !== "full") {
         if (!request.project_id) throw new Error("project_required");
         Object.assign(request, { model: byId("handoff-model").value, model_provider: byId("handoff-provider").value, target_cli_version: byId("handoff-version").value });
@@ -328,13 +340,21 @@
     byId("confirm-transfer").disabled = true;
     try {
       const resource = { transfer: "proposals", summary: "handoffs", return_new_summary: "return-new-summary", return_new_full: "return-new-full", tree: "trees" }[currentReview.action] || currentReview.action.replaceAll("_", "-");
-      const job = await api(`/api/${resource}/${encodeURIComponent(currentReview.proposal.proposal_id)}/confirm`, { method: "POST", body: { body_fingerprint: currentReview.proposal.fingerprint, idempotency_key: currentReview.key } });
+      const confirmation = { body_fingerprint: currentReview.proposal.fingerprint, idempotency_key: currentReview.key };
+      if (currentReview.action === "transfer" && currentReview.proposal.metadata?.mode === "reviewed_portability") confirmation.acknowledge_reviewed_portability = true;
+      const job = await api(`/api/${resource}/${encodeURIComponent(currentReview.proposal.proposal_id)}/confirm`, { method: "POST", body: confirmation });
       if (review !== currentReview) return;
       showJob(job); pollJob(job.job_id);
     } catch { notice("Confirmation could not be observed. Reusing this review checks the same confirmation; it does not request another import.", true); setEnabled(); }
   });
-  for (const id of ["transfer-mode", "handoff-model", "handoff-provider", "handoff-version", "handoff-first", "handoff-last", "handoff-parent"]) byId(id).addEventListener("input", clearReview);
-  for (const id of ["tree-source-version", "tree-mode", "tree-publication-mode", "tree-anchor", "tree-edges", "tree-detach", "tree-partial", "tree-provider", "tree-model"]) byId(id).addEventListener("input", () => { treeGeneration += 1; clearReview(); });
+  for (const id of ["reviewed-portability", "transfer-mode", "handoff-model", "handoff-provider", "handoff-version", "handoff-first", "handoff-last", "handoff-parent"]) byId(id).addEventListener("input", clearReview);
+  for (const id of ["reviewed-portability", "transfer-mode"]) byId(id).addEventListener("input", () => {
+    if (!selected || confirmationPending) return;
+    selectionGeneration += 1;
+    byId("preview").textContent = "Loading preview…";
+    loadSelectedPreview(selected, selectionGeneration);
+  });
+  for (const id of ["tree-source-version", "tree-mode", "tree-publication-mode", "tree-anchor", "tree-edges", "tree-detach", "tree-partial", "tree-reviewed-portability", "tree-provider", "tree-model"]) byId(id).addEventListener("input", () => { treeGeneration += 1; clearReview(); });
   for (const id of ["source-profile", "target-profile", "target-project"]) byId(id).addEventListener("change", () => { treeGeneration += 1; });
   byId("tree-manifest").addEventListener("change", async (event) => {
     const file = event.target.files[0], expected = ++treeGeneration;
@@ -353,6 +373,7 @@
     clearReview();
     const expected = treeGeneration, expectedSelection = selectionGeneration;
     const request = { source_profile_id: byId("source-profile").value, target_profile_id: byId("target-profile").value, project_id: byId("target-project").value, source_client_version: byId("tree-source-version").value, manifest: treeManifest, mode: byId("tree-mode").value, publication_mode: byId("tree-publication-mode").value, detach: byId("tree-detach").checked, acknowledge_partial: byId("tree-partial").checked, model_provider: byId("tree-provider").value, model: byId("tree-model").value };
+    if (byId("tree-reviewed-portability").checked) request.reviewed_portability = true;
     if (byId("tree-anchor").value) request.anchor = byId("tree-anchor").value;
     if (byId("tree-edges").value.trim()) request.hierarchy_keys = byId("tree-edges").value.split(",").map((value) => value.trim()).filter(Boolean);
     treePreparing = true; setEnabled();

@@ -6,6 +6,7 @@ process's sealed publisher handle can authorize the reviewed publication.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -140,6 +141,7 @@ class TreeWorkflow:
         model,
         acknowledge_partial=False,
         publication_mode=None,
+        reviewed_portability=None,
         operation_id=None,
         resume=False,
         prepublication_check=None,
@@ -164,6 +166,7 @@ class TreeWorkflow:
             source_profile=self.source,
             acknowledge_partial=acknowledge_partial,
             publication_mode=publication_mode,
+            reviewed_portability=reviewed_portability,
             prepublication_check=prepublication_check,
             **self.limits,
         )
@@ -278,6 +281,15 @@ def add_tree_commands(subparsers):
             ),
         )
         command.add_argument("--acknowledge-partial", action="store_true")
+        command.add_argument(
+            "--reviewed-portability",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help=(
+                "review runtime/order differences for preserved Claude 2.1.309 context; "
+                "resume preserves its mode"
+            ),
+        )
         command.add_argument("--operation-id", required=name == "resume")
         if name != "review":
             command.add_argument(
@@ -338,6 +350,7 @@ def run_tree_command(args, parser):
             operation_id=args.operation_id,
             acknowledge_partial=args.acknowledge_partial,
             publication_mode=args.publication_mode,
+            reviewed_portability=args.reviewed_portability,
             resume=args.tree_command == "resume",
         )
         print(json.dumps(result, indent=2, sort_keys=True))

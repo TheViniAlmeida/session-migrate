@@ -8,16 +8,23 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
-## Não lançado — recuperação entre cadeias Claude 2.1.309
+## 06/11/2026 — DEV19 (candidata)
 
+- Implementada [portabilidade revisada](docs/reviewed-portability.md), opt-in
+  com preview de diferenças, confirmação separada e arquivo privado da captura
+  original; não equivale a restaurar o runtime Claude no OpenCode.
 - Recuperação delimitada de lotes e ferramentas ligados por parent, com folha
   original e proveniência explícita; política v2 nos novos caminhos.
 - Controles comprovadamente eliminados pela compactação deixam de bloquear a
   leitura. Controles ativos continuam recusados.
 - Corrigida a aceitação indevida de reordenação de chamadas/resultados pela projeção;
   guardas adicionais para mídia, truncamento e ordem de blocos não comprovados.
-- As cinco reproduções estruturais ainda param em controles ativos. Não há nova
-  certificação ou atualização da instalação nesta etapa.
+- No modo estrito, as cinco reproduções ainda param em controles ativos. No modo
+  revisado, passaram preparação, importação e retomada em clientes stock com
+  provider local roteirizado; isso não certifica o runtime ou as fontes privadas.
+- CLI, TUI, dashboard e árvores exibem diferenças e exigem confirmação separada.
+  A retomada de árvore preserva o modo e revalida o arquivo histórico de nós
+  concluídos; arquivo ausente, alterado ou inseguro bloqueia sem reimportação.
 - [Escopo, limitações e proposta de próximos passos](docs/claude309-cross-chain-recovery.md).
 
 ## 06/11/2026 — DEV18

@@ -104,6 +104,7 @@ class Session:
     events: tuple[Event, ...]
     raw_record_count: int
     model_provider: str | None = None
+    reviewed_report: dict | None = field(default=None, repr=False, compare=False)
 
     def event_counts(self) -> dict[str, int]:
         return dict(sorted(Counter(event.kind.value for event in self.events).items()))

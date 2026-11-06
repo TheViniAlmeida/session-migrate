@@ -39,7 +39,14 @@ OPENCODE_ARCHIVE_POLICY_ID = "portable-opencode-225-archive-v1"
 NATIVE_CONTEXT_POLICY_ID = "portable-native-context-225-v1"
 NATIVE_CONTEXT_ARCHIVE_POLICY_ID = "portable-native-context-225-archive-v1"
 _NATIVE_CONTEXT_POLICIES = {NATIVE_CONTEXT_POLICY_ID, NATIVE_CONTEXT_ARCHIVE_POLICY_ID}
-_ARCHIVE_POLICIES = {OPENCODE_ARCHIVE_POLICY_ID, NATIVE_CONTEXT_ARCHIVE_POLICY_ID}
+REVIEWED_POLICY_ID = "portable-claude309-reviewed-225-v1"
+REVIEWED_ARCHIVE_POLICY_ID = "portable-claude309-reviewed-225-archive-v1"
+_REVIEWED_POLICIES = {REVIEWED_POLICY_ID, REVIEWED_ARCHIVE_POLICY_ID}
+_ARCHIVE_POLICIES = {
+    OPENCODE_ARCHIVE_POLICY_ID,
+    NATIVE_CONTEXT_ARCHIVE_POLICY_ID,
+    REVIEWED_ARCHIVE_POLICY_ID,
+}
 INCOMPLETE_TOOL_MESSAGE = "Imported call had no completed result"
 INCOMPLETE_TOOL_RULE = "opencode-225-incomplete-tool-error-v1"
 
@@ -78,7 +85,12 @@ class ProjectionPolicy:
     def __post_init__(self) -> None:
         require(
             self.policy_id
-            in {PORTABLE_POLICY_ID, OPENCODE_ARCHIVE_POLICY_ID, *_NATIVE_CONTEXT_POLICIES},
+            in {
+                PORTABLE_POLICY_ID,
+                OPENCODE_ARCHIVE_POLICY_ID,
+                *_NATIVE_CONTEXT_POLICIES,
+                *_REVIEWED_POLICIES,
+            },
             "unsupported_policy",
         )
         require(type(self.canonical_policy) is CanonicalPolicy, "unsupported_policy")
@@ -104,7 +116,11 @@ def policy_from_id(policy_id: str) -> ProjectionPolicy:
 
 def validate_policy_target(policy: ProjectionPolicy, target: TargetFormat, client: str) -> None:
     policy.__post_init__()
-    if policy.policy_id in {OPENCODE_ARCHIVE_POLICY_ID, *_NATIVE_CONTEXT_POLICIES}:
+    if policy.policy_id in {
+        OPENCODE_ARCHIVE_POLICY_ID,
+        *_NATIVE_CONTEXT_POLICIES,
+        *_REVIEWED_POLICIES,
+    }:
         require(target is TargetFormat.OPENCODE and client == "2.2.5", "unsupported_policy")
 
 
@@ -145,6 +161,8 @@ class ExpectedProjection:
     _events: tuple[Event, ...]
     native_context_hashes: tuple[str, ...] = ()
     native_context_only: bool = False
+    reviewed_source_order: tuple[tuple[str, str], ...] = ()
+    reviewed_target_order: tuple[tuple[str, str], ...] = ()
 
     @property
     def events(self) -> tuple[Event, ...]:
@@ -171,7 +189,9 @@ def native_context_carriers_match(expected: ExpectedProjection, snapshot) -> boo
         return False
 
 
-def _native_source_order(events: tuple[Event, ...]) -> tuple[tuple[str, str], ...]:
+def _native_source_order(
+    events: tuple[Event, ...], *, reviewed: bool = False
+) -> tuple[tuple[str, str], ...]:
     """Read original source occurrences; never use the paired expected events."""
     trace: list[tuple[str, str]] = []
     inert = {
@@ -203,8 +223,16 @@ def _native_source_order(events: tuple[Event, ...]) -> tuple[tuple[str, str], ..
                 blocks = event.payload.get("content_blocks")
                 if type(blocks) is not list or any(
                     type(block) is not dict
-                    or block.get("type") != "text"
-                    or type(block.get("text")) is not str
+                    or not (
+                        (block.get("type") == "text" and type(block.get("text")) is str)
+                        or (
+                            reviewed
+                            and block.get("type") == "tool_reference"
+                            and set(block) == {"type", "tool_name"}
+                            and type(block.get("tool_name")) is str
+                            and bool(block["tool_name"])
+                        )
+                    )
                     for block in blocks
                 ):
                     raise ValueError("unsupported source tool result content")
@@ -319,13 +347,147 @@ def native_context_order_matches(
         return False
 
 
+def _reviewed_projected_order(
+    events: tuple[Event, ...], generated: tuple[GeneratedRelationMember, ...]
+) -> tuple[tuple[str, str], ...]:
+    """Derive stock target effective ordering from source occurrences, not bytes.
+
+    Tool results complete their historical call; they are emitted after all
+    assistant parts in that call's source message. Historical DATA always ends
+    the current message. This is a closed description of the approved lowering.
+    """
+    archived = {events[member.source_index].tool_call_id for member in generated}
+    results = {e.tool_call_id for e in events if e.kind is EventKind.TOOL_RESULT}
+    trace: list[tuple[str, str]] = []
+    pending: list[tuple[str, str]] = []
+    pending_results: list[tuple[str, str]] = []
+    pending_user: list[str] = []
+    coordinate = None
+
+    def flush() -> None:
+        nonlocal coordinate
+        if pending_user:
+            trace.append(("user", hashlib.sha256(_json_bytes("\n".join(pending_user))).hexdigest()))
+        trace.extend(pending)
+        trace.extend(pending_results)
+        pending.clear()
+        pending_user.clear()
+        pending_results.clear()
+        coordinate = None
+
+    for event in events:
+        if is_synthetic_text_context(event):
+            flush()
+            trace.append(("user", hashlib.sha256(_json_bytes(event.text)).hexdigest()))
+        elif event.kind is EventKind.MESSAGE and event.text:
+            wanted = (event.role, event.provenance.record_index)
+            if coordinate is not None and coordinate != wanted:
+                flush()
+            coordinate = wanted
+            if event.role is Role.USER:
+                pending_user.append(event.text)
+            else:
+                require(event.role is Role.ASSISTANT, "source_mismatch")
+                pending.append(("assistant", hashlib.sha256(_json_bytes(event.text)).hexdigest()))
+        elif event.kind is EventKind.TOOL_CALL:
+            wanted = (Role.ASSISTANT, event.provenance.record_index)
+            if coordinate is not None and coordinate != wanted:
+                flush()
+            coordinate = wanted
+            pending.append(("call", event.tool_call_id))
+            require(
+                event.tool_call_id in results or event.tool_call_id in archived,
+                "source_tools_unproven",
+            )
+            if event.tool_call_id not in archived:
+                pending_results.append(("result", event.tool_call_id))
+        elif event.kind is EventKind.TOOL_RESULT:
+            flush()
+        # _native_source_order already rejected all other material except
+        # explicitly inert metadata. Such records do not create target messages.
+    flush()
+    return tuple(trace)
+
+
+def reviewed_context_order_matches(expected: ExpectedProjection, snapshot) -> bool:
+    """Verify the declared reviewed lowering, including authority constraints."""
+    if expected.policy.policy_id not in _REVIEWED_POLICIES:
+        return True
+    try:
+        bundle = strict_decode(snapshot.raw_bytes)
+        # No source authority, native provider payload, compaction or windows may
+        # be smuggled through a reviewed conversation projection.
+        if any(key in bundle["info"] for key in {"permissions", "revert", "fork", "metadata"}):
+            return False
+        for message in bundle["messages"]:
+            if message.get("type") not in {"user", "synthetic", "assistant"}:
+                return False
+            if any(
+                key in message
+                for key in {
+                    "native",
+                    "providerState",
+                    "providerContext",
+                    "snapshot",
+                    "retry",
+                    "error",
+                    "window",
+                    "producer",
+                    "hosted",
+                }
+            ):
+                return False
+            if "metadata" in message and message.get("type") != "synthetic":
+                return False
+            if message.get("type") == "user" and message.get("agents"):
+                return False
+            for part in message.get("content", []):
+                if any(
+                    key in part
+                    for key in {
+                        "native",
+                        "providerState",
+                        "providerResultState",
+                        "hosted",
+                        "window",
+                        "producer",
+                    }
+                ):
+                    return False
+                if part.get("type") == "tool" and set(part["state"]) - {
+                    "status",
+                    "input",
+                    "content",
+                    "error",
+                }:
+                    return False
+        return (
+            archived_tools_match(expected, snapshot)
+            and native_context_carriers_match(expected, snapshot)
+            and _native_target_order(
+                bundle,
+                {
+                    expected._events[m.call_target_index].tool_call_id
+                    for m in expected.generated_members
+                },
+            )
+            == expected.reviewed_target_order
+        )
+    except (SessionMigrateError, ValueError, TypeError, KeyError, AttributeError, IndexError):
+        return False
+
+
 def archived_tools_match(expected: ExpectedProjection, snapshot) -> bool:
     """Check native archive markers that canonical tool errors intentionally erase.
 
     The expected calls come only from independently derived generated bindings.
     A same-text ordinary error, or a marker moved to another call, is not proof.
     """
-    if expected.policy.policy_id not in {OPENCODE_ARCHIVE_POLICY_ID, *_NATIVE_CONTEXT_POLICIES}:
+    if expected.policy.policy_id not in {
+        OPENCODE_ARCHIVE_POLICY_ID,
+        *_NATIVE_CONTEXT_POLICIES,
+        *_REVIEWED_POLICIES,
+    }:
         return True
     try:
         bundle = strict_decode(snapshot.raw_bytes)
@@ -368,7 +530,25 @@ def archived_tools_match(expected: ExpectedProjection, snapshot) -> bool:
         return False
 
 
-def _content(event: Event, target: TargetFormat, losses: set[str]) -> tuple[str | None, list]:
+def reviewed_tool_reference_text(tool_name: str) -> str:
+    """Quote a captured registry reference as DATA, never as a live definition."""
+    require(type(tool_name) is str and bool(tool_name), "source_mismatch")
+    return "[session-migrate historical tool reference data]\n" + json.dumps(
+        {"type": "tool_reference", "tool_name": tool_name},
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _content(
+    event: Event,
+    target: TargetFormat,
+    losses: set[str],
+    *,
+    reviewed: bool = False,
+) -> tuple[str | None, list]:
     raw = event.payload.get("content_blocks")
     kept = []
     if type(raw) is list:
@@ -385,6 +565,11 @@ def _content(event: Event, target: TargetFormat, losses: set[str]) -> tuple[str 
                     kept.append({"type": "image", "image_url": uri})
                 else:
                     losses.add("result_image_omitted")
+            elif reviewed and kind == "tool_reference" and set(block) == {"type", "tool_name"}:
+                kept.append(
+                    {"type": "text", "text": reviewed_tool_reference_text(block["tool_name"])}
+                )
+                losses.add("reviewed_tool_reference_as_data")
             elif (
                 target is TargetFormat.CLAUDE
                 and kind == "tool_reference"
@@ -417,7 +602,8 @@ def expected_from_source(
     require(type(policy) is ProjectionPolicy, "unsupported_policy")
     policy.__post_init__()
     archive = policy.policy_id in _ARCHIVE_POLICIES
-    native_context = policy.policy_id in _NATIVE_CONTEXT_POLICIES
+    reviewed = policy.policy_id in _REVIEWED_POLICIES
+    native_context = policy.policy_id in _NATIVE_CONTEXT_POLICIES or reviewed
     require(
         not (archive or native_context) or target_format is TargetFormat.OPENCODE,
         "unsupported_policy",
@@ -432,6 +618,15 @@ def expected_from_source(
         },
         "unsupported_target",
     )
+    if reviewed:
+        require(
+            source.audit.selection_policy_id == "claude309-reviewed-conversation-v1"
+            and source.audit.client_id == "2.1.309"
+            and source.session.reviewed_report is not None,
+            "unsupported_policy",
+        )
+    else:
+        require(source.audit.selection_policy_id == "native-active-v1", "unsupported_policy")
     events = source.events
     native_context_hashes = ()
     native_context_only = False
@@ -443,8 +638,31 @@ def expected_from_source(
             for event in events
             if is_synthetic_text_context(event)
         )
-        native_context_only = any(
+        native_context_only = not reviewed and any(
             is_native_context_policy(event.payload.get("native_context_policy")) for event in events
+        )
+    if reviewed:
+        for event in events:
+            if is_synthetic_text_context(event):
+                require(
+                    event.payload.get("reviewed_context_policy")
+                    == "claude-2.1.309-reviewed-conversation-v1"
+                    and "native_context_policy" not in event.payload,
+                    "source_mismatch",
+                )
+        # These policies license runtime/ordering differences only. Refuse content
+        # the portable grammar would otherwise silently omit or change.
+        try:
+            _native_source_order(events, reviewed=True)
+        except ValueError:
+            raise ProjectionError("source_mismatch") from None
+        require(
+            all(
+                (event.kind is not EventKind.TOOL_CALL or type(event.payload.get("input")) is dict)
+                and (event.kind is not EventKind.MESSAGE or bool(event.text))
+                for event in events
+            ),
+            "source_mismatch",
         )
     original = tuple(iter_canonical_units(events, policy.canonical_policy))
     tool_issues = {
@@ -486,7 +704,7 @@ def expected_from_source(
         losses = losses_by_source[index]
         if set(e.payload) - {"content_blocks", "is_error", "namespace"}:
             losses.add("result_payload_omitted")
-        text, blocks = _content(e, target_format, losses)
+        text, blocks = _content(e, target_format, losses, reviewed=reviewed)
         is_error = e.payload.get("is_error") is True
         payload = {"content_blocks": blocks}
         if target_format is not TargetFormat.CODEX:
@@ -619,6 +837,12 @@ def expected_from_source(
                 index,
                 "portable_compaction",
             )
+        elif reviewed and e.kind is EventKind.OPAQUE:
+            # The reviewed source-order guard admitted only explicit inert
+            # metadata reasons. Its original bytes remain in the bound capture;
+            # UNKNOWN raw classification is deliberately left unchanged.
+            losses.add("reviewed_metadata_archive_only")
+            transforms[index] = "archive_source_metadata"
         else:
             losses.add("source_event_omitted")
             transforms[index] = "omit"
@@ -717,6 +941,19 @@ def expected_from_source(
     raw_known_losses = dict(source.audit.classification_counts).get("known-loss", 0)
     if raw_known_losses:
         loss_counts["source_raw_known_loss"] = raw_known_losses
+    reviewed_source_order = _native_source_order(events, reviewed=True) if reviewed else ()
+    reviewed_target_order = _reviewed_projected_order(events, generated_members) if reviewed else ()
+    if reviewed:
+        error_count = sum(
+            event.kind is EventKind.TOOL_RESULT and event.payload.get("is_error") is True
+            for event in events
+        )
+        if error_count:
+            loss_counts["reviewed_tool_error_envelope"] = error_count
+        if reviewed_source_order != reviewed_target_order:
+            loss_counts["reviewed_context_order_changed"] = 1
+        loss_counts["reviewed_runtime_not_preserved"] = 1
+        loss_counts["authority_as_data"] = sum(is_synthetic_text_context(e) for e in events) or 1
     if source.session.title and target_format is TargetFormat.CODEX:
         metadata_loss_counts["session_title_omitted"] = 1
     for index, unit in enumerate(original):
@@ -773,6 +1010,14 @@ def expected_from_source(
         + _json_bytes(
             {
                 "target_format": target_format.value,
+                **(
+                    {
+                        "reviewed_source_order": [list(unit) for unit in reviewed_source_order],
+                        "reviewed_target_order": [list(unit) for unit in reviewed_target_order],
+                    }
+                    if reviewed
+                    else {}
+                ),
                 "loss_counts": dict(sorted(loss_counts.items())),
                 "metadata_loss_counts": dict(sorted(metadata_loss_counts.items())),
             }
@@ -791,4 +1036,6 @@ def expected_from_source(
         tuple(copy.deepcopy(projected)),
         native_context_hashes=native_context_hashes,
         native_context_only=native_context_only,
+        reviewed_source_order=reviewed_source_order,
+        reviewed_target_order=reviewed_target_order,
     )
