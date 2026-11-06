@@ -42,7 +42,7 @@
     byId("prepare-transfer").disabled = !connected || !capabilities.publish_enabled || busy || selected === null || !byId("target-profile").value;
     byId("adoption-controls").hidden = !capabilities.adoption_available;
     byId("tree-controls").hidden = !capabilities.tree_available;
-    for (const id of ["tree-manifest", "tree-source-version", "tree-mode", "tree-anchor", "tree-edges", "tree-detach", "tree-partial", "tree-provider", "tree-model"]) byId(id).disabled = !connected || busy;
+    for (const id of ["tree-manifest", "tree-source-version", "tree-mode", "tree-publication-mode", "tree-anchor", "tree-edges", "tree-detach", "tree-partial", "tree-provider", "tree-model"]) byId(id).disabled = !connected || busy;
     byId("prepare-tree").disabled = !connected || !capabilities.publish_enabled || !capabilities.tree_available || busy || !treeManifest || !byId("source-profile").value || !byId("target-profile").value || !byId("target-project").value;
     byId("adopt-target-session").disabled = !connected || busy;
     byId("preview-adoption").disabled = !connected || busy || !byId("adopt-target-session").value;
@@ -334,7 +334,7 @@
     } catch { notice("Confirmation could not be observed. Reusing this review checks the same confirmation; it does not request another import.", true); setEnabled(); }
   });
   for (const id of ["transfer-mode", "handoff-model", "handoff-provider", "handoff-version", "handoff-first", "handoff-last", "handoff-parent"]) byId(id).addEventListener("input", clearReview);
-  for (const id of ["tree-source-version", "tree-mode", "tree-anchor", "tree-edges", "tree-detach", "tree-partial", "tree-provider", "tree-model"]) byId(id).addEventListener("input", () => { treeGeneration += 1; clearReview(); });
+  for (const id of ["tree-source-version", "tree-mode", "tree-publication-mode", "tree-anchor", "tree-edges", "tree-detach", "tree-partial", "tree-provider", "tree-model"]) byId(id).addEventListener("input", () => { treeGeneration += 1; clearReview(); });
   for (const id of ["source-profile", "target-profile", "target-project"]) byId(id).addEventListener("change", () => { treeGeneration += 1; });
   byId("tree-manifest").addEventListener("change", async (event) => {
     const file = event.target.files[0], expected = ++treeGeneration;
@@ -352,7 +352,7 @@
     if (confirmationPending || !treeManifest || (activeJob && !terminalStates.has(activeJob.state))) return;
     clearReview();
     const expected = treeGeneration, expectedSelection = selectionGeneration;
-    const request = { source_profile_id: byId("source-profile").value, target_profile_id: byId("target-profile").value, project_id: byId("target-project").value, source_client_version: byId("tree-source-version").value, manifest: treeManifest, mode: byId("tree-mode").value, detach: byId("tree-detach").checked, acknowledge_partial: byId("tree-partial").checked, model_provider: byId("tree-provider").value, model: byId("tree-model").value };
+    const request = { source_profile_id: byId("source-profile").value, target_profile_id: byId("target-profile").value, project_id: byId("target-project").value, source_client_version: byId("tree-source-version").value, manifest: treeManifest, mode: byId("tree-mode").value, publication_mode: byId("tree-publication-mode").value, detach: byId("tree-detach").checked, acknowledge_partial: byId("tree-partial").checked, model_provider: byId("tree-provider").value, model: byId("tree-model").value };
     if (byId("tree-anchor").value) request.anchor = byId("tree-anchor").value;
     if (byId("tree-edges").value.trim()) request.hierarchy_keys = byId("tree-edges").value.split(",").map((value) => value.trim()).filter(Boolean);
     treePreparing = true; setEnabled();

@@ -69,6 +69,19 @@ class TreeScreen(Screen):
             )
             yield Checkbox("Explicitly detach anchor from omitted parent", id="tree-detach")
             yield Checkbox("Acknowledge partial inventory or omitted nodes", id="tree-partial")
+            yield Select(
+                [
+                    ("Independent sessions — editable; external organizational map", "independent"),
+                    ("Native subagents — child composers disabled in stock UI", "native-subagent"),
+                ],
+                value="independent",
+                allow_blank=False,
+                id="tree-publication-mode",
+            )
+            yield Literal(
+                "No native fork boundary or peer communication is provisioned. "
+                "Resume retains the operation's recorded publication mode."
+            )
             yield Input(placeholder="Existing destination profile ID", id="tree-target")
             yield Input(placeholder="Absolute project CWD", id="tree-cwd")
             yield Input(placeholder="Model provider", id="tree-provider")
@@ -110,7 +123,12 @@ class TreeScreen(Screen):
             row["key"]: row for row in document["nodes"] if isinstance(row, dict) and "key" in row
         }
         targets = {row.get("target_id"): key for key, row in rows.items() if row.get("target_id")}
-        parents = {key: targets.get(row.get("parent_target_id")) for key, row in rows.items()}
+        parents = {
+            key: targets.get(
+                row.get("organizational_parent_target_id", row.get("parent_target_id"))
+            )
+            for key, row in rows.items()
+        }
         for edge in document.get("relationships", []):
             if isinstance(edge, dict) and edge.get("child_node_key") in rows:
                 parents[edge["child_node_key"]] = edge.get("parent_node_key")
@@ -237,6 +255,7 @@ class TreeScreen(Screen):
         try:
             selection = self._selection()
             mode = self.query_one("#tree-mode", Select).value
+            publication_mode = self.query_one("#tree-publication-mode", Select).value
             anchor = self.value("anchor") or None
             edges = [
                 value.strip() for value in self.value("edges").split(",") if value.strip()
@@ -270,6 +289,7 @@ class TreeScreen(Screen):
                 acknowledge_partial=partial,
                 operation_id=operation_id,
                 resume=kind == "resume",
+                **({"publication_mode": publication_mode} if kind != "resume" else {}),
             )
 
         self.launch("prepare" if kind in {"prepare", "resume"} else kind, work)
@@ -300,7 +320,9 @@ class TreeScreen(Screen):
             self.status("Action blocked. Check current inputs and review again.")
         elif kind == "prepare":
             self.query_one("#tree-confirm", Button).disabled = False
+            publication_mode = result.get("publication_mode", "native-subagent")
             self.status(
+                f"Publication mode: {publication_mode}. "
                 "Review titles, exact selected nodes, relationships, IDs and losses; "
                 "then confirm once."
             )

@@ -10,7 +10,7 @@ import test_tree_operations as publisher_fixtures
 
 pytest.importorskip("textual")
 
-from textual.widgets import Button, Checkbox, Input, Tree
+from textual.widgets import Button, Checkbox, Input, Select, Tree
 
 from session_migrate.catalog import Catalog
 from session_migrate.tree_cli import TreeWorkflow
@@ -63,7 +63,8 @@ async def activate(screen, pilot, name):
     await pilot.pause(0.02)
 
 
-def test_keyboard_opens_tree_review_and_confirm_publishes_once(workspace, tmp_path):
+@pytest.mark.parametrize("selected_mode", ["independent", "native-subagent"])
+def test_keyboard_opens_tree_review_and_confirm_publishes_once(workspace, tmp_path, selected_mode):
     app = app_for(workspace, tmp_path)
 
     async def flow():
@@ -72,19 +73,119 @@ def test_keyboard_opens_tree_review_and_confirm_publishes_once(workspace, tmp_pa
             await pilot.press("ctrl+t")
             assert isinstance(app.screen, TreeScreen)
             await fill(app, pilot, workspace)
+            assert app.screen.query_one("#tree-publication-mode", Select).value == "independent"
+            app.screen.query_one("#tree-publication-mode", Select).value = selected_mode
+            await pilot.pause(0.05)
             await activate(app.screen, pilot, "prepare")
             await idle(app, pilot)
+            assert f'"publication_mode": "{selected_mode}"' in str(
+                app.screen.query_one("#tree-metadata", Literal).render()
+            )
             assert not app.screen.query_one("#tree-confirm", Button).disabled
             assert workspace[3] == []
             await activate(app.screen, pilot, "confirm")
             await idle(app, pilot)
             assert app.screen.finished and len(workspace[3]) == 3
+            for index, native_id in enumerate(workspace[3]):
+                expected = (
+                    workspace[3][index - 1]
+                    if index and selected_mode == "native-subagent"
+                    else None
+                )
+                assert workspace[2][native_id]["info"].get("parentID") == expected
             assert app.screen.query_one("#tree-confirm", Button).disabled
             assert "PRIVATE_BODY_SENTINEL" not in str(
                 app.screen.query_one("#tree-metadata", Literal).render()
             )
             await pilot.press("escape")
             assert not isinstance(app.screen, TreeScreen)
+
+    asyncio.run(flow())
+
+
+@pytest.mark.parametrize("mode", ["independent", "native-subagent"])
+def test_tui_resume_uses_recorded_mode_instead_of_new_form_default(
+    workspace, tmp_path, monkeypatch, mode
+):
+    _, options, _, imports, _, storage, manifest, _ = workspace
+    app = app_for(workspace, tmp_path)
+    workflow = app.controller.open_tree(profiles_file=storage)
+    try:
+        workflow.load(source_profile_id="source", client_version="2.1.318", manifest=manifest)
+        workflow.select(mode="subtree")
+        workflow.prepare(
+            "target",
+            cwd=options["cwd"],
+            model_provider="fixture",
+            model="test",
+            acknowledge_partial=True,
+            publication_mode=mode,
+        )
+        operation_id = workflow.commit()["operation_id"]
+    finally:
+        workflow.close()
+    calls = []
+    original = TreeWorkflow.prepare
+
+    def prepare(workflow, *args, **kwargs):
+        calls.append(kwargs)
+        return original(workflow, *args, **kwargs)
+
+    monkeypatch.setattr(TreeWorkflow, "prepare", prepare)
+
+    async def flow():
+        async with app.run_test(size=(120, 48)) as pilot:
+            await idle(app, pilot)
+            await pilot.press("ctrl+t")
+            await fill(app, pilot, workspace)
+            app.screen.query_one("#tree-operation", Input).value = operation_id
+            assert app.screen.query_one("#tree-publication-mode", Select).value == "independent"
+            await activate(app.screen, pilot, "resume")
+            await idle(app, pilot)
+            assert calls and "publication_mode" not in calls[-1]
+            assert not app.screen.query_one("#tree-confirm", Button).disabled, str(
+                app.screen.query_one("#tree-metadata", Literal).render()
+            )
+            assert f'"publication_mode": "{mode}"' in str(
+                app.screen.query_one("#tree-metadata", Literal).render()
+            )
+            assert len(imports) == 3
+
+    asyncio.run(flow())
+
+
+def test_tui_groups_independent_roots_using_organizational_parent_metadata(workspace, tmp_path):
+    app = app_for(workspace, tmp_path)
+
+    async def flow():
+        async with app.run_test(size=(120, 48)) as pilot:
+            await idle(app, pilot)
+            await pilot.press("ctrl+t")
+            app.screen.show_tree(
+                {
+                    "nodes": [
+                        {
+                            "key": "root",
+                            "target_id": "target-root",
+                            "parent_target_id": None,
+                            "organizational_parent_target_id": None,
+                            "title": "Root",
+                        },
+                        {
+                            "key": "child",
+                            "target_id": "target-child",
+                            "parent_target_id": None,
+                            "organizational_parent_target_id": "target-root",
+                            "title": "<b>literal</b>",
+                        },
+                    ]
+                }
+            )
+            tree = app.screen.query_one("#tree-browser", Tree)
+            assert len(tree.root.children) == 1
+            child = tree.root.children[0].children[0]
+            assert child.data == "child" and "<b>literal</b>" in child.label.plain
+            assert not child.label.spans and workspace[3] == []
 
     asyncio.run(flow())
 

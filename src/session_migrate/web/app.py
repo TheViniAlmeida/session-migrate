@@ -87,6 +87,10 @@ def validate_parameters(action, parameters, identifiers):
             raise WebInputError("identifier_invalid")
     nullable = {"project_id", "target_title", "title_policy"}
     for name, value in parameters.items():
+        if action == "prepare_tree" and name == "publication_mode":
+            if type(value) is not str or value not in {"independent", "native-subagent"}:
+                raise WebInputError("publication_mode_invalid")
+            continue
         if action == "prepare_tree" and name == "manifest":
             if type(value) is not dict:
                 raise WebInputError("tree_declaration_required")
@@ -182,6 +186,7 @@ def validate_parameters(action, parameters, identifiers):
             "full_tree",
         }:
             raise WebInputError("fields_missing")
+        parameters.setdefault("publication_mode", "independent")
     runtime_required = {
         "source_session_id",
         "target_profile_id",
@@ -425,6 +430,7 @@ def create_app(registry: RunRegistry, origin: str, backend):
                     "model_provider",
                     "model",
                     "hierarchy_keys",
+                    "publication_mode",
                 ),
             ),
             api_route(

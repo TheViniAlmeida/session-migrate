@@ -275,7 +275,103 @@ def test_web_review_exposes_unknown_coverage_without_fork_proof(web):
     value = review(web)["metadata"]
     assert value["coverage"] == "unknown"
     assert value["projection_scope"] == "portable_conversation"
-    assert value["hierarchy_semantics"] == "organizational_parent"
+    assert value["publication_mode"] == "independent"
+    assert value["hierarchy_semantics"] == "external_organizational_map"
     assert value["fork_boundary_proven"] is False
     assert all(node["coverage"] == "unknown" and node["title"] for node in value["nodes"])
     assert workspace[3] == []
+
+
+@pytest.mark.parametrize("mode", [None, "independent", "native-subagent"])
+def test_http_publication_mode_default_and_native_opt_in(web, mode):
+    call, parameters, workspace, *_ = web
+    if mode is not None:
+        parameters["publication_mode"] = mode
+    proposal = review(web)
+    value = proposal["metadata"]
+    expected = mode or "independent"
+    assert value["publication_mode"] == expected
+    assert value["hierarchy_semantics"] == (
+        "external_organizational_map" if expected == "independent" else "native_subagent_parent"
+    )
+    assert bool(value["warnings"]) == (expected == "native-subagent")
+    assert all(node["parent_target_id"] is None for node in value["nodes"]) == (
+        expected == "independent"
+    )
+    assert value["nodes"][1]["organizational_parent_target_id"] == value["nodes"][0]["target_id"]
+    assert workspace[3] == []
+    response = call(
+        "POST",
+        "/api/trees/" + proposal["proposal_id"] + "/confirm",
+        json={"body_fingerprint": proposal["fingerprint"], "idempotency_key": "mode-bound"},
+    )
+    assert response.status_code == 200, response.text
+    result = wait(call, response.json(), {"completed", "failed", "uncertain"})
+    assert result["state"] == "completed", result
+    assert result["result"]["publication_mode"] == expected
+    assert len(workspace[3]) == 3
+    for index, native_id in enumerate(workspace[3]):
+        native_parent = workspace[3][index - 1] if index and expected == "native-subagent" else None
+        assert workspace[2][native_id]["info"].get("parentID") == native_parent
+
+
+@pytest.mark.parametrize("mode", ["", "native", "INDEPENDENT", None, True, [], {}])
+def test_http_invalid_publication_mode_rejected_before_jobs_and_native_probes(
+    web, monkeypatch, mode
+):
+    call, parameters, workspace, backend, *_ = web
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("malformed mode must not enqueue a job or probe a native target")
+
+    monkeypatch.setattr(backend.jobs, "prepare_runtime", forbidden)
+    monkeypatch.setattr(conversion, "_opencode_version", forbidden)
+    result = call("POST", "/api/trees/prepare", json={**parameters, "publication_mode": mode})
+    assert result.status_code == 400
+    assert result.json()["reason"] == "publication_mode_invalid"
+    assert workspace[3] == []
+
+
+def test_runtime_tree_mode_substitution_invalidates_issued_capability(workspace):
+    from dataclasses import replace
+
+    from session_migrate.operations import CancellationToken
+    from session_migrate.web import runtime_jobs
+
+    inventory, options, _, imports, profiles, *_ = workspace
+    request = runtime_jobs.TreeRuntimeRequest(
+        profiles[0],
+        profiles[1],
+        options["cwd"],
+        options["state_home"],
+        options["base_environ"],
+        "2.1.318",
+        cli_fixtures.declaration(inventory),
+        "full_tree",
+        None,
+        False,
+        True,
+        "fixture",
+        "test",
+    )
+    changed = replace(request, publication_mode="native-subagent")
+    assert request.publication_mode == "independent"
+    assert runtime_jobs._tree_binding(request) != runtime_jobs._tree_binding(changed)
+    handle = runtime_jobs.new_runtime(request, "tree", "synthetic-run")
+    try:
+        runtime_jobs.capture_runtime(
+            handle,
+            cancellation=CancellationToken(),
+            prepublication_check=lambda: None,
+        )
+        runtime_jobs.prepare_runtime(
+            handle,
+            cancellation=CancellationToken(),
+            prepublication_check=lambda: None,
+        )
+        runtime_jobs._ISSUED[handle].request = changed
+        with pytest.raises(runtime_jobs.RuntimeJobError, match="source_changed"):
+            runtime_jobs.commit_runtime(handle, "synthetic-run", cancellation=CancellationToken())
+        assert imports == []
+    finally:
+        handle.discard()

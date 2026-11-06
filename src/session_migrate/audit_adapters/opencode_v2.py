@@ -22,6 +22,7 @@ from session_migrate.audit_adapters import (
 )
 from session_migrate.errors import SessionMigrateError
 from session_migrate.formats import opencode as parser
+from session_migrate.formats.context_text import is_marked_synthetic_text
 
 _CLIENTS = frozenset({"2.0.22", "2.0.23", "2.1.1", "2.2.5"})
 
@@ -157,11 +158,21 @@ def content(value: object) -> Rule:
     )
 
 
-def message(value: object, *, schema_21: bool = False) -> Rule:
+def message(value: object, *, schema_21: bool = False, context_text: bool = False) -> Rule:
     if type(value) is not dict:
         return subtree(UNKNOWN)
     kind = value.get("type")
     common = {"type": DISCRIMINATOR, "id": ID, "time": CLOCK, "metadata": subtree(UNKNOWN)}
+    if context_text and is_marked_synthetic_text(value):
+        return obj(
+            {
+                **common,
+                "text": S,
+                "metadata": subtree(STRUCTURE),
+                "description": scalar(LOSS, str),
+            },
+            required=("type", "id", "time", "text", "metadata"),
+        )
     if schema_21:
         # Provider-owned replay data is observed as unknown RAW, never portable
         # message content or evidence of a resumable native checkpoint.
@@ -260,7 +271,11 @@ def audit(value, snapshot, policy) -> AdapterResult:
                 },
                 required=("id", "projectID", "title", "location", "time", "cost", "tokens"),
             ),
-            "messages": array(dynamic(lambda item: message(item, schema_21=schema_21))),
+            "messages": array(
+                dynamic(
+                    lambda item: message(item, schema_21=schema_21, context_text=client == "2.2.5")
+                )
+            ),
         },
         required=("info", "messages"),
     )

@@ -27,6 +27,7 @@ from session_migrate.projection_policies import (
     ProjectionPolicy,
     archived_tools_match,
     expected_from_source,
+    native_context_carriers_match,
     require,
     validate_policy_target,
 )
@@ -275,6 +276,14 @@ def _expectation_sha(expected: ExpectedProjection) -> str:
                 if expected.generated_members
                 else {}
             ),
+            **(
+                {
+                    "native_context_hashes": expected.native_context_hashes,
+                    "native_context_only": expected.native_context_only,
+                }
+                if expected.native_context_hashes
+                else {}
+            ),
             "losses": list(expected.loss_counts),
             "metadata_losses": list(expected.metadata_loss_counts),
             "relation_complete": expected.relation_complete,
@@ -509,6 +518,7 @@ def prepare_projection(
     )
     artifact_obs = _observe(artifact_snapshot, context.target_client, policy)
     require(archived_tools_match(expected, artifact_snapshot), "semantic_mismatch")
+    require(native_context_carriers_match(expected, artifact_snapshot), "semantic_mismatch")
     require(versions.target_adapter == artifact_obs.audit.audit_policy_id, "unsupported_policy")
     require(
         _same_semantics(
@@ -692,11 +702,15 @@ def verify_projection(
     )
     observed = _observe(observed_snapshot, context.target_client, prepared._policy)
     validate_policy_target(prepared._policy, context.target_format, context.target_client)
-    semantic = archived_tools_match(prepared.expected, observed_snapshot) and _same_semantics(
-        prepared.expected.witness.prefix_witness,
-        _target_conversation_witness(
-            observed, observed_snapshot, prepared._options, prepared._policy
-        ),
+    semantic = (
+        archived_tools_match(prepared.expected, observed_snapshot)
+        and native_context_carriers_match(prepared.expected, observed_snapshot)
+        and _same_semantics(
+            prepared.expected.witness.prefix_witness,
+            _target_conversation_witness(
+                observed, observed_snapshot, prepared._options, prepared._policy
+            ),
+        )
     )
     metadata = observed.session.session_id == prepared._artifact.session_id and (
         observed.session.cwd == prepared._artifact.cwd

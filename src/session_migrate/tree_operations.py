@@ -83,6 +83,7 @@ class TreeResult:
 @dataclass(frozen=True, slots=True, repr=False)
 class _TreeState:
     plan: TreePlan
+    publication_mode: str
     target: Profile
     source_profile: Profile | None
     cwd: Path
@@ -203,8 +204,38 @@ def _target_environment(target: Profile, base: Mapping[str, str]) -> dict[str, s
     return values
 
 
+def _hierarchy_semantics(publication_mode):
+    return (
+        "external_organizational_map"
+        if publication_mode == "independent"
+        else "native_subagent_parent"
+    )
+
+
+def _publication_warnings(publication_mode):
+    if publication_mode == "independent":
+        return []
+    return [
+        {
+            "code": "native_subagent_composer_disabled",
+            "message": (
+                "OpenCode 2.2.5 treats parentID as a native subagent relationship and disables "
+                "the child composer. This does not preserve an editable persistent fork."
+            ),
+        }
+    ]
+
+
 def _plan_fingerprint(
-    plan, target, source_profile, cwd, provider, model, max_source_bytes, max_total_bytes
+    plan,
+    target,
+    source_profile,
+    cwd,
+    provider,
+    model,
+    max_source_bytes,
+    max_total_bytes,
+    publication_mode="native-subagent",
 ) -> str:
     return _digest(
         {
@@ -217,6 +248,8 @@ def _plan_fingerprint(
             "model": model,
             "max_source_bytes": max_source_bytes,
             "max_total_bytes": max_total_bytes,
+            # Preserve the historical native-parent fingerprint byte for byte.
+            **({"publication_mode": publication_mode} if publication_mode == "independent" else {}),
         }
     )
 
@@ -239,7 +272,7 @@ def _observe(target: Profile, environment: Mapping[str, str], node: dict, *, cwd
     return observed.source_sha256
 
 
-def _node_request(plan, node, target, cwd, model_provider, model):
+def _node_request(plan, node, target, cwd, model_provider, model, publication_mode):
     parent_key = plan.parent_map[node.key]
     return OperationRequest(
         command=OperationKind.IMPORT,
@@ -254,7 +287,11 @@ def _node_request(plan, node, target, cwd, model_provider, model):
         model_provider=model_provider,
         model=model,
         target_title=node.title,
-        target_parent_id=plan.id_map[parent_key] if parent_key else None,
+        target_parent_id=(
+            plan.id_map[parent_key]
+            if parent_key and publication_mode == "native-subagent"
+            else None
+        ),
         reviewed_tree_projection=True,
         target_client=target.client,
         target_server=target.server,
@@ -317,15 +354,20 @@ def _live_source_binding(request, target_values, source_values, profile_context,
     }
 
 
-def _validate_journal_nodes(plan, nodes, source_hashes):
+def _validate_journal_nodes(plan, nodes, source_hashes, publication_mode):
     if {node["key"] for node in nodes} != set(plan.selected_node_keys):
         raise TreeOperationError("Tree journal node selection differs from the live plan")
+    titles = {node.key: node.title for node in plan.ordered_nodes}
     for node in nodes:
         key = node["key"]
         parent_key = plan.parent_map[key]
+        organizational_parent = plan.id_map[parent_key] if parent_key else None
         if (
             node["target_id"] != plan.id_map[key]
-            or node["parent_target_id"] != (plan.id_map[parent_key] if parent_key else None)
+            or node["parent_target_id"]
+            != (organizational_parent if publication_mode == "native-subagent" else None)
+            or node["organizational_parent_target_id"] != organizational_parent
+            or ("title" in node and node["title"] != titles[key])
             or node["source_sha256"] != source_hashes[key]
         ):
             raise TreeOperationError("Tree journal identity differs from the live source plan")
@@ -392,6 +434,7 @@ def prepare_tree(
     base_environ: Mapping[str, str] | None = None,
     source_profile: Profile | None = None,
     acknowledge_partial: bool = False,
+    publication_mode: str | None = None,
     prepublication_check: Callable[[], None] | None = None,
     max_source_bytes: int = MAX_SOURCE_BYTES,
     max_total_source_bytes: int = MAX_TOTAL_SOURCE_BYTES,
@@ -451,6 +494,16 @@ def prepare_tree(
         raise TreeOperationError(
             "Tree operation already has a journal; inspect and explicitly resume"
         )
+    if publication_mode is not None and (
+        type(publication_mode) is not str
+        or publication_mode not in {"independent", "native-subagent"}
+    ):
+        raise TreeOperationError("Unknown tree publication mode")
+    prior = inspect_tree(state_home, operation_id) if _resume else None
+    persisted_mode = prior["publication_mode"] if prior is not None else None
+    if prior is not None and publication_mode is not None and publication_mode != persisted_mode:
+        raise TreeOperationError("Tree resume publication mode differs from the original operation")
+    publication_mode = persisted_mode or publication_mode or "independent"
     source_hashes = _capture_plan(plan, max_source_bytes, max_total_source_bytes)
     fingerprint = _plan_fingerprint(
         plan,
@@ -461,6 +514,7 @@ def prepare_tree(
         model,
         max_source_bytes,
         max_total_source_bytes,
+        publication_mode,
     )
     original_target, original_source = (
         target.fingerprint,
@@ -477,7 +531,7 @@ def prepare_tree(
     def source_binding(key):
         node = planned_nodes[key]
         binding = _live_source_binding(
-            _node_request(plan, node, target, cwd, model_provider, model),
+            _node_request(plan, node, target, cwd, model_provider, model, publication_mode),
             values,
             source_values,
             profile_context,
@@ -506,6 +560,7 @@ def prepare_tree(
                 model,
                 max_source_bytes,
                 max_total_source_bytes,
+                publication_mode,
             )
             != fingerprint
             or _target_environment(target, base) != values
@@ -524,12 +579,10 @@ def prepare_tree(
                 raise _CompletedTreeChanged((completed_node["key"],))
 
     guard()
-    prior = None
     if _resume:
-        prior = inspect_tree(state_home, operation_id)
         if prior["plan_sha256"] != fingerprint or prior["target_root"] != str(target.root):
             raise TreeOperationError("Tree resume options differ from the original operation")
-        _validate_journal_nodes(plan, prior["nodes"], source_hashes)
+        _validate_journal_nodes(plan, prior["nodes"], source_hashes, publication_mode)
         if any(node["status"] not in {"unattempted", "completed"} for node in prior["nodes"]):
             raise TreeOperationError(
                 "Tree has an attempted node; explicit reconciliation is required"
@@ -561,7 +614,8 @@ def prepare_tree(
     try:
         for node in plan.ordered_nodes:
             parent_key = plan.parent_map[node.key]
-            parent_id = plan.id_map[parent_key] if parent_key else None
+            organizational_parent_id = plan.id_map[parent_key] if parent_key else None
+            parent_id = organizational_parent_id if publication_mode == "native-subagent" else None
             if node.key in completed_keys:
                 nodes.append(next(item for item in completed if item["key"] == node.key))
                 continue
@@ -570,7 +624,9 @@ def prepare_tree(
                 raise TreeOperationError(
                     "Tree retained source and target artifacts exceed the byte limit"
                 )
-            request = _node_request(plan, node, target, cwd, model_provider, model)
+            request = _node_request(
+                plan, node, target, cwd, model_provider, model, publication_mode
+            )
             handle = operations.prepare_operation(
                 request,
                 environ=values,
@@ -615,6 +671,7 @@ def prepare_tree(
                     ).title,
                     "target_id": plan.id_map[node.key],
                     "parent_target_id": parent_id,
+                    "organizational_parent_target_id": organizational_parent_id,
                     "operation_id": proposal["proposal_id"],
                     "status": "unattempted",
                     "source_sha256": source_hashes[node.key],
@@ -641,7 +698,9 @@ def prepare_tree(
             "coverage": "partial"
             if all(node.get("coverage", "partial") != "unknown" for node in nodes)
             else "unknown",
-            "hierarchy_semantics": "organizational_parent",
+            "publication_mode": publication_mode,
+            "hierarchy_semantics": _hierarchy_semantics(publication_mode),
+            "warnings": _publication_warnings(publication_mode),
             "fork_boundary_proven": False,
             "source": {
                 "format": inventory.source_format,
@@ -669,6 +728,7 @@ def prepare_tree(
         }
         state = _TreeState(
             plan,
+            publication_mode,
             target,
             source_profile,
             cwd,
@@ -719,7 +779,10 @@ def _result(state, nodes, status) -> TreeResult:
                 if any(node.get("coverage", "unknown") == "unknown" for node in nodes)
                 else "partial",
                 "projection_scope": "portable_conversation",
-                "hierarchy_semantics": "organizational_parent",
+                "publication_mode": state.publication_mode,
+                "hierarchy_semantics": _hierarchy_semantics(state.publication_mode),
+                "fork_boundary_proven": False,
+                "warnings": _publication_warnings(state.publication_mode),
                 "nodes": nodes,
                 "journal_path": str(journal_path(state.state_home, state.plan.operation_id)),
             }
@@ -761,6 +824,7 @@ def commit_tree(prepared: PreparedTree, *, cancellation=None, progress=None) -> 
                 "coverage",
                 "target_id",
                 "parent_target_id",
+                "organizational_parent_target_id",
                 "operation_id",
                 "status",
             )
@@ -781,11 +845,14 @@ def commit_tree(prepared: PreparedTree, *, cancellation=None, progress=None) -> 
         journal = TreeJournal(state.state_home, state.plan.operation_id, create=not state.resume)
         if state.resume:
             current = journal.inspect()
-            _validate_journal_nodes(state.plan, current["nodes"], state.source_sha256)
+            _validate_journal_nodes(
+                state.plan, current["nodes"], state.source_sha256, state.publication_mode
+            )
             completed_fields = (
                 "operation_id",
                 "target_id",
                 "parent_target_id",
+                "organizational_parent_target_id",
                 "source_sha256",
                 "target_sha256",
                 "observed_sha256",
@@ -800,7 +867,8 @@ def commit_tree(prepared: PreparedTree, *, cancellation=None, progress=None) -> 
                 if item["status"] == "completed"
             }
             if (
-                current["plan_sha256"] != state.plan_sha256
+                current["publication_mode"] != state.publication_mode
+                or current["plan_sha256"] != state.plan_sha256
                 or current_completed != expected_completed
                 or any(
                     node["status"] not in {"completed", "unattempted"} for node in current["nodes"]
@@ -814,6 +882,7 @@ def commit_tree(prepared: PreparedTree, *, cancellation=None, progress=None) -> 
                     "operation_id": state.plan.operation_id,
                     "plan_sha256": state.plan_sha256,
                     "target_root": str(state.target.root),
+                    "publication_mode": state.publication_mode,
                     "nodes": [
                         {
                             key: node[key]
@@ -822,6 +891,7 @@ def commit_tree(prepared: PreparedTree, *, cancellation=None, progress=None) -> 
                                 "title",
                                 "target_id",
                                 "parent_target_id",
+                                "organizational_parent_target_id",
                                 "source_sha256",
                                 "target_sha256",
                                 "operation_id",

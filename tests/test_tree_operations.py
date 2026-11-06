@@ -257,6 +257,7 @@ def setup(tmp_path, monkeypatch):
 
 def test_compile_all_nodes_then_publish_parent_first_with_ledgers(setup):
     inventory, selection, options, native, imports = setup
+    options = {**options, "publication_mode": "native-subagent"}
     prepared = prepare_tree(inventory, selection, **options)
     proposal = tree_proposal(prepared)
     assert imports == []
@@ -516,6 +517,7 @@ def test_new_completed_target_is_guarded_before_descendants_and_final(
 @pytest.mark.parametrize("wrong_binding", ["source", "source_path", "title", "model"])
 def test_resume_rejects_legitimate_completion_for_wrong_source_or_options(setup, wrong_binding):
     inventory, selection, options, _, imports = setup
+    options = {**options, "publication_mode": "native-subagent"}
     prepared = prepare_tree(inventory, selection, **options)
     proposal = tree_proposal(prepared)
     fingerprint = prepared._state.plan_sha256
@@ -874,6 +876,7 @@ if CONNECTED_SERVER:
             time.sleep(.05)
     else: raise AssertionError('synthetic server failed readiness')
     options['target']=replace(options['target'],client='openchamber',server=origin)
+options['publication_mode']='native-subagent'
 mark('preparing')
 prepared=prepare_tree(inventory,selection,**options)
 proposal=tree_proposal(prepared)

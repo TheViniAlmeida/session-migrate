@@ -83,7 +83,7 @@ from session_migrate.lineage import (
     ReconcileReceipt,
     SourceMetadata,
 )
-from session_migrate.model import AgentFormat, Session, TargetFormat
+from session_migrate.model import AgentFormat, EventKind, Session, TargetFormat
 from session_migrate.native_namespaces import (
     _bind_execution_context,
     qualify_namespace,
@@ -1500,7 +1500,13 @@ def _prepare_lineage_projection(state: _PreparedState):
         return prepared, prepared.versions, None
     if state.built.request.command == OperationKind.CONVERT or state.built.source_snapshot is None:
         return None, None, None
-    from session_migrate.projection_policies import OPENCODE_ARCHIVE_POLICY_ID, ProjectionPolicy
+    from session_migrate.formats.context_text import is_synthetic_text_context
+    from session_migrate.projection_policies import (
+        NATIVE_CONTEXT_ARCHIVE_POLICY_ID,
+        NATIVE_CONTEXT_POLICY_ID,
+        OPENCODE_ARCHIVE_POLICY_ID,
+        ProjectionPolicy,
+    )
     from session_migrate.projections import (
         ProjectionContext,
         SourceVersionContext,
@@ -1525,16 +1531,32 @@ def _prepare_lineage_projection(state: _PreparedState):
     ) or artifact.target_cli_version not in known_targets.get(artifact.target_format, ()):
         return None, None, None
     policy = ProjectionPolicy()
+    source_events = state.built.source_snapshot.parse().events
+    native_context = (
+        artifact.target_format is TargetFormat.OPENCODE
+        and artifact.target_cli_version == "2.2.5"
+        and any(
+            is_synthetic_text_context(event)
+            or (
+                event.kind is EventKind.COMPACTION
+                and event.payload.get("native_context_policy")
+                == "claude-2.1.309-native-latest-preserved-v1"
+            )
+            for event in source_events
+        )
+    )
+    if native_context:
+        policy = ProjectionPolicy(NATIVE_CONTEXT_POLICY_ID)
     if state.built.request.reviewed_tree_projection:
         from session_migrate.canonical import hash_events
 
-        source_tools = dict(
-            hash_events(artifact.source.events, policy.canonical_policy).issue_counts
-        )
+        source_tools = dict(hash_events(source_events, policy.canonical_policy).issue_counts)
         if source_tools.get("open_tool_call"):
             # The reviewed tree request is already bound in the options hash and
             # restricted to OpenCode 2.2.5. Its coordinator requires loss acknowledgement.
-            policy = ProjectionPolicy(OPENCODE_ARCHIVE_POLICY_ID)
+            policy = ProjectionPolicy(
+                NATIVE_CONTEXT_ARCHIVE_POLICY_ID if native_context else OPENCODE_ARCHIVE_POLICY_ID
+            )
     versions = PolicyVersions(
         policy.canonical_policy.algorithm,
         policy.policy_id,

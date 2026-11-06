@@ -129,3 +129,8 @@ web process does not recover that private context automatically.
 Assets are packaged HTML/CSS/JavaScript, with no CDN or browser build tooling at
 runtime. Native update remains unavailable until its separate concurrency and
 recovery proof passes. There is no vendor-model submission from the dashboard.
+
+Tree preparation accepts optional `publication_mode`: `independent` (default)
+or `native-subagent`. The value is bound to review/confirmation. Independent
+organization is displayed from the external map, not from a native parentID.
+See [the DEV18 contract](native-claude-context.md) for interactivity and limits.

@@ -58,6 +58,7 @@ from session_migrate.projection_policies import (
     ProjectionPolicy,
     archived_tools_match,
     expected_from_source,
+    native_context_carriers_match,
     policy_from_id,
     validate_policy_target,
 )
@@ -1027,6 +1028,7 @@ def prepare_recovered_projection(source_capture, input_file_capture, record, con
     )
     input_obs = _observe(input_file_capture, versions.target_client, policy)
     _require(archived_tools_match(expected, input_file_capture), "semantic_mismatch")
+    _require(native_context_carriers_match(expected, input_file_capture), "semantic_mismatch")
     _require(
         _same_semantics(
             expected.witness.prefix_witness,
@@ -1157,11 +1159,15 @@ def verify_recovered_projection(prepared, observed_snapshot, *, context):
     _native_metadata(observed_snapshot, actual, context.target_client)
     metadata = actual.session_id == original.session_id and actual.cwd == original.cwd
     validate_policy_target(prepared._context._policy, context.target_format, context.target_client)
-    semantic = archived_tools_match(prepared.expected, observed_snapshot) and _same_semantics(
-        prepared.expected.witness.prefix_witness,
-        _target_conversation_witness(
-            observed, observed_snapshot, prepared._context._options, prepared._context._policy
-        ),
+    semantic = (
+        archived_tools_match(prepared.expected, observed_snapshot)
+        and native_context_carriers_match(prepared.expected, observed_snapshot)
+        and _same_semantics(
+            prepared.expected.witness.prefix_witness,
+            _target_conversation_witness(
+                observed, observed_snapshot, prepared._context._options, prepared._context._policy
+            ),
+        )
     )
     structure = observed.audit.structure == prepared._artifact_observation.audit.structure
     fidelity = (

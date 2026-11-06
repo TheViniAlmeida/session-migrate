@@ -236,7 +236,7 @@ wheels = [
 
 [[package]]
 name = "session-migrate"
-version = "0.12.0.dev17"
+version = "0.12.0.dev18"
 source = { editable = "." }
 
 [package.optional-dependencies]

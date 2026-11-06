@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from session_migrate.errors import SessionMigrateError
+from session_migrate.formats.claude_carriers import plan_carriers
+from session_migrate.formats.claude_compaction import select_compaction
 from session_migrate.formats.common import (
     claude_source_from_image_url,
     content_text,
@@ -20,6 +22,7 @@ from session_migrate.formats.common import (
     string,
     valid_rfc3339,
 )
+from session_migrate.formats.context_text import SYNTHETIC_TEXT_BLOCK_TYPE
 from session_migrate.jsonl import JsonlRecord, encode_jsonl, iter_jsonl_bytes, read_jsonl_bytes
 from session_migrate.model import AgentFormat, Event, EventKind, Provenance, Role, Session
 
@@ -56,7 +59,15 @@ def parse_records(
 
     records = list(records)
     logical_records, duplicate_indices, ambiguous_cwd = _collapse_desktop_envelopes(records)
-    selected_records = _active_conversation_records(logical_records)
+    context_selection = select_compaction(logical_records)
+    carriers = (
+        plan_carriers(logical_records, context_selection) if context_selection is not None else None
+    )
+    selected_records = (
+        list(carriers.replay_records)
+        if carriers is not None
+        else _active_conversation_records(logical_records)
+    )
     selected = {record.index for record in selected_records}
     selected_session_ids = {
         string(record.value.get("sessionId"))
@@ -77,6 +88,14 @@ def parse_records(
         and record.value.get("subtype") == "compact_boundary"
         and string(record.value.get("uuid"))
     }
+    native_boundary = None
+    if context_selection is not None:
+        native_boundary = next(
+            record.value
+            for record in selected_records
+            if record.index == context_selection.boundary_index
+        )
+        selected_compaction_summaries.add(string(native_boundary.get("uuid")))
     events: list[Event] = []
     session_id = None
     cwd = None
@@ -106,6 +125,19 @@ def parse_records(
     for record in selected_records:
         value = record.value
         record_type = string(value.get("type"))
+        if carriers is not None and record.index in carriers.context_text:
+            for block_index, text in enumerate(carriers.context_text[record.index]):
+                events.append(
+                    Event(
+                        kind=EventKind.CONTEXT,
+                        role=Role.USER,
+                        text=text,
+                        timestamp=string(value.get("timestamp")),
+                        payload={"block_type": SYNTHETIC_TEXT_BLOCK_TYPE},
+                        provenance=_provenance(record, block_index=block_index),
+                    )
+                )
+            continue
         if record_type == "system" and value.get("subtype") == "compact_boundary":
             if string(value.get("uuid")) in selected_compaction_summaries:
                 continue
@@ -124,11 +156,17 @@ def parse_records(
             continue
         message = object_value(value.get("message"))
         if value.get("isCompactSummary") is True:
-            boundary = selected_boundaries.get(string(value.get("parentUuid")))
+            boundary = native_boundary or selected_boundaries.get(string(value.get("parentUuid")))
+            if context_selection is not None:
+                blocks = _plain_context_blocks(message.get("content"))
+                if not any(text.strip() for _, text in blocks):
+                    raise SessionMigrateError("Claude native context has an empty compact summary")
             events.append(
                 Event(
-                    kind=EventKind.COMPACTION,
-                    role=Role.SYSTEM,
+                    kind=EventKind.CONTEXT
+                    if context_selection is not None
+                    else EventKind.COMPACTION,
+                    role=Role.USER if context_selection is not None else Role.SYSTEM,
                     text=content_text(message.get("content")),
                     timestamp=string(value.get("timestamp")),
                     payload={
@@ -136,13 +174,38 @@ def parse_records(
                         "has_boundary_metadata": bool(
                             boundary and isinstance(boundary.get("compactMetadata"), dict)
                         ),
+                        **(
+                            {
+                                "native_context_policy": context_selection.policy_id,
+                                "block_type": SYNTHETIC_TEXT_BLOCK_TYPE,
+                            }
+                            if context_selection is not None
+                            else {}
+                        ),
                     },
                     provenance=_provenance(record),
                 )
             )
             continue
         if value.get("isMeta") is True:
-            events.append(_opaque_event(record, "active_graph_metadata_record"))
+            if context_selection is not None:
+                if record_type != "user" or message.get("role") != "user":
+                    raise SessionMigrateError(
+                        "Claude native context requires a user metadata record"
+                    )
+                for block_index, text in _plain_context_blocks(message.get("content")):
+                    events.append(
+                        Event(
+                            kind=EventKind.CONTEXT,
+                            role=Role.USER,
+                            text=text,
+                            timestamp=string(value.get("timestamp")),
+                            payload={"block_type": SYNTHETIC_TEXT_BLOCK_TYPE},
+                            provenance=_provenance(record, block_index=block_index),
+                        )
+                    )
+            else:
+                events.append(_opaque_event(record, "active_graph_metadata_record"))
             continue
         role_name = string(message.get("role")) or record_type
         if role_name == "assistant":
@@ -421,6 +484,9 @@ def _active_conversation_records(records: list[JsonlRecord]) -> list[JsonlRecord
     # Keep the first physical representative and first-unique order. A repeated
     # old envelope at EOF must not rewind the fallback conversation leaf.
     records, _duplicates, _ambiguous_cwd = _collapse_desktop_envelopes(records)
+    context_selection = select_compaction(records)
+    if context_selection is not None:
+        return list(plan_carriers(records, context_selection).replay_records)
     candidates = [
         record
         for record in records
@@ -495,6 +561,22 @@ def _active_conversation_records(records: list[JsonlRecord]) -> list[JsonlRecord
             raise SessionMigrateError("Claude active graph contains an ancestry cycle")
         cursor = logical_parent
     return list(reversed(leaf_to_root))
+
+
+def _plain_context_blocks(content: Any) -> list[tuple[int | None, str]]:
+    """Keep native text as typed context; other metadata carriers need their own proof."""
+    if type(content) is str:
+        return [(None, content)]
+    if (
+        type(content) is list
+        and content
+        and all(
+            type(block) is dict and block.get("type") == "text" and type(block.get("text")) is str
+            for block in content
+        )
+    ):
+        return [(index, block["text"]) for index, block in enumerate(content)]
+    raise SessionMigrateError("Claude native context contains unsupported non-text content")
 
 
 def _type_exact_json_equal(left: Any, right: Any) -> bool:

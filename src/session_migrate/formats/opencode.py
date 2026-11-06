@@ -21,6 +21,11 @@ from typing import Any
 from session_migrate.errors import SessionMigrateError
 from session_migrate.formats import opencode_v2
 from session_migrate.formats.common import portable_data_image, string, valid_rfc3339
+from session_migrate.formats.context_text import (
+    SYNTHETIC_TEXT_BLOCK_TYPE,
+    is_marked_synthetic_text,
+    is_synthetic_text_context,
+)
 from session_migrate.jsonl import read_jsonl_bytes
 from session_migrate.model import AgentFormat, Event, EventKind, Provenance, Role, Session
 
@@ -140,6 +145,7 @@ def serialize_events(
     seen_tool_result_ids: set[str] = set()
     tool_parts: dict[str, deque[dict[str, Any]]] = defaultdict(deque)
     v2_tool_content: dict[str, list[dict[str, Any]]] = {}
+    v2_context_text: dict[str, str] = {}
     native_v2_target = not legacy_schema and bool(opencode_v2.version(cli_version))
     portable_boundary = 0
 
@@ -293,6 +299,30 @@ def serialize_events(
         pending_parts.append(part)
 
     for event in events:
+        if is_synthetic_text_context(event):
+            flush_message()
+            if cli_version != "2.2.5" or not native_v2_target:
+                dropped["context:synthetic_text_unsupported_target"] += 1
+                continue
+            portable_boundary += 1
+            event_timestamp = _event_timestamp(event, fallback_timestamp, dropped)
+            created_ms = ordered_message_ms(event_timestamp)
+            message_id = new_native_id("msg", created_ms)
+            # This carrier is not a human user message. It still supplies the
+            # preceding message coordinate required by the internal legacy bridge.
+            messages.append(
+                {
+                    "info": {
+                        "id": message_id,
+                        "time": {"created": created_ms},
+                        "model": {"providerID": provider_id, "modelID": target_model},
+                    }
+                }
+            )
+            assert isinstance(event.text, str)
+            v2_context_text[message_id] = event.text
+            latest_message_id = message_id
+            continue
         if (
             event.kind == EventKind.MESSAGE
             and event.text
@@ -479,7 +509,9 @@ def serialize_events(
         "messages": messages,
     }
     if native_v2_target:
-        export_data = opencode_v2.from_legacy(export_data, dropped, tool_content=v2_tool_content)
+        export_data = opencode_v2.from_legacy(
+            export_data, dropped, tool_content=v2_tool_content, context_text=v2_context_text
+        )
     if parent_session_id is not None:
         export_data["info"]["parentID"] = parent_session_id
     data = (json.dumps(export_data, ensure_ascii=False, indent=2) + "\n").encode()
@@ -549,8 +581,11 @@ def parse_import_bytes(data: bytes) -> ParsedOpenCodeSession:
 
     # Native states come only from the validated v2 input, never a legacy carrier.
     native_tool_states: dict[tuple[str, str], deque[dict[str, Any]]] = defaultdict(deque)
+    native_context: dict[str, tuple[int, dict[str, Any]]] = {}
     if native_v2 is not None:
-        for message in native_v2["messages"]:
+        for native_index, message in enumerate(native_v2["messages"]):
+            if is_marked_synthetic_text(message):
+                native_context[message["id"]] = (native_index, message)
             for content in message.get("content", []) if message["type"] == "assistant" else []:
                 if content["type"] == "tool":
                     native_tool_states[(message["id"], content["id"])].append(content["state"])
@@ -579,6 +614,19 @@ def parse_import_bytes(data: bytes) -> ParsedOpenCodeSession:
         assert isinstance(parts, list)
         role_name = string(message_info.get("role"))
         timestamp = _iso_from_ms(message_info.get("time", {}).get("created"))
+        if message_id in native_context:
+            native_index, native_message = native_context[message_id]
+            events.append(
+                Event(
+                    kind=EventKind.CONTEXT,
+                    role=Role.USER,
+                    text=native_message["text"],
+                    timestamp=timestamp,
+                    payload={"block_type": SYNTHETIC_TEXT_BLOCK_TYPE},
+                    provenance=Provenance(native_index, "synthetic", source_id=message_id),
+                )
+            )
+            continue
         is_summary = message_info.get("summary") is True
         if role_name == "user":
             model = message_info.get("model")
