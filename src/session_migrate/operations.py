@@ -1500,6 +1500,7 @@ def _prepare_lineage_projection(state: _PreparedState):
         return prepared, prepared.versions, None
     if state.built.request.command == OperationKind.CONVERT or state.built.source_snapshot is None:
         return None, None, None
+    from session_migrate.formats.claude_compaction import is_native_context_policy
     from session_migrate.formats.context_text import is_synthetic_text_context
     from session_migrate.projection_policies import (
         NATIVE_CONTEXT_ARCHIVE_POLICY_ID,
@@ -1539,8 +1540,7 @@ def _prepare_lineage_projection(state: _PreparedState):
             is_synthetic_text_context(event)
             or (
                 event.kind is EventKind.COMPACTION
-                and event.payload.get("native_context_policy")
-                == "claude-2.1.309-native-latest-preserved-v1"
+                and is_native_context_policy(event.payload.get("native_context_policy"))
             )
             for event in source_events
         )

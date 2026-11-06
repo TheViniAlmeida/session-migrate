@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from session_migrate.errors import SessionMigrateError
-from session_migrate.formats.claude_carriers import plan_carriers
+from session_migrate.formats.claude_carriers import has_truncated_tool_result_context, plan_carriers
 from session_migrate.formats.claude_compaction import select_compaction
 from session_migrate.formats.common import (
     claude_source_from_image_url,
@@ -636,9 +636,13 @@ def _same_desktop_message(first: JsonlRecord, repeated: JsonlRecord) -> bool:
             for block in content
         ):
             return False
-    # Unknown fields are compared too, never stripped. Only these four observed
-    # wrapper fields may differ; toolUseResult never becomes replay content.
-    wrapper_fields = {"cwd", "slug", "promptId", "toolUseResult"}
+    # Unknown fields are compared too, never stripped. A native file truncation
+    # reminder is material: a later wrapper must not hide it behind the first.
+    wrapper_fields = {"cwd", "slug", "promptId"}
+    if not (
+        has_truncated_tool_result_context(first) or has_truncated_tool_result_context(repeated)
+    ):
+        wrapper_fields.add("toolUseResult")
     return _type_exact_json_equal(
         {key: value for key, value in first.value.items() if key not in wrapper_fields},
         {key: value for key, value in repeated.value.items() if key not in wrapper_fields},

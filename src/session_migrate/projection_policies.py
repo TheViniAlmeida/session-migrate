@@ -171,6 +171,154 @@ def native_context_carriers_match(expected: ExpectedProjection, snapshot) -> boo
         return False
 
 
+def _native_source_order(events: tuple[Event, ...]) -> tuple[tuple[str, str], ...]:
+    """Read original source occurrences; never use the paired expected events."""
+    trace: list[tuple[str, str]] = []
+    inert = {
+        "active_graph_metadata_record",
+        "top_level_tool_result_metadata",
+        "inactive_or_metadata_conversation_record",
+        "non_conversation_record",
+        "duplicate_desktop_message_envelope",
+        "duplicate_envelope_cwd_conflict",
+    }
+    for event in events:
+        if event.kind is EventKind.MESSAGE and event.role in {
+            Role.USER,
+            Role.ASSISTANT,
+            Role.SYSTEM,
+        }:
+            if event.text:
+                trace.append(
+                    (event.role.value, hashlib.sha256(_json_bytes(event.text)).hexdigest())
+                )
+        elif is_synthetic_text_context(event):
+            if event.role is not Role.USER or type(event.text) is not str:
+                raise ValueError("unsupported source text placement")
+            trace.append(("user", hashlib.sha256(_json_bytes(event.text)).hexdigest()))
+        elif event.kind in {EventKind.TOOL_CALL, EventKind.TOOL_RESULT}:
+            if type(event.tool_call_id) is not str or not event.tool_call_id:
+                raise ValueError("unsupported source tool identity")
+            if event.kind is EventKind.TOOL_RESULT:
+                blocks = event.payload.get("content_blocks")
+                if type(blocks) is not list or any(
+                    type(block) is not dict
+                    or block.get("type") != "text"
+                    or type(block.get("text")) is not str
+                    for block in blocks
+                ):
+                    raise ValueError("unsupported source tool result content")
+            trace.append(
+                ("call" if event.kind is EventKind.TOOL_CALL else "result", event.tool_call_id)
+            )
+        elif (
+            event.kind is EventKind.OPAQUE
+            and event.role is None
+            and event.payload.get("reason") in inert
+        ):
+            continue
+        else:
+            # Images, reasoning, native windows and unknown material need their
+            # own lowering contract before they can receive this order proof.
+            raise ValueError("unsupported source context placement")
+    return tuple(trace)
+
+
+def _native_target_order(bundle: dict, archived: set[str]) -> tuple[tuple[str, str], ...]:
+    """Bounded stock 2.2.5 to-llm-message lowering, before provider encoding.
+
+    Each assistant emits its text/calls in content order, then its ordinary
+    tool results in that same content order. Timestamps do not participate.
+    """
+    trace: list[tuple[str, str]] = []
+
+    def text(role: str, value: object, *, keep_empty: bool = False) -> None:
+        if type(value) is not str:
+            raise ValueError("unsupported target text")
+        if value or keep_empty:
+            trace.append((role, hashlib.sha256(_json_bytes(value)).hexdigest()))
+
+    for message in bundle["messages"]:
+        kind = message["type"]
+        if kind in {"user", "synthetic", "system"}:
+            if kind == "user" and (message.get("files") or message.get("skills")):
+                raise ValueError("unsupported target attachment placement")
+            text(
+                "system" if kind == "system" else "user",
+                message["text"],
+                keep_empty=kind == "synthetic",
+            )
+        elif kind == "assistant":
+            results: list[tuple[str, str]] = []
+            for part in message["content"]:
+                if part["type"] == "text":
+                    if part.get("native") is not None:
+                        raise ValueError("unsupported provider text state")
+                    text("assistant", part["text"])
+                elif part["type"] == "tool":
+                    if part.get("executed", False) is not False or part.get("native") is not None:
+                        raise ValueError("unsupported provider tool placement")
+                    call_id = part["id"]
+                    if type(call_id) is not str or not call_id:
+                        raise ValueError("unsupported target tool identity")
+                    if part["state"]["status"] not in {"completed", "error"}:
+                        raise ValueError("unsupported unsettled tool lowering")
+                    result_content = part["state"].get("content", [])
+                    if type(result_content) is not list or any(
+                        type(block) is not dict
+                        or block.get("type") != "text"
+                        or type(block.get("text")) is not str
+                        for block in result_content
+                    ):
+                        raise ValueError("unsupported target tool result content")
+                    trace.append(("call", call_id))
+                    if call_id not in archived:
+                        results.append(("result", call_id))
+                else:
+                    raise ValueError("unsupported target assistant placement")
+            trace.extend(results)
+        elif kind not in {"agent-switched", "idle"}:
+            raise ValueError("unsupported target context placement")
+    return tuple(trace)
+
+
+def native_context_order_matches(
+    source: CanonicalObservation, expected: ExpectedProjection, snapshot
+) -> bool:
+    """Compare source order against raw target lowering independently of projection.
+
+    Existing projection rules intentionally pair results with calls. They must
+    not serve as the source oracle for native context replay order.
+    """
+    if not expected.native_context_only:
+        return True
+    from session_migrate.native_audit import validate_observation
+
+    try:
+        validate_observation(source)
+        if expected.policy.policy_id not in _NATIVE_CONTEXT_POLICIES:
+            return False
+        if not archived_tools_match(expected, snapshot):
+            return False
+        events = source.events
+        archived: set[str] = set()
+        for member in expected.generated_members:
+            call = events[member.source_index]
+            if (
+                call.kind is not EventKind.TOOL_CALL
+                or member.transform != "archive_incomplete_tool"
+                or member.rule_id != INCOMPLETE_TOOL_RULE
+                or call.tool_call_id != expected._events[member.call_target_index].tool_call_id
+            ):
+                return False
+            archived.add(call.tool_call_id)
+        return _native_source_order(events) == _native_target_order(
+            strict_decode(snapshot.raw_bytes), archived
+        )
+    except (SessionMigrateError, ValueError, TypeError, KeyError, AttributeError, IndexError):
+        return False
+
+
 def archived_tools_match(expected: ExpectedProjection, snapshot) -> bool:
     """Check native archive markers that canonical tool errors intentionally erase.
 
@@ -288,7 +436,7 @@ def expected_from_source(
     native_context_hashes = ()
     native_context_only = False
     if native_context:
-        from session_migrate.formats.claude_compaction import POLICY_ID as source_context_policy
+        from session_migrate.formats.claude_compaction import is_native_context_policy
 
         native_context_hashes = tuple(
             hashlib.sha256(_json_bytes(event.text)).hexdigest()
@@ -296,7 +444,7 @@ def expected_from_source(
             if is_synthetic_text_context(event)
         )
         native_context_only = any(
-            event.payload.get("native_context_policy") == source_context_policy for event in events
+            is_native_context_policy(event.payload.get("native_context_policy")) for event in events
         )
     original = tuple(iter_canonical_units(events, policy.canonical_policy))
     tool_issues = {

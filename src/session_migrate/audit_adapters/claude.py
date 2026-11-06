@@ -27,6 +27,7 @@ from session_migrate.audit_adapters import (
 )
 from session_migrate.errors import SessionMigrateError
 from session_migrate.formats import claude as parser
+from session_migrate.formats.claude_compaction import RECOVERY_POLICY_ID
 
 
 def content(value: object) -> Rule:
@@ -257,6 +258,19 @@ def audit(records, snapshot, policy) -> AdapterResult:
                 "retired": context_selection.retired_indices,
                 "effective_parents": sorted(context_selection.effective_parents.items()),
                 "diagnostics": context_selection.diagnostics,
+                **(
+                    {
+                        "original_leaf": context_selection.original_leaf_index,
+                        "parent_chain": context_selection.parent_chain_indices,
+                        "recovered": context_selection.recovered_indices,
+                        "recovery_provenance": sorted(
+                            context_selection.recovery_provenance.items()
+                        ),
+                        "retired_controls": context_selection.retired_control_indices,
+                    }
+                    if context_selection.policy_id == RECOVERY_POLICY_ID
+                    else {}
+                ),
             }
         )
     selected_set = set(selected)

@@ -59,6 +59,7 @@ from session_migrate.projection_policies import (
     archived_tools_match,
     expected_from_source,
     native_context_carriers_match,
+    native_context_order_matches,
     policy_from_id,
     validate_policy_target,
 )
@@ -1030,6 +1031,9 @@ def prepare_recovered_projection(source_capture, input_file_capture, record, con
     _require(archived_tools_match(expected, input_file_capture), "semantic_mismatch")
     _require(native_context_carriers_match(expected, input_file_capture), "semantic_mismatch")
     _require(
+        native_context_order_matches(source_obs, expected, input_file_capture), "semantic_mismatch"
+    )
+    _require(
         _same_semantics(
             expected.witness.prefix_witness,
             _target_conversation_witness(input_obs, input_file_capture, context._options, policy),
@@ -1162,6 +1166,9 @@ def verify_recovered_projection(prepared, observed_snapshot, *, context):
     semantic = (
         archived_tools_match(prepared.expected, observed_snapshot)
         and native_context_carriers_match(prepared.expected, observed_snapshot)
+        and native_context_order_matches(
+            prepared._source_observation, prepared.expected, observed_snapshot
+        )
         and _same_semantics(
             prepared.expected.witness.prefix_witness,
             _target_conversation_witness(

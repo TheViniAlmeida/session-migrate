@@ -559,13 +559,9 @@ def test_dangling_effective_parent_is_rejected():
 @pytest.mark.parametrize(
     "kind", ["prompt_snapshot", "prompt_render_point", "deferred_tools_record"]
 )
-@pytest.mark.parametrize("position", ["retired", "descendant"])
-def test_persisted_controls_are_rejected_even_before_cut(kind, position):
+def test_persisted_controls_in_final_descendants_are_rejected(kind):
     rows = topology()
-    if position == "retired":
-        rows[0] = envelope("attachment", "old", None, attachment={"type": kind})
-    else:
-        rows.append(envelope("attachment", "control", "answer", attachment={"type": kind}))
+    rows.append(envelope("attachment", "control", "answer", attachment={"type": kind}))
     with pytest.raises(SessionMigrateError, match="persisted prompt or tool control"):
         plan(rows)
 

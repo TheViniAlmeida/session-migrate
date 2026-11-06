@@ -8,6 +8,18 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
+## Não lançado — recuperação entre cadeias Claude 2.1.309
+
+- Recuperação delimitada de lotes e ferramentas ligados por parent, com folha
+  original e proveniência explícita; política v2 nos novos caminhos.
+- Controles comprovadamente eliminados pela compactação deixam de bloquear a
+  leitura. Controles ativos continuam recusados.
+- Corrigida a aceitação indevida de reordenação de chamadas/resultados pela projeção;
+  guardas adicionais para mídia, truncamento e ordem de blocos não comprovados.
+- As cinco reproduções estruturais ainda param em controles ativos. Não há nova
+  certificação ou atualização da instalação nesta etapa.
+- [Escopo, limitações e proposta de próximos passos](docs/claude309-cross-chain-recovery.md).
+
 ## 06/11/2026 — DEV18
 
 - Acrescentado contrato fechado de contexto nativo Claude 2.1.309, com seleção

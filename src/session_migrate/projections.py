@@ -28,6 +28,7 @@ from session_migrate.projection_policies import (
     archived_tools_match,
     expected_from_source,
     native_context_carriers_match,
+    native_context_order_matches,
     require,
     validate_policy_target,
 )
@@ -519,6 +520,9 @@ def prepare_projection(
     artifact_obs = _observe(artifact_snapshot, context.target_client, policy)
     require(archived_tools_match(expected, artifact_snapshot), "semantic_mismatch")
     require(native_context_carriers_match(expected, artifact_snapshot), "semantic_mismatch")
+    require(
+        native_context_order_matches(source_obs, expected, artifact_snapshot), "semantic_mismatch"
+    )
     require(versions.target_adapter == artifact_obs.audit.audit_policy_id, "unsupported_policy")
     require(
         _same_semantics(
@@ -705,6 +709,9 @@ def verify_projection(
     semantic = (
         archived_tools_match(prepared.expected, observed_snapshot)
         and native_context_carriers_match(prepared.expected, observed_snapshot)
+        and native_context_order_matches(
+            prepared._source_observation, prepared.expected, observed_snapshot
+        )
         and _same_semantics(
             prepared.expected.witness.prefix_witness,
             _target_conversation_witness(
