@@ -1643,16 +1643,27 @@ def _prepare_lineage_projection(state: _PreparedState):
                 NATIVE_CONTEXT_ARCHIVE_POLICY_ID if native_context else OPENCODE_ARCHIVE_POLICY_ID
             )
     if state.built.request.reviewed_portability:
+        from session_migrate.formats.claude_reviewed import SOURCE_REVIEWED_MEDIA_POLICY_ID
         from session_migrate.projection_policies import (
             REVIEWED_ARCHIVE_POLICY_ID,
+            REVIEWED_MEDIA_ARCHIVE_POLICY_ID,
+            REVIEWED_MEDIA_POLICY_ID,
             REVIEWED_POLICY_ID,
         )
 
-        policy = ProjectionPolicy(
-            REVIEWED_ARCHIVE_POLICY_ID
-            if state.built.request.reviewed_tree_projection and source_tools.get("open_tool_call")
-            else REVIEWED_POLICY_ID
+        archive = bool(
+            state.built.request.reviewed_tree_projection and source_tools.get("open_tool_call")
         )
+        media = (
+            artifact.source.reviewed_report is not None
+            and artifact.source.reviewed_report.get("policy_id") == SOURCE_REVIEWED_MEDIA_POLICY_ID
+        )
+        if media:
+            policy = ProjectionPolicy(
+                REVIEWED_MEDIA_ARCHIVE_POLICY_ID if archive else REVIEWED_MEDIA_POLICY_ID
+            )
+        else:
+            policy = ProjectionPolicy(REVIEWED_ARCHIVE_POLICY_ID if archive else REVIEWED_POLICY_ID)
     versions = PolicyVersions(
         policy.canonical_policy.algorithm,
         policy.policy_id,

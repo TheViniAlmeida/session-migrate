@@ -41,11 +41,15 @@ NATIVE_CONTEXT_ARCHIVE_POLICY_ID = "portable-native-context-225-archive-v1"
 _NATIVE_CONTEXT_POLICIES = {NATIVE_CONTEXT_POLICY_ID, NATIVE_CONTEXT_ARCHIVE_POLICY_ID}
 REVIEWED_POLICY_ID = "portable-claude309-reviewed-225-v1"
 REVIEWED_ARCHIVE_POLICY_ID = "portable-claude309-reviewed-225-archive-v1"
-_REVIEWED_POLICIES = {REVIEWED_POLICY_ID, REVIEWED_ARCHIVE_POLICY_ID}
+REVIEWED_MEDIA_POLICY_ID = "portable-claude309-reviewed-inline-png-225-v1"
+REVIEWED_MEDIA_ARCHIVE_POLICY_ID = "portable-claude309-reviewed-inline-png-225-archive-v1"
+_REVIEWED_MEDIA_POLICIES = {REVIEWED_MEDIA_POLICY_ID, REVIEWED_MEDIA_ARCHIVE_POLICY_ID}
+_REVIEWED_POLICIES = {REVIEWED_POLICY_ID, REVIEWED_ARCHIVE_POLICY_ID, *_REVIEWED_MEDIA_POLICIES}
 _ARCHIVE_POLICIES = {
     OPENCODE_ARCHIVE_POLICY_ID,
     NATIVE_CONTEXT_ARCHIVE_POLICY_ID,
     REVIEWED_ARCHIVE_POLICY_ID,
+    REVIEWED_MEDIA_ARCHIVE_POLICY_ID,
 }
 INCOMPLETE_TOOL_MESSAGE = "Imported call had no completed result"
 INCOMPLETE_TOOL_RULE = "opencode-225-incomplete-tool-error-v1"
@@ -163,6 +167,7 @@ class ExpectedProjection:
     native_context_only: bool = False
     reviewed_source_order: tuple[tuple[str, str], ...] = ()
     reviewed_target_order: tuple[tuple[str, str], ...] = ()
+    reviewed_media_results: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
 
     @property
     def events(self) -> tuple[Event, ...]:
@@ -189,8 +194,134 @@ def native_context_carriers_match(expected: ExpectedProjection, snapshot) -> boo
         return False
 
 
+def _inline_png_fingerprint(uri: object) -> str:
+    """Use the bounded pure decoder on source/target bytes, never writer state."""
+    from session_migrate.formats.claude_reviewed import validate_inline_png_data_uri
+
+    try:
+        descriptor = validate_inline_png_data_uri(uri)
+    except SessionMigrateError:
+        raise ValueError("unsupported inline PNG content") from None
+    return hashlib.sha256(_json_bytes(descriptor)).hexdigest()
+
+
+def _result_block_fingerprints(blocks: list, *, native: bool) -> tuple[tuple[str, str], ...]:
+    result = []
+    for block in blocks:
+        if type(block) is not dict:
+            raise ValueError("unsupported result block")
+        if block.get("type") == "text" and set(block) == {"type", "text"}:
+            if type(block["text"]) is not str:
+                raise ValueError("unsupported result text")
+            result.append(("text", hashlib.sha256(_json_bytes(block["text"])).hexdigest()))
+        elif not native and block.get("type") == "image" and set(block) == {"type", "image_url"}:
+            result.append(("image", _inline_png_fingerprint(block["image_url"])))
+        elif (
+            native
+            and block.get("type") == "file"
+            and set(block) == {"type", "mime", "uri"}
+            and block["mime"] == "image/png"
+        ):
+            result.append(("image", _inline_png_fingerprint(block["uri"])))
+        else:
+            raise ValueError("unsupported result block")
+    return tuple(result)
+
+
+def _source_media_results(events: tuple[Event, ...]) -> tuple:
+    result = []
+    for event in events:
+        if event.kind is not EventKind.TOOL_RESULT:
+            continue
+        blocks = event.payload["content_blocks"]
+        if any(block.get("type") == "image" for block in blocks):
+            require(event.payload.get("is_error") is not True, "source_mismatch")
+            result.append((event.tool_call_id, _result_block_fingerprints(blocks, native=False)))
+    return tuple(result)
+
+
+def _validate_source_media_report(source, events: tuple[Event, ...]) -> None:
+    from session_migrate.formats.claude_reviewed import validate_inline_png_data_uri
+
+    images = []
+    for event in events:
+        if event.kind is not EventKind.TOOL_RESULT:
+            continue
+        for index, block in enumerate(event.payload.get("content_blocks", [])):
+            if block.get("type") != "image":
+                continue
+            uri = block["image_url"]
+            descriptor = validate_inline_png_data_uri(uri)
+            original_block = {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": uri.removeprefix("data:image/png;base64,"),
+                },
+            }
+            images.append(
+                {
+                    "record_index": event.provenance.record_index,
+                    "block_index": event.provenance.block_index,
+                    "content_block_index": index,
+                    **descriptor,
+                    "source_sha256": hashlib.sha256(_json_bytes(original_block)).hexdigest(),
+                }
+            )
+    report = source.session.reviewed_report
+    require(
+        report.get("inline_tool_result_images")
+        == {
+            "count": len(images),
+            "provenance": images,
+        }
+        and bool(images),
+        "source_mismatch",
+    )
+    require(type(report.get("image_transport")) is dict, "source_mismatch")
+    for code in (
+        "tool_result_inline_png_transport",
+        "chat_tool_images_relocated_to_user",
+        "chat_tool_images_have_positional_association",
+        "chat_tool_result_text_before_images",
+    ):
+        records = [item for item in report.get("differences", []) if item.get("code") == code]
+        require(len(records) == 1 and records[0].get("count") == len(images), "source_mismatch")
+
+
+def reviewed_media_blocks_match(expected: ExpectedProjection, snapshot) -> bool:
+    """Bind each ordered block and decoded PNG to its exact historical call."""
+    if expected.policy.policy_id not in _REVIEWED_MEDIA_POLICIES:
+        return True
+    try:
+        bundle = strict_decode(snapshot.raw_bytes)
+        wanted = dict(expected.reviewed_media_results)
+        seen = set()
+        for message in bundle["messages"]:
+            for part in message.get("content", []):
+                if part.get("type") != "tool":
+                    continue
+                blocks = part["state"].get("content", [])
+                has_image = any(block.get("type") == "file" for block in blocks)
+                call_id = part["id"]
+                if call_id in wanted:
+                    if (
+                        call_id in seen
+                        or part["state"]["status"] != "completed"
+                        or _result_block_fingerprints(blocks, native=True) != wanted[call_id]
+                    ):
+                        return False
+                    seen.add(call_id)
+                elif has_image:
+                    return False
+        return bool(wanted) and seen == set(wanted)
+    except (SessionMigrateError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+
+
 def _native_source_order(
-    events: tuple[Event, ...], *, reviewed: bool = False
+    events: tuple[Event, ...], *, reviewed: bool = False, inline_png: bool = False
 ) -> tuple[tuple[str, str], ...]:
     """Read original source occurrences; never use the paired expected events."""
     trace: list[tuple[str, str]] = []
@@ -232,6 +363,14 @@ def _native_source_order(
                             and type(block.get("tool_name")) is str
                             and bool(block["tool_name"])
                         )
+                        or (
+                            reviewed
+                            and inline_png
+                            and event.payload.get("is_error") is not True
+                            and block.get("type") == "image"
+                            and set(block) == {"type", "image_url"}
+                            and bool(_inline_png_fingerprint(block["image_url"]))
+                        )
                     )
                     for block in blocks
                 ):
@@ -252,7 +391,9 @@ def _native_source_order(
     return tuple(trace)
 
 
-def _native_target_order(bundle: dict, archived: set[str]) -> tuple[tuple[str, str], ...]:
+def _native_target_order(
+    bundle: dict, archived: set[str], *, inline_png: bool = False
+) -> tuple[tuple[str, str], ...]:
     """Bounded stock 2.2.5 to-llm-message lowering, before provider encoding.
 
     Each assistant emits its text/calls in content order, then its ordinary
@@ -294,8 +435,17 @@ def _native_target_order(bundle: dict, archived: set[str]) -> tuple[tuple[str, s
                     result_content = part["state"].get("content", [])
                     if type(result_content) is not list or any(
                         type(block) is not dict
-                        or block.get("type") != "text"
-                        or type(block.get("text")) is not str
+                        or not (
+                            (block.get("type") == "text" and type(block.get("text")) is str)
+                            or (
+                                inline_png
+                                and part["state"]["status"] == "completed"
+                                and block.get("type") == "file"
+                                and set(block) == {"type", "mime", "uri"}
+                                and block.get("mime") == "image/png"
+                                and bool(_inline_png_fingerprint(block["uri"]))
+                            )
+                        )
                         for block in result_content
                     ):
                         raise ValueError("unsupported target tool result content")
@@ -464,12 +614,14 @@ def reviewed_context_order_matches(expected: ExpectedProjection, snapshot) -> bo
         return (
             archived_tools_match(expected, snapshot)
             and native_context_carriers_match(expected, snapshot)
+            and reviewed_media_blocks_match(expected, snapshot)
             and _native_target_order(
                 bundle,
                 {
                     expected._events[m.call_target_index].tool_call_id
                     for m in expected.generated_members
                 },
+                inline_png=expected.policy.policy_id in _REVIEWED_MEDIA_POLICIES,
             )
             == expected.reviewed_target_order
         )
@@ -603,6 +755,7 @@ def expected_from_source(
     policy.__post_init__()
     archive = policy.policy_id in _ARCHIVE_POLICIES
     reviewed = policy.policy_id in _REVIEWED_POLICIES
+    inline_png = policy.policy_id in _REVIEWED_MEDIA_POLICIES
     native_context = policy.policy_id in _NATIVE_CONTEXT_POLICIES or reviewed
     require(
         not (archive or native_context) or target_format is TargetFormat.OPENCODE,
@@ -620,9 +773,20 @@ def expected_from_source(
     )
     if reviewed:
         require(
-            source.audit.selection_policy_id == "claude309-reviewed-conversation-v1"
+            source.audit.selection_policy_id
+            == (
+                "claude309-reviewed-inline-png-v1"
+                if inline_png
+                else "claude309-reviewed-conversation-v1"
+            )
             and source.audit.client_id == "2.1.309"
-            and source.session.reviewed_report is not None,
+            and source.session.reviewed_report is not None
+            and source.session.reviewed_report.get("policy_id")
+            == (
+                "claude-2.1.309-reviewed-inline-png-v1"
+                if inline_png
+                else "claude-2.1.309-reviewed-conversation-v1"
+            ),
             "unsupported_policy",
         )
     else:
@@ -646,14 +810,20 @@ def expected_from_source(
             if is_synthetic_text_context(event):
                 require(
                     event.payload.get("reviewed_context_policy")
-                    == "claude-2.1.309-reviewed-conversation-v1"
+                    == (
+                        "claude-2.1.309-reviewed-inline-png-v1"
+                        if inline_png
+                        else "claude-2.1.309-reviewed-conversation-v1"
+                    )
                     and "native_context_policy" not in event.payload,
                     "source_mismatch",
                 )
         # These policies license runtime/ordering differences only. Refuse content
         # the portable grammar would otherwise silently omit or change.
         try:
-            _native_source_order(events, reviewed=True)
+            _native_source_order(events, reviewed=True, inline_png=inline_png)
+            if inline_png:
+                _validate_source_media_report(source, events)
         except ValueError:
             raise ProjectionError("source_mismatch") from None
         require(
@@ -941,7 +1111,9 @@ def expected_from_source(
     raw_known_losses = dict(source.audit.classification_counts).get("known-loss", 0)
     if raw_known_losses:
         loss_counts["source_raw_known_loss"] = raw_known_losses
-    reviewed_source_order = _native_source_order(events, reviewed=True) if reviewed else ()
+    reviewed_source_order = (
+        _native_source_order(events, reviewed=True, inline_png=inline_png) if reviewed else ()
+    )
     reviewed_target_order = _reviewed_projected_order(events, generated_members) if reviewed else ()
     if reviewed:
         error_count = sum(
@@ -950,6 +1122,21 @@ def expected_from_source(
         )
         if error_count:
             loss_counts["reviewed_tool_error_envelope"] = error_count
+        if inline_png:
+            image_count = sum(
+                block.get("type") == "image"
+                for event in events
+                if event.kind is EventKind.TOOL_RESULT
+                for block in event.payload.get("content_blocks", [])
+            )
+            require(image_count > 0, "source_mismatch")
+            for code in (
+                "tool_result_inline_png_transport",
+                "chat_tool_images_relocated_to_user",
+                "chat_tool_images_have_positional_association",
+                "chat_tool_result_text_before_images",
+            ):
+                loss_counts[code] = image_count
         if reviewed_source_order != reviewed_target_order:
             loss_counts["reviewed_context_order_changed"] = 1
         loss_counts["reviewed_runtime_not_preserved"] = 1
@@ -1038,4 +1225,5 @@ def expected_from_source(
         native_context_only=native_context_only,
         reviewed_source_order=reviewed_source_order,
         reviewed_target_order=reviewed_target_order,
+        reviewed_media_results=_source_media_results(tuple(projected)) if inline_png else (),
     )

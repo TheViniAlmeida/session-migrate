@@ -164,7 +164,9 @@ def grammar(value: dict) -> Rule:
     return obj(fields, required=required)
 
 
-def audit(records, snapshot, policy, *, reviewed_portability=False) -> AdapterResult:
+def audit(
+    records, snapshot, policy, *, reviewed_portability=False, media_selection=False
+) -> AdapterResult:
     taxonomy = Taxonomy()
     client_ids = {r.value.get("version") for r in records if type(r.value.get("version")) is str}
     client = next(iter(client_ids)) if len(client_ids) == 1 else None
@@ -375,10 +377,26 @@ def audit(records, snapshot, policy, *, reviewed_portability=False) -> AdapterRe
     except (SessionMigrateError, TypeError, ValueError, RecursionError):
         taxonomy.issue("parser_rejected_source", 0)
         session = None
+    if reviewed_portability and session is not None:
+        expected_policy = (
+            "claude-2.1.309-reviewed-inline-png-v1"
+            if media_selection
+            else "claude-2.1.309-reviewed-conversation-v1"
+        )
+        if session.reviewed_report.get("policy_id") != expected_policy:
+            raise SessionMigrateError(
+                "Reviewed audit selection does not match source media policy."
+            )
+        if media_selection:
+            taxonomy.issue("reviewed_media_runtime_unproven", 0)
     return AdapterResult(
         taxonomy,
         selected,
-        "claude-309-reviewed-conversation-v1"
+        (
+            "claude-309-reviewed-inline-png-v1"
+            if media_selection
+            else "claude-309-reviewed-conversation-v1"
+        )
         if reviewed_portability
         else (
             "claude-309-native-context-v1" if context_selection is not None else "claude-jsonl-v1"

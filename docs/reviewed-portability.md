@@ -1,6 +1,7 @@
 # Reviewed portability
 
-Version: **0.12.0.dev19 candidate**. The operator selected this contract on 6 November 2026.
+Base version: **0.12.0.dev19**. The operator selected this contract on 6 November 2026.
+Inline PNG support below is a separate **DEV20 candidate** extension.
 It is separate from strict native-context migration.
 
 ## Contract
@@ -102,9 +103,42 @@ truncating the transferred conversation or original archive.
 Reviewed web tree preparation allows up to 300 seconds, with cancellation still
 available. Existing strict/service/handoff preparation limits are unchanged.
 
-The installed DEV18 remains separate until this candidate passes release and
-installation checks. A read-only diagnostic snapshot is not authorization to
-publish a migration or bypass review of a real source.
+The DEV19 unitary API has been independently validated and released. A read-only
+diagnostic snapshot is not authorization to publish a migration or bypass review
+of a real source. Existing and already-functional sessions are preserved; later
+improvements are tested in new candidates or explicitly authorized copies.
+
+## Inline PNG tool results — DEV20 candidate
+
+The media extension applies only when the reviewed source contains supported
+inline PNG images in completed, non-error tool results. It uses a separate exact
+source selection and projection policy; text-only DEV19 inputs retain their
+existing contract.
+
+Image bytes, MIME, displayed tool input, identifier and native history association
+must be preserved. The source capture is still archived privately. Invalid data,
+unsupported formats, indexed-color/animated PNG and error results containing images are refused;
+there is no silent image removal, resizing or replacement with a text marker.
+
+The preview must disclose a protocol-dependent distinction:
+
+- OpenCode's Responses adapter retains an image in the output associated with its
+  call identifier.
+- Its Chat adapter moves tool-result images to a subsequent USER message. The
+  native session retains the call/result association, but the image part on the
+  wire has no explicit call identifier. Position/context is not the same guarantee
+  as an explicit wire link.
+
+These differences require the same fresh acknowledgement as other reviewed
+transformations. A fake producer, fabricated native window or hosted-tool flag is
+not used to conceal them. The destination model's actual image capability remains
+a runtime prerequisite; synthetic provider tests do not prove a private gateway.
+
+The initial PNG validator uses bounded decoded data, dimensions and decompression:
+16 MiB decoded PNG bytes, 8192 per dimension, 16 million pixels and 64 MiB inflated
+scanline data. It validates PNG structure/CRCs without rendering private images.
+Unsupported ancillary/animation structures remain explicit refusals, not stripped
+metadata. The source capture's own lower byte budget remains in force.
 
 ## Implementation and acceptance plan
 

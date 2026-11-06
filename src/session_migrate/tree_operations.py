@@ -441,6 +441,8 @@ def _verify_completed_reviewed_archive(state_home, item, expected):
     """Use durable ledger references, never a journal/proposal's retention claim."""
     from session_migrate.projection_policies import (
         REVIEWED_ARCHIVE_POLICY_ID,
+        REVIEWED_MEDIA_ARCHIVE_POLICY_ID,
+        REVIEWED_MEDIA_POLICY_ID,
         REVIEWED_POLICY_ID,
     )
 
@@ -457,7 +459,13 @@ def _verify_completed_reviewed_archive(state_home, item, expected):
         if ref.kind == "artifact" and ref.path == str(archive_path)
     ]
     if (
-        record.versions.projection_policy not in {REVIEWED_POLICY_ID, REVIEWED_ARCHIVE_POLICY_ID}
+        record.versions.projection_policy
+        not in {
+            REVIEWED_POLICY_ID,
+            REVIEWED_ARCHIVE_POLICY_ID,
+            REVIEWED_MEDIA_POLICY_ID,
+            REVIEWED_MEDIA_ARCHIVE_POLICY_ID,
+        }
         or record.versions.source_client != "2.1.309"
         or record.versions.target_client != "2.2.5"
         or record.transformation is not None

@@ -8,7 +8,16 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
-## 06/11/2026 — DEV19 (candidata)
+## 06/11/2026 — DEV20 (candidata, mídia isolada)
+
+- Em validação: PNG inline em resultados de ferramenta no modo revisado, com
+  preservação dos bytes e vínculo no histórico nativo e política específica.
+- Preview deve explicitar que Chat desloca a imagem para USER sem call_id na
+  parte de imagem; Responses mantém o vínculo explícito no output.
+- PNG inválido, formatos não suportados, animação e erro com imagem permanecem
+  recusados. A DEV19 operacional e as sessões funcionais não são modificadas.
+
+## 06/11/2026 — DEV19
 
 - Implementada [portabilidade revisada](docs/reviewed-portability.md), opt-in
   com preview de diferenças, confirmação separada e arquivo privado da captura
@@ -25,6 +34,9 @@ publicação no PyPI nem atualização automática das instalações existentes.
 - CLI, TUI, dashboard e árvores exibem diferenças e exigem confirmação separada.
   A retomada de árvore preserva o modo e revalida o arquivo histórico de nós
   concluídos; arquivo ausente, alterado ou inseguro bloqueia sem reimportação.
+- Integrada pela PR22 com 39 verificações CI aprovadas. API unitária validada
+  também em candidatas reais pelo fluxo privado, sem alegar restauração integral
+  do runtime ou autorizar mudanças em sessões já funcionais.
 - [Escopo, limitações e proposta de próximos passos](docs/claude309-cross-chain-recovery.md).
 
 ## 06/11/2026 — DEV18
