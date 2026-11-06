@@ -13,6 +13,7 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -485,6 +486,104 @@ def discover_roots(search_paths: Sequence[Path]) -> list[tuple[AgentFormat, Path
     return found
 
 
+def _linux_caller_privilege_metadata() -> bytes:
+    descriptor = os.open(
+        "/proc/thread-self/status",
+        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+    )
+    with os.fdopen(descriptor, "rb") as stream:
+        return stream.read(64 * 1024 + 1)
+
+
+def _unprivileged_linux_caller() -> bool:
+    """Prove no usable capabilities, saved-root or root fsuid for this thread."""
+    if sys.platform != "linux" or not hasattr(os, "getresuid"):
+        return False
+    try:
+        before = os.getresuid()
+        if (
+            type(before) is not tuple
+            or len(before) != 3
+            or any(type(value) is not int or value <= 0 for value in before)
+            or before != (os.geteuid(),) * 3
+        ):
+            return False
+        metadata = _linux_caller_privilege_metadata()
+        if type(metadata) is not bytes or len(metadata) > 64 * 1024:
+            return False
+        required = {b"CapInh", b"CapPrm", b"CapEff", b"CapAmb"}
+        fields = {}
+        uids = None
+        for line in metadata.splitlines():
+            key, separator, value = line.partition(b":")
+            if key == b"Uid":
+                parts = value.split()
+                if (
+                    not separator
+                    or uids is not None
+                    or len(parts) != 4
+                    or any(re.fullmatch(rb"(?:0|[1-9][0-9]{0,9})", part) is None for part in parts)
+                ):
+                    return False
+                uids = tuple(int(part) for part in parts)
+                if any(value > 2**32 - 1 for value in uids):
+                    return False
+            elif key in required:
+                value = value.strip()
+                if (
+                    not separator
+                    or key in fields
+                    or re.fullmatch(rb"[0-9a-fA-F]{1,16}", value) is None
+                ):
+                    return False
+                fields[key] = int(value, 16)
+        # CapBnd alone grants no currently usable privilege without exec. Catalog
+        # capture executes no external program; permitted/inheritable/ambient
+        # capabilities must also be absent, not only the effective set.
+        return (
+            set(fields) == required
+            and not any(fields.values())
+            and uids == (*before, before[1])
+            and os.getresuid() == before
+            and os.geteuid() == before[1]
+        )
+    except (OSError, ValueError, TypeError, AttributeError, NotImplementedError):
+        return False
+
+
+def _system_ancestor_allows_child_churn(info: os.stat_result, parent_fd: int | None) -> bool:
+    """Only exempt a root-owned entry the effective user cannot rename or alter."""
+    if (
+        parent_fd is None
+        or os.geteuid() == 0
+        or info.st_uid != 0
+        or not stat.S_ISDIR(info.st_mode)
+        or os.access not in os.supports_dir_fd
+        or os.access not in os.supports_effective_ids
+        or not _unprivileged_linux_caller()
+    ):
+        return False
+    try:
+        parent = os.fstat(parent_fd)
+        if (
+            not stat.S_ISDIR(parent.st_mode)
+            or parent.st_uid != 0
+            or parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            return False
+        # An FD-relative effective-access check honors ACLs and capabilities.
+        # False alone is insufficient: the same valid parent must remain pinned.
+        if os.access(".", os.W_OK, dir_fd=parent_fd, effective_ids=True) is not False:
+            return False
+        after = os.fstat(parent_fd)
+        return all(
+            getattr(parent, field) == getattr(after, field)
+            for field in ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid")
+        )
+    except (OSError, ValueError, TypeError, NotImplementedError):
+        return False
+
+
 class Catalog:
     """SQLite-backed native session catalog."""
 
@@ -525,8 +624,10 @@ class Catalog:
         Never initialize, migrate, chmod, or let SQLite open the disk namespace.
         WAL/journal state is rejected rather than ignored. The snapshot is an
         index for selected native reads, not current native-session authority.
-        Ancestor ctime guards conservatively reject observable namespace changes;
-        they do not lock foreign writers. Return type is exactly Catalog, with
+        Private-ancestor ctime guards conservatively reject observable namespace changes.
+        Root-owned system entries proven non-renamable by the effective user permit
+        unrelated child-entry churn; FD/path/identity/owner/permissions stay bound.
+        These guards do not lock foreign writers. Return type is exactly Catalog, with
         a private query-only SQLite Connection/Cursor factory and a work budget
         sampled every 100 VM instructions for the snapshot's entire lifetime.
         """
@@ -561,22 +662,34 @@ class Catalog:
                     info.st_mode,
                     info.st_nlink,
                     info.st_uid,
+                    info.st_gid,
                 )
 
-            def directory_witness(info):
-                return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_ctime_ns)
+            def directory_witness(info, *, bind_ctime):
+                return (
+                    info.st_dev,
+                    info.st_ino,
+                    info.st_mode,
+                    info.st_uid,
+                    info.st_gid,
+                    info.st_ctime_ns if bind_ctime else None,
+                )
 
             def physical_guard() -> None:
                 # Keep every opened ancestor bound to its original parent/name.
-                # ctime catches observable rename/restore ABA; this is not an
-                # atomic lock against a foreign process or a Native CAS claim.
-                for fd, parent_fd, name, expected in chain:
+                # Preserve private-directory ABA detection. Exempted system entries
+                # must remain non-renamable to this effective user on every check.
+                for fd, parent_fd, name, expected, bind_ctime in chain:
                     opened = os.fstat(fd)
                     named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
                     if (
                         not stat.S_ISDIR(opened.st_mode)
-                        or directory_witness(opened) != expected
-                        or directory_witness(named) != expected
+                        or directory_witness(opened, bind_ctime=bind_ctime) != expected
+                        or directory_witness(named, bind_ctime=bind_ctime) != expected
+                        or (
+                            not bind_ctime
+                            and not _system_ancestor_allows_child_churn(opened, parent_fd)
+                        )
                     ):
                         raise ValueError
                 if file_descriptor is not None:
@@ -596,10 +709,11 @@ class Catalog:
                 physical_guard()
                 named = os.stat(component, dir_fd=parent, follow_symlinks=False)
                 physical_guard()
-                expected = directory_witness(named)
+                bind_ctime = not _system_ancestor_allows_child_churn(named, parent)
+                expected = directory_witness(named, bind_ctime=bind_ctime)
                 directory = os.open(component, flags | os.O_DIRECTORY, dir_fd=parent)
                 descriptors.append(directory)
-                chain.append((directory, parent, component, expected))
+                chain.append((directory, parent, component, expected, bind_ctime))
                 physical_guard()
                 parent = directory
             physical_guard()

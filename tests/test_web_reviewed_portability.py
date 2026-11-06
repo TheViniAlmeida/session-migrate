@@ -453,3 +453,31 @@ def test_reviewed_preparation_timeout_uses_fake_clock_and_preserves_cancellation
         assert proposal["metadata"]["budget_policy"]["preparation_timeout_seconds"] == 300
         assert proposal["metadata"]["budget_policy"]["policy_id"] == "reviewed-web-budgets-v1"
     assert preparation_timeout("tree") == preparation_timeout("summary") == 30
+
+
+def test_reviewed_transfer_ignores_unrelated_system_sibling_after_single_publication(
+    web, monkeypatch
+):
+    from test_catalog_readonly import system_ancestor_child_churn
+
+    call, _, workspace, backend, *_ = web
+    _, proposal = normal_review(web)
+    handle = backend.jobs._proposals[proposal["proposal_id"]].handle
+    source = handle._state.built.artifact.source.source_path
+    before = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in (backend.catalog_path, source)}
+    approved = {
+        "body_fingerprint": proposal["fingerprint"],
+        "idempotency_key": "system-churn-once",
+        "acknowledge_reviewed_portability": True,
+    }
+    route = "/api/proposals/" + proposal["proposal_id"] + "/confirm"
+    with system_ancestor_child_churn(
+        monkeypatch, backend.catalog_path, after_publication=True
+    ) as churn:
+        created = call("POST", route, json=approved)
+        result = tree_fixtures.wait(call, created.json(), {"completed", "uncertain", "failed"})
+    assert churn["created"] and result["state"] == "completed", result
+    assert len(workspace[3]) == 1
+    assert all(hashlib.sha256(p.read_bytes()).hexdigest() == sha for p, sha in before.items())
+    assert call("POST", route, json=approved).json()["job_id"] == created.json()["job_id"]
+    assert len(workspace[3]) == 1

@@ -1,7 +1,7 @@
 # Reviewed portability
 
 Base version: **0.12.0.dev19**. The operator selected this contract on 6 November 2026.
-Inline PNG support below is a separate **DEV20 candidate** extension.
+Inline PNG support below was integrated in **0.12.0.dev20**.
 It is separate from strict native-context migration.
 
 ## Contract
@@ -108,7 +108,7 @@ diagnostic snapshot is not authorization to publish a migration or bypass review
 of a real source. Existing and already-functional sessions are preserved; later
 improvements are tested in new candidates or explicitly authorized copies.
 
-## Inline PNG tool results — DEV20 candidate
+## Inline PNG tool results — DEV20
 
 The media extension applies only when the reviewed source contains supported
 inline PNG images in completed, non-error tool results. It uses a separate exact

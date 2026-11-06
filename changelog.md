@@ -8,14 +8,29 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
-## 06/11/2026 — DEV20 (candidata, mídia isolada)
+## 06/11/2026 — DEV21
 
-- Em validação: PNG inline em resultados de ferramenta no modo revisado, com
+- Corrigida a recusa de catálogo causada por alterações em diretórios irmãos de
+  ancestrais de sistema não alteráveis pelo chamador. A exceção de ctime exige
+  prova de identidade e ausência de privilégios; arquivos do catálogo, diretórios
+  privados e processos com privilégios continuam sob a verificação estrita.
+- Sem novos comandos, endpoints ou dependências. Testes de publicação cobrem
+  a interferência em `/tmp` sem duplicar importações.
+- [Versão, compatibilidade, comandos e limites](docs/dev21-release.md).
+
+## 06/11/2026 — DEV20
+
+- Integrado pela PR23: PNG inline em resultados de ferramenta no modo revisado, com
   preservação dos bytes e vínculo no histórico nativo e política específica.
 - Preview deve explicitar que Chat desloca a imagem para USER sem call_id na
   parte de imagem; Responses mantém o vínculo explícito no output.
 - PNG inválido, formatos não suportados, animação e erro com imagem permanecem
   recusados. A DEV19 operacional e as sessões funcionais não são modificadas.
+- CI: 39 verificações aprovadas após repetição controlada de dois jobs no mesmo
+  commit; as falhas iniciais foram preservadas para investigação.
+- O fluxo autorizado confirmou 15 novas conversas funcionais (14 DEV19 e uma
+  DEV20) e uma conversa anterior preservada. A cópia de teste visual reconheceu
+  nove cores fictícias sem ferramentas; a imagem histórica manteve bytes/vínculo.
 
 ## 06/11/2026 — DEV19
 
