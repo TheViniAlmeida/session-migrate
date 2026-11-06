@@ -59,6 +59,12 @@ for supported preserved compact checkpoints, material carriers and the original
 summary. It requires the exact OpenCode 2.2.5 destination. Unknown active carriers,
 unsupported controls and ambiguous ordering are refused. The five reported real
 compaction sources are not certified; their active-region shapes are still needed.
+DEV19 adds a separate, explicit [reviewed-portability contract](reviewed-portability.md)
+for these active runtime/ordering differences; DEV20 extends it to supported inline
+PNG tool results. The reviewed route preserves the conversation and archives the
+selected source capture while retaining PARTIAL/UNKNOWN coverage. Real continuation
+and a separate fictitious image canary were verified by the authorized migration
+flow on 6 November; neither establishes strict runtime equivalence.
 This does not change the Codex or Claude writer version contracts above.
 
 ## October contracts retained

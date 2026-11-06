@@ -82,7 +82,10 @@ for the closed DEV18 reader, independent publication, validation and unresolved 
 The [DEV19 reviewed-portability contract](docs/reviewed-portability.md) adds an
 explicit opt-in for compacted Claude 2.1.309 conversations targeting OpenCode 2.2.5.
 Runtime and ordering differences are shown before confirmation; source captures
-are retained privately and strict migration remains the default.
+are retained privately and strict migration remains the default. DEV20 adds bounded
+inline PNG tool results with protocol-specific differences disclosed in that preview.
+See the [DEV19–21 release reference](docs/dev21-release.md) for delivered behavior,
+validation, installation boundaries and the catalog guard correction.
 
 See [current client compatibility](docs/current-client-compatibility.md) for
 exact tested releases and native replay limits.

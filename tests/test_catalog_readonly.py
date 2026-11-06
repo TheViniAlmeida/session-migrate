@@ -1,8 +1,15 @@
 """Readonly catalog captures never pass a filesystem path to SQLite."""
 
 import errno
+import hashlib
 import os
 import sqlite3
+import stat
+import tempfile
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import test_lineage_cli as fixtures
@@ -327,3 +334,315 @@ def test_readonly_closes_memory_connection_and_all_file_descriptors_on_failure(
             os.fstat(fd)
         assert error.value.errno == errno.EBADF
     assert tree_state(tmp_path) == before
+
+
+@contextmanager
+def system_ancestor_child_churn(monkeypatch, catalog_path, *, after_publication=False):
+    """Create only an owned empty /tmp sibling during this catalog's physical read."""
+    from session_migrate import operations
+    from session_migrate.catalog import _system_ancestor_allows_child_churn
+
+    if Path("/tmp") not in catalog_path.absolute().parents:
+        pytest.skip("catalog must be under the system /tmp ancestor")
+    root = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if not _system_ancestor_allows_child_churn(Path("/tmp").stat(), root):
+            pytest.skip("requires a non-renamable root-owned /tmp system ancestor")
+    finally:
+        os.close(root)
+    info = catalog_path.stat()
+    identity = (info.st_dev, info.st_ino)
+    sibling = Path("/tmp") / ("session-migrate-owned-churn-" + uuid.uuid4().hex)
+    state = {"published": not after_publication, "created": False}
+    real_read, real_install = os.read, operations._install
+
+    def observed_install(*args, **kwargs):
+        result = real_install(*args, **kwargs)
+        if args[-1] is False:
+            state["published"] = True
+        return result
+
+    def observed_read(fd, size):
+        data = real_read(fd, size)
+        opened = os.fstat(fd)
+        if (
+            state["published"]
+            and not state["created"]
+            and (opened.st_dev, opened.st_ino) == identity
+            and data.startswith(b"SQLite format 3\0")
+        ):
+            sibling.mkdir(mode=0o700)
+            state["created"] = True
+        return data
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "read", observed_read)
+            if after_publication:
+                patch.setattr(operations, "_install", observed_install)
+            yield state
+    finally:
+        if state["created"]:
+            sibling.rmdir()
+
+
+def test_root_owned_system_ancestor_accepts_irrelevant_child_churn(private_env, monkeypatch):
+    with tempfile.TemporaryDirectory(prefix="session-migrate-catalog-churn-", dir="/tmp") as name:
+        root = Path(name)
+        fixture = publish(root, private_env)
+        path = fixture["catalog"]
+        before = hashlib.sha256(path.read_bytes()).hexdigest()
+        with (
+            system_ancestor_child_churn(monkeypatch, path) as state,
+            Catalog.open_readonly_existing(path) as catalog,
+        ):
+            assert len(catalog.list_sessions()) == 2
+        assert state["created"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == before
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("protected", True),
+        ("euid_root", False),
+        ("directory_user", False),
+        ("parent_user", False),
+        ("parent_group_write", False),
+        ("parent_other_write", False),
+        ("effective_write", False),
+        ("access_ambiguous", False),
+        ("access_error", False),
+        ("parent_gid_changed", False),
+        ("no_parent", False),
+        ("not_directory", False),
+        ("access_unsupported", False),
+    ],
+)
+def test_system_ancestor_classification_fails_closed(monkeypatch, case, expected):
+    from session_migrate import catalog as catalog_module
+    from session_migrate.catalog import _system_ancestor_allows_child_churn
+
+    monkeypatch.setattr(catalog_module, "_unprivileged_linux_caller", lambda: True)
+    info = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o1777, st_uid=0, st_gid=0)
+    parent = SimpleNamespace(st_dev=1, st_ino=1, st_mode=stat.S_IFDIR | 0o755, st_uid=0, st_gid=0)
+    if case == "directory_user":
+        info.st_uid = 1000
+    elif case == "parent_user":
+        parent.st_uid = 1000
+    elif case == "parent_group_write":
+        parent.st_mode |= stat.S_IWGRP
+    elif case == "parent_other_write":
+        parent.st_mode |= stat.S_IWOTH
+    elif case == "not_directory":
+        info.st_mode = stat.S_IFREG | 0o600
+    reads = []
+
+    def access(path, mode, *, dir_fd, effective_ids):
+        assert path == "." and mode == os.W_OK and dir_fd == 17 and effective_ids is True
+        if case == "access_error":
+            raise NotImplementedError
+        return None if case == "access_ambiguous" else case == "effective_write"
+
+    def fstat(fd):
+        assert fd == 17
+        reads.append(True)
+        return (
+            SimpleNamespace(**{**vars(parent), "st_gid": 1})
+            if (case == "parent_gid_changed" and len(reads) > 1)
+            else parent
+        )
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "geteuid", lambda: 0 if case == "euid_root" else 1000)
+        patch.setattr(os, "fstat", fstat)
+        patch.setattr(os, "access", access)
+        patch.setattr(os, "supports_dir_fd", {access})
+        patch.setattr(
+            os, "supports_effective_ids", set() if case == "access_unsupported" else {access}
+        )
+        result = _system_ancestor_allows_child_churn(info, None if case == "no_parent" else 17)
+    assert result is expected
+
+
+@pytest.mark.parametrize("kind", ["directory", "database"])
+@pytest.mark.parametrize("field", ["st_uid", "st_gid", "st_mode"])
+def test_readonly_rejects_identity_owner_group_or_permission_change_during_capture(
+    tmp_path, private_env, monkeypatch, kind, field
+):
+    fixture = publish(tmp_path, private_env)
+    path = fixture["catalog"]
+    before = path.read_bytes()
+    selected = path.parent if kind == "directory" else path
+    info = selected.stat()
+    identity = (info.st_dev, info.st_ino)
+    real_read, real_fstat = os.read, os.fstat
+    changed = []
+
+    def read(fd, size):
+        data = real_read(fd, size)
+        if data.startswith(b"SQLite format 3\0"):
+            changed.append(True)
+        return data
+
+    def fstat(fd):
+        value = real_fstat(fd)
+        if changed and (value.st_dev, value.st_ino) == identity:
+            values = {name: getattr(value, name) for name in dir(value) if name.startswith("st_")}
+            values[field] = (
+                values[field] ^ stat.S_IWOTH if field == "st_mode" else values[field] + 1
+            )
+            return SimpleNamespace(**values)
+        return value
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "read", read)
+        patch.setattr(os, "fstat", fstat)
+        with pytest.raises(SessionMigrateError, match="readonly_catalog_unavailable"):
+            Catalog.open_readonly_existing(path)
+    assert changed and path.read_bytes() == before
+
+
+def test_readonly_rejects_database_row_mutation_during_capture(tmp_path, private_env, monkeypatch):
+    fixture = publish(tmp_path, private_env)
+    path = fixture["catalog"]
+    real_read = os.read
+    changed = []
+
+    def read(fd, size):
+        data = real_read(fd, size)
+        if not changed and data.startswith(b"SQLite format 3\0"):
+            changed.append(True)
+            with sqlite3.connect(path) as connection:
+                connection.execute("UPDATE sessions SET display_title='synthetic mutation'")
+        return data
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "read", read)
+        with pytest.raises(SessionMigrateError, match="readonly_catalog_unavailable"):
+            Catalog.open_readonly_existing(path)
+    assert changed
+
+
+@pytest.mark.parametrize(
+    "case,expected",
+    [
+        ("unprivileged", True),
+        ("effective_capability", False),
+        ("permitted_capability", False),
+        ("inherited_capability", False),
+        ("ambient_capability", False),
+        ("saved_root", False),
+        ("real_root", False),
+        ("euid_root", False),
+        ("uid_flip", False),
+        ("duplicate", False),
+        ("missing", False),
+        ("malformed", False),
+        ("oversized", False),
+        ("unavailable", False),
+        ("not_linux", False),
+        ("fsuid_root", False),
+        ("fsuid_other", False),
+        ("uid_missing", False),
+        ("uid_duplicate", False),
+        ("uid_malformed", False),
+        ("uid_leading_zero", False),
+        ("uid_oversized", False),
+    ],
+)
+def test_system_ancestor_requires_unprivileged_linux_caller(monkeypatch, case, expected):
+    from session_migrate import catalog as catalog_module
+
+    fields = {b"CapInh": b"0", b"CapPrm": b"0", b"CapEff": b"0", b"CapAmb": b"0"}
+    selected = {
+        "effective_capability": b"CapEff",
+        "permitted_capability": b"CapPrm",
+        "inherited_capability": b"CapInh",
+        "ambient_capability": b"CapAmb",
+    }.get(case)
+    if selected is not None:
+        fields[selected] = b"1"
+    if case == "missing":
+        fields.pop(b"CapAmb")
+    if case == "malformed":
+        fields[b"CapEff"] = b"not-hex"
+    metadata = b"Name:\tsynthetic\n" + b"\n".join(k + b":\t" + v for k, v in fields.items())
+    metadata += b"\nCapBnd:\tffffffffffffffff\n"
+    uid_line = {
+        "fsuid_root": b"Uid:\t1000 1000 1000 0\n",
+        "fsuid_other": b"Uid:\t1000 1000 1000 2000\n",
+        "uid_malformed": b"Uid:\t1000 1000 1000 not-decimal\n",
+        "uid_leading_zero": b"Uid:\t1000 1000 1000 01000\n",
+        "uid_oversized": b"Uid:\t1000 1000 1000 4294967296\n",
+    }.get(case, b"Uid:\t1000 1000 1000 1000\n")
+    if case != "uid_missing":
+        metadata += uid_line
+    if case == "uid_duplicate":
+        metadata += uid_line
+    if case == "duplicate":
+        metadata += b"CapEff:\t0\n"
+    if case == "oversized":
+        metadata += b"X" * (64 * 1024)
+    reads = []
+
+    def uid():
+        reads.append(True)
+        if case == "saved_root":
+            return (1000, 1000, 0)
+        if case == "real_root":
+            return (0, 1000, 1000)
+        if case == "uid_flip" and len(reads) > 1:
+            return (1001, 1001, 1001)
+        return (1000, 1000, 1000)
+
+    def read_metadata():
+        if case == "unavailable":
+            raise PermissionError
+        return metadata
+
+    monkeypatch.setattr(catalog_module.sys, "platform", "linux" if case != "not_linux" else "other")
+    monkeypatch.setattr(os, "getresuid", uid)
+    monkeypatch.setattr(os, "geteuid", lambda: 0 if case == "euid_root" else 1000)
+    monkeypatch.setattr(catalog_module, "_linux_caller_privilege_metadata", read_metadata)
+    assert catalog_module._unprivileged_linux_caller() is expected
+
+
+@pytest.mark.parametrize("flip", ["capability", "fsuid"])
+def test_privilege_flip_during_capture_keeps_system_ancestor_strict(private_env, monkeypatch, flip):
+    from session_migrate import catalog as catalog_module
+
+    parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if not catalog_module._system_ancestor_allows_child_churn(Path("/tmp").stat(), parent):
+            pytest.skip("requires a non-renamable root-owned /tmp system ancestor")
+    finally:
+        os.close(parent)
+    with tempfile.TemporaryDirectory(prefix="session-migrate-cap-flip-", dir="/tmp") as name:
+        fixture = publish(Path(name), private_env)
+        path = fixture["catalog"]
+        original = path.read_bytes()
+        privileged = []
+        real_read = os.read
+        uid = os.geteuid()
+
+        def read(fd, size):
+            data = real_read(fd, size)
+            if data.startswith(b"SQLite format 3\0"):
+                privileged.append(True)
+            return data
+
+        def metadata():
+            capability = int(bool(privileged) and flip == "capability")
+            fsuid = 0 if privileged and flip == "fsuid" else uid
+            return (
+                f"Uid:\t{uid} {uid} {uid} {fsuid}\n"
+                f"CapInh:\t0\nCapPrm:\t{capability:x}\nCapEff:\t{capability:x}\nCapAmb:\t0\n"
+            ).encode()
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "read", read)
+            patch.setattr(catalog_module, "_linux_caller_privilege_metadata", metadata)
+            with pytest.raises(SessionMigrateError, match="readonly_catalog_unavailable"):
+                Catalog.open_readonly_existing(path)
+        assert privileged and path.read_bytes() == original

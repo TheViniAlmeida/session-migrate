@@ -514,3 +514,25 @@ def test_http_run_scope_and_logout_protect_draft_job_proposal_and_confirmation(w
     )
     assert (workspace.ledger / "ledger.sqlite3").read_bytes() == before
     assert len(list(workspace.profiles[1].root.rglob("*.jsonl"))) == 1
+
+
+@pytest.mark.parametrize("workspace", [{"worked": True}], indirect=True)
+def test_return_summary_ignores_unrelated_system_sibling_after_single_publication(
+    workspace, monkeypatch
+):
+    from test_catalog_readonly import system_ancestor_child_churn
+
+    before = {
+        p: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in (workspace.catalog, workspace.source_path, workspace.target_path)
+    }
+    parameters = selected_request(workspace, "return_new_summary")
+    _, draft = capture(workspace, parameters, "return_new_summary")
+    proposal = review(workspace, accept(workspace, draft))
+    with system_ancestor_child_churn(
+        monkeypatch, workspace.catalog, after_publication=True
+    ) as churn:
+        result = confirm(workspace, proposal)
+    assert churn["created"] and result["state"] == "completed"
+    assert all(hashlib.sha256(p.read_bytes()).hexdigest() == sha for p, sha in before.items())
+    assert len(list(workspace.profiles[0].root.rglob("*.jsonl"))) == 2
