@@ -504,6 +504,34 @@ def _conversation_events(
     return events
 
 
+def _validate_nested_memory(attachment: dict) -> None:
+    """Accept only the captured project-memory shape; paths remain inert data."""
+    if (
+        set(attachment) != {"type", "path", "displayPath", "content"}
+        or type(attachment["path"]) is not str
+        or not attachment["path"]
+        or type(attachment["displayPath"]) is not str
+        or type(attachment["content"]) is not dict
+    ):
+        _fail("malformed captured nested memory")
+    content = attachment["content"]
+    if (
+        not {"path", "type", "content"} <= set(content)
+        or set(content) - {"path", "type", "content", "contentDiffersFromDisk", "rawContent"}
+        or type(content["path"]) is not str
+        or content["path"] != attachment["path"]
+        or type(content["type"]) is not str
+        or content["type"] != "Project"
+        or type(content["content"]) is not str
+        or (
+            "contentDiffersFromDisk" in content
+            and type(content["contentDiffersFromDisk"]) is not bool
+        )
+        or ("rawContent" in content and type(content["rawContent"]) is not str)
+    ):
+        _fail("malformed captured nested memory")
+
+
 def _rendered_events(record: JsonlRecord, source_class: str, difference) -> list[Event]:
     value = record.value
     result: list[Event] = []
@@ -666,7 +694,30 @@ def plan_reviewed_carriers(
             if type(attachment) is not dict or type(attachment.get("type")) is not str:
                 _fail("malformed historical attachment")
             source_class = attachment["type"]
-            if source_class in _RENDERED_CLASSES:
+            if source_class == "nested_memory":
+                _validate_nested_memory(attachment)
+                events = _rendered_events(record, source_class, difference)
+                if not events:
+                    _fail("missing captured historical rendering")
+                if value.get("renderedRole") == "system":
+                    system.append(
+                        {"record_index": record.index, "sha256": _sha(value.get("rendered"))}
+                    )
+                    difference("recorded_system_authority_not_replayed", record.index)
+                events.append(
+                    _data_event(
+                        record,
+                        attachment,
+                        source_class,
+                        "captured_payload",
+                        block_index=len(events),
+                        pointer="/attachment",
+                    )
+                )
+                difference("nested_memory_payload_as_quoted_data", record.index)
+                difference("captured_memory_variants_not_reconciled", record.index)
+                difference("recorded_carrier_as_quoted_data", record.index)
+            elif source_class in _RENDERED_CLASSES:
                 events = _rendered_events(record, source_class, difference)
                 if not events:
                     _fail("missing captured historical rendering")
