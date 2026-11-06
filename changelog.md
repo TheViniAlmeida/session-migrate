@@ -8,6 +8,20 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
+## 06/11/2026 — DEV22
+
+- Acrescentado suporte revisado ao carrier Claude 2.1.309 `nested_memory` do tipo
+  `Project`, com validação fechada do payload e renderização histórica capturada.
+- Variantes rendered, cached e raw são preservadas como dados históricos distintos;
+  caminhos não são lidos e instruções não viram memória/configuração ativa do destino.
+- Preview declara a representação como dados e a ausência de reconciliação entre
+  variantes. Seleção compactada comprovada, confirmação separada e arquivo privado
+  continuam obrigatórios; cobertura permanece UNKNOWN/PARTIAL.
+- Documentada a rota existente `tree review --mode single --no-reviewed-portability`
+  para revisar arquivamento parcial de uma chamada aberta sem seleção compactada.
+  Ela exige proveniência do inventário; não autoriza fabricar raiz nem executar apply.
+- Sem novos comandos, endpoints ou dependências. Instalação é uma etapa separada.
+
 ## 06/11/2026 — DEV21
 
 - Corrigida a recusa de catálogo causada por alterações em diretórios irmãos de

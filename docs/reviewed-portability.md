@@ -140,6 +140,33 @@ scanline data. It validates PNG structure/CRCs without rendering private images.
 Unsupported ancillary/animation structures remain explicit refusals, not stripped
 metadata. The source capture's own lower byte budget remains in force.
 
+## Nested-memory carriers — DEV22
+
+A closed `nested_memory` extension accepts captured project-memory attachments
+with a proven compacted selection and at least one recorded rendering. Supported
+fields are `type`, `path`, `displayPath` and `content`; the embedded content has
+`path`, `type: "Project"`, textual `content`, and optional boolean
+`contentDiffersFromDisk` and textual `rawContent`. The two paths must agree.
+Unknown fields/types, conflicting paths and absent renderings are refused.
+
+Recorded `rendered` and `renderedInHumanTurn` variants remain quoted USER DATA,
+and the complete validated attachment is retained as a separate `captured_payload`.
+Cached, raw and rendered contents may differ; all captured variants remain distinct.
+The preview explicitly reports the payload representation and that these variants
+are not reconciled. An absent raw or rendering variant is never reconstructed.
+Recorded SYSTEM authority is declared rather than replayed.
+
+Paths and display names are historical data. The migrator does not read those files,
+write an AGENTS/CLAUDE memory file, or activate the captured guidance as destination
+configuration. The private source archive and fresh reviewed acknowledgement remain
+mandatory. This extension does not certify runtime equivalence or expand the strict
+reader, client-version matrix or supported image formats. There is no new command,
+API endpoint or dependency in DEV22; repository integration does not update installs.
+
+For a non-compacted source with a genuinely open tool call, `--reviewed-portability`
+is not the appropriate contract. Use the existing [single-node tree review](tree-migration.md#single-node-review-of-an-open-tool-call)
+with separately acknowledged partial archival instead.
+
 ## Implementation and acceptance plan
 
 - Reader: explicit mode through source capture, graph selection, quoted historical

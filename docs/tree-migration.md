@@ -142,3 +142,39 @@ native parentID and retain organizational relations in the external migration ma
 Resume follows the persisted mode, including old native-subagent journals.
 See [editable trees and native context](native-claude-context.md) for the UI,
 public fork, peer-messaging limits and closed source contract.
+
+## Single-node review of an open tool call
+
+A source without a proven preserved-compaction selection must not be forced through
+`--reviewed-portability`. For Claude 2.1.309 to OpenCode 2.2.5, the existing tree
+archival policy can represent a genuinely open call as `ImportedIncompleteTool`,
+retaining its ID, name and input while declaring the missing completed result.
+
+```bash
+smigrate --state-home /ABS/ISOLATED/migration-state tree review \
+  --profiles /ABS/PRIVATE/profiles.json \
+  --source-profile CLAUDE_SOURCE_PROFILE --source-client-version 2.1.309 \
+  --manifest /ABS/PRIVATE/verified-inventory.json \
+  --target-profile OPENCODE_225_TARGET_PROFILE \
+  --mode single --anchor NODE_KEY --publication-mode independent \
+  --no-reviewed-portability --cwd /ABS/PROJECT \
+  --model-provider PROVIDER_ID --model MODEL_ID
+```
+
+`tree review` is the preparation/preview command; there is no `tree --dry-run`,
+`tree prepare` or `tree preview` command. Review requires no publication ACK.
+A partial result should retain UNKNOWN coverage, declare
+`tool_call:v2_incomplete_archived`, and require separate partial acknowledgement.
+It does not execute the historical tool. A later `tree apply` requires a fresh
+preparation, `--acknowledge-partial` and confirmation; a saved preview cannot publish.
+
+A single-node inventory needs a root supported by evidence; do not turn an unknown
+parent into `known_root`. For a child, retain its proven family in the inventory and
+select the child with `--mode single --anchor CHILD --detach`. Detach only separates
+an anchor from its known, unselected parent. The manifest's `confirmed` declaration
+attests its provenance, independently of consent to publish or accept losses.
+
+Preparation may invoke the target CLI for version/collision preflight and initialize
+its cache/store. Use an isolated target profile, HOME/XDG and state directory when
+simulating without touching a daily target. Source and inventory contents remain
+private; review output does not by itself certify a real import or continuation.

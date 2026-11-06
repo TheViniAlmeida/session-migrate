@@ -86,6 +86,7 @@ are retained privately and strict migration remains the default. DEV20 adds boun
 inline PNG tool results with protocol-specific differences disclosed in that preview.
 See the [DEV19–21 release reference](docs/dev21-release.md) for delivered behavior,
 validation, installation boundaries and the catalog guard correction.
+DEV22 adds a closed [nested-memory carrier extension](docs/reviewed-portability.md#nested-memory-carriers--dev22), preserving captured variants as quoted data.
 
 See [current client compatibility](docs/current-client-compatibility.md) for
 exact tested releases and native replay limits.
