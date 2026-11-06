@@ -87,7 +87,7 @@ def _safe_event(event: dict) -> None:
     optional = (
         {"target_sha256"}
         if event["type"] == "attempting"
-        else {"publication_mode"}
+        else {"publication_mode", "reviewed_portability"}
         if event["type"] == "prepared"
         else set()
     )
@@ -95,6 +95,8 @@ def _safe_event(event: dict) -> None:
         _fail()
     if event["type"] == "prepared":
         _uuid(event["operation_id"])
+        if "reviewed_portability" in event and type(event["reviewed_portability"]) is not bool:
+            _fail()
         mode = event.get("publication_mode")
         if "publication_mode" in event and (
             type(mode) is not str or mode not in {"independent", "native-subagent"}
@@ -165,7 +167,7 @@ def _safe_event(event: dict) -> None:
             keys.add(node["key"])
             ids.add(node["target_id"])
     for key, value in event.items():
-        if key == "nodes":
+        if key in {"nodes", "reviewed_portability"}:
             continue
         if type(value) is not str or not value or len(value) > 4096:
             _fail()
@@ -415,6 +417,7 @@ def _inspect(journal: TreeJournal, operation_id: str) -> dict:
         "operation_id": operation_id,
         "status": status,
         "publication_mode": publication_mode,
+        "reviewed_portability": prepared.get("reviewed_portability", False),
         "hierarchy_semantics": (
             "external_organizational_map"
             if publication_mode == "independent"

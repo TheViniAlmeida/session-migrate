@@ -30,6 +30,7 @@ from session_migrate.web.runtime_jobs import (
     capture_runtime,
     commit_runtime,
     new_runtime,
+    preparation_timeout,
     prepare_runtime,
     runtime_metadata,
     workflow_json,
@@ -97,6 +98,7 @@ class _Job:
     deadline: float | None = None
     native_action: str | None = None
     cancel_requested: bool = False
+    acknowledge_reviewed_portability: bool = False
 
 
 @dataclass(slots=True, repr=False)
@@ -275,6 +277,11 @@ class JobManager:
             raise JobError("action_invalid")
         if type(request) is not dict:
             raise JobError("request_invalid")
+        if "reviewed_portability" in request:
+            if native_action != "tree" or type(request["reviewed_portability"]) is not bool:
+                raise JobError("request_invalid")
+            if request["reviewed_portability"] is False:
+                request = {k: v for k, v in request.items() if k != "reviewed_portability"}
         try:
             encoded = workflow_json(request)
         except RuntimeJobError as error:
@@ -310,7 +317,10 @@ class JobManager:
                 request_json=encoded,
                 buffer_bytes=RUNTIME_BUFFER_BYTES,
                 native_action=native_action,
-                deadline=self._clock() + 30,
+                deadline=self._clock()
+                + preparation_timeout(
+                    native_action, reviewed_portability=request.get("reviewed_portability", False)
+                ),
             )
             self._buffers += job.buffer_bytes
             try:
@@ -505,6 +515,13 @@ class JobManager:
             job.effects, job.result_json = effects, _document({"proposal_id": proposal_id})
 
     def prepare(self, request, context, *, service_action="transfer"):
+        if type(request) is dict and "reviewed_portability" in request:
+            if service_action != "transfer" or type(request["reviewed_portability"]) is not bool:
+                raise JobError("request_invalid")
+            if request["reviewed_portability"] is False:
+                request = {
+                    key: value for key, value in request.items() if key != "reviewed_portability"
+                }
         if type(service_action) is not str or service_action not in SERVICE_ACTIONS | {"transfer"}:
             raise JobError("action_invalid")
         encoded = _document(request)
@@ -576,7 +593,14 @@ class JobManager:
         *,
         service_action="transfer",
         native_action=None,
+        acknowledge_reviewed_portability=False,
     ):
+        if type(acknowledge_reviewed_portability) is not bool:
+            raise JobError("acknowledgement_invalid")
+        if acknowledge_reviewed_portability and (
+            service_action != "transfer" or native_action is not None
+        ):
+            raise JobError("action_invalid")
         if type(service_action) is not str or service_action not in SERVICE_ACTIONS | {"transfer"}:
             raise JobError("action_invalid")
         if native_action is not None and (
@@ -595,6 +619,8 @@ class JobManager:
             payload = (proposal_id, body_fingerprint, service_action)
             if native_action is not None:
                 payload += (native_action,)
+            if acknowledge_reviewed_portability:
+                payload += ("acknowledge_reviewed_portability", True)
             if key in self._keys:
                 previous, job_id = self._keys[key]
                 if previous != payload:
@@ -612,6 +638,25 @@ class JobManager:
                 or proposal.native_action != native_action
             ):
                 raise JobError("proposal_unavailable")
+            if service_action == "transfer" and native_action is None:
+                metadata = json.loads(proposal.metadata_json)
+                if (
+                    hashlib.sha256(proposal.metadata_json.encode("ascii")).hexdigest()
+                    != proposal.fingerprint
+                ):
+                    raise JobError("proposal_unavailable")
+                state = proposal.handle._state
+                if state is None:
+                    raise JobError("proposal_unavailable")
+                reviewed = state.built.request.reviewed_portability
+                if type(reviewed) is not bool or (
+                    (metadata.get("mode") == "reviewed_portability") != reviewed
+                    or metadata.get("requires_reviewed_portability_acknowledgement", False)
+                    != reviewed
+                ):
+                    raise JobError("proposal_unavailable")
+                if reviewed and not acknowledge_reviewed_portability:
+                    raise JobError("reviewed_portability_acknowledgement_required")
             self._reserve_job(run.run_id)
             if sum(existing[0] == run.run_id for existing in self._keys) >= 64:
                 raise JobError("idempotency_capacity")
@@ -630,6 +675,7 @@ class JobManager:
                 service_action=service_action,
                 subject=proposal.subject,
                 native_action=native_action,
+                acknowledge_reviewed_portability=acknowledge_reviewed_portability,
                 deadline=self._clock() + 30 if service_action != "transfer" else None,
             )
             previous_handle, previous_charge = proposal.handle, proposal.buffer_bytes
@@ -889,6 +935,11 @@ class JobManager:
                         raise JobError("private_handle_required")
                     charge = len(state.built.artifact.native_bytes) + len(metadata_json)
                     snapshots = [*state.observed_captures, *state.last_source_capture]
+                    if (
+                        state.built.request.reviewed_portability
+                        and state.built.source_snapshot is not None
+                    ):
+                        snapshots.append(state.built.source_snapshot)
                     charge += sum(
                         len(snapshot.raw_bytes)
                         for snapshot in {id(s): s for s in snapshots}.values()
@@ -962,6 +1013,11 @@ class JobManager:
                         progress=lambda event, current_id=job.job_id: self._progress(
                             current_id, event
                         ),
+                        **(
+                            {"acknowledge_reviewed_portability": True}
+                            if job.acknowledge_reviewed_portability
+                            else {}
+                        ),
                     )
                     if type(receipt) is not TransferReceipt:
                         raise JobError("receipt_unavailable")
@@ -1018,7 +1074,7 @@ class JobManager:
                             "inspection": error.metadata,
                         }
                     )
-            except Exception:
+            except Exception as error:
                 with self.lock:
                     entered = job.token.publishing or (
                         job.auth_lease is not None and job.auth_lease.service_entered
@@ -1030,9 +1086,43 @@ class JobManager:
                         except OperationCancelledError:
                             cancelled = True
                     job.state = "uncertain" if entered else "cancelled" if cancelled else "failed"
-                    job.result_json = _document(
-                        {"reason": "publication_unconfirmed" if entered else "preparation_failed"}
-                    )
+                    failure = {
+                        "reason": "publication_unconfirmed" if entered else "preparation_failed"
+                    }
+                    limit = getattr(error, "read_limit_bytes", None)
+                    if (
+                        not entered
+                        and getattr(error, "reason", None) == "source_read_limit_exceeded"
+                        and type(limit) is int
+                        and limit > 0
+                    ):
+                        failure = {
+                            "reason": "source_read_limit_exceeded",
+                            "read_limit_bytes": limit,
+                        }
+                    if (
+                        not entered
+                        and type(error) is JobError
+                        and error.reason == "buffer_capacity"
+                        and job.request_json is not None
+                        and json.loads(job.request_json).get("reviewed_portability") is True
+                    ):
+                        failure = {"reason": "buffer_capacity"}
+                    if (
+                        not entered
+                        and type(error) is JobError
+                        and error.reason in {"runtime_deadline", "service_deadline"}
+                        and job.native_action == "tree"
+                        and job.request_json is not None
+                        and json.loads(job.request_json).get("reviewed_portability") is True
+                    ):
+                        failure = {
+                            "reason": "runtime_deadline",
+                            "preparation_timeout_seconds": preparation_timeout(
+                                "tree", reviewed_portability=True
+                            ),
+                        }
+                    job.result_json = _document(failure)
             finally:
                 # Do not retain a literal accepted/captured document in worker loop locals.
                 request = captured = resolved = None

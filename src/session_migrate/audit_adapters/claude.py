@@ -27,6 +27,7 @@ from session_migrate.audit_adapters import (
 )
 from session_migrate.errors import SessionMigrateError
 from session_migrate.formats import claude as parser
+from session_migrate.formats.claude_compaction import RECOVERY_POLICY_ID
 
 
 def content(value: object) -> Rule:
@@ -163,14 +164,17 @@ def grammar(value: dict) -> Rule:
     return obj(fields, required=required)
 
 
-def audit(records, snapshot, policy) -> AdapterResult:
+def audit(records, snapshot, policy, *, reviewed_portability=False) -> AdapterResult:
     taxonomy = Taxonomy()
     client_ids = {r.value.get("version") for r in records if type(r.value.get("version")) is str}
     client = next(iter(client_ids)) if len(client_ids) == 1 else None
-    if client not in parser.VALIDATED_CLAUDE_VERSIONS or (
-        policy.client_version is not None and policy.client_version != client
-    ):
+    if (
+        client not in parser.VALIDATED_CLAUDE_VERSIONS
+        and not (reviewed_portability and client == "2.1.309")
+    ) or (policy.client_version is not None and policy.client_version != client):
         taxonomy.issue("unsupported_client_version", 0)
+    if reviewed_portability and client != "2.1.309":
+        raise SessionMigrateError("Unsupported reviewed source client.")
     duplicate_indices = set()
     context_selection = None
     carriers = None
@@ -180,7 +184,12 @@ def audit(records, snapshot, policy) -> AdapterResult:
         )
         context_selection = parser.select_compaction(logical_records)
         if context_selection is not None:
-            carriers = parser.plan_carriers(logical_records, context_selection)
+            if reviewed_portability:
+                from session_migrate.formats.claude_reviewed import plan_reviewed_carriers
+
+                carriers = plan_reviewed_carriers(logical_records, context_selection)
+            else:
+                carriers = parser.plan_carriers(logical_records, context_selection)
     except (SessionMigrateError, TypeError, ValueError, RecursionError):
         taxonomy.issue("invalid_graph", 0)
         context_selection = carriers = None
@@ -257,6 +266,19 @@ def audit(records, snapshot, policy) -> AdapterResult:
                 "retired": context_selection.retired_indices,
                 "effective_parents": sorted(context_selection.effective_parents.items()),
                 "diagnostics": context_selection.diagnostics,
+                **(
+                    {
+                        "original_leaf": context_selection.original_leaf_index,
+                        "parent_chain": context_selection.parent_chain_indices,
+                        "recovered": context_selection.recovered_indices,
+                        "recovery_provenance": sorted(
+                            context_selection.recovery_provenance.items()
+                        ),
+                        "retired_controls": context_selection.retired_control_indices,
+                    }
+                    if context_selection.policy_id == RECOVERY_POLICY_ID
+                    else {}
+                ),
             }
         )
     selected_set = set(selected)
@@ -345,7 +367,10 @@ def audit(records, snapshot, policy) -> AdapterResult:
     taxonomy.reclassify_records(taxonomy.excluded_records, EXCLUDED)
     try:
         session = parser.parse_records(
-            records, source_path=snapshot.source_path, source_sha256=snapshot.authority_sha256
+            records,
+            source_path=snapshot.source_path,
+            source_sha256=snapshot.authority_sha256,
+            **({"reviewed_portability": True} if reviewed_portability else {}),
         )
     except (SessionMigrateError, TypeError, ValueError, RecursionError):
         taxonomy.issue("parser_rejected_source", 0)
@@ -353,7 +378,11 @@ def audit(records, snapshot, policy) -> AdapterResult:
     return AdapterResult(
         taxonomy,
         selected,
-        "claude-309-native-context-v1" if context_selection is not None else "claude-jsonl-v1",
-        client if client in parser.VALIDATED_CLAUDE_VERSIONS else None,
+        "claude-309-reviewed-conversation-v1"
+        if reviewed_portability
+        else (
+            "claude-309-native-context-v1" if context_selection is not None else "claude-jsonl-v1"
+        ),
+        client if client in parser.VALIDATED_CLAUDE_VERSIONS or reviewed_portability else None,
         session,
     )

@@ -18,6 +18,7 @@ from session_migrate.continuity import ContinuitySelector, ExplicitPair, assess_
 from session_migrate.continuity_bindings import EXECUTION_ENVIRONMENT, PUBLIC_ENVIRONMENT
 from session_migrate.continuity_observation import EndpointObserver
 from session_migrate.conversion import default_migration_state_home
+from session_migrate.errors import SessionMigrateError, SourceReadLimitError
 from session_migrate.lineage import LineageStore, SelectionRangeV1, _encode
 from session_migrate.lineage_cli import metadata_dict
 from session_migrate.operations import OperationRequest, proposal_metadata
@@ -36,8 +37,9 @@ from session_migrate.web.jobs import JobManager
 
 
 class BackendError(Exception):
-    def __init__(self, reason):
+    def __init__(self, reason, *, read_limit_bytes=None):
         self.reason = reason
+        self.read_limit_bytes = read_limit_bytes
         super().__init__(reason)
 
 
@@ -116,6 +118,7 @@ class WorkspaceBackend:
         state_home: Path | None = None,
         service_actions: frozenset[str] = frozenset(),
         runtime_actions: frozenset[str] = frozenset(),
+        max_source_bytes: int | None = None,
     ):
         if type(registry) is not RunRegistry or type(profiles) is not tuple or not profiles:
             raise BackendError("launch_invalid")
@@ -129,6 +132,11 @@ class WorkspaceBackend:
             "cancel_ready",
         }:
             raise BackendError("launch_invalid")
+        if max_source_bytes is not None and (
+            type(max_source_bytes) is not int or not 0 < max_source_bytes <= 256 * 1024 * 1024
+        ):
+            raise BackendError("launch_invalid")
+        self.max_source_bytes = max_source_bytes
         self._service_actions = service_actions
         if type(runtime_actions) is not frozenset or not runtime_actions <= {
             "summary",
@@ -170,7 +178,14 @@ class WorkspaceBackend:
         self._closed = False
         self.jobs = JobManager(registry, self._prepare, runtime_resolver=self._resolve_runtime)
 
+    def _source_budget(self, reviewed_portability):
+        if type(reviewed_portability) is not bool:
+            raise BackendError("field_invalid")
+        return self.max_source_bytes or (64 if reviewed_portability else 8) * 1024 * 1024
+
     def _resolve_runtime(self, parameters, *, native_action):
+        if native_action != "tree" and "reviewed_portability" in parameters:
+            raise BackendError("field_invalid")
         from session_migrate.web.runtime_jobs import RuntimeRequest
 
         if native_action not in self._runtime_actions:
@@ -376,17 +391,51 @@ class WorkspaceBackend:
             )
         return {"schema_version": 1, "sessions": result, "next_cursor": cursor}
 
-    def _preview(self, opaque_id):
+    def _preview(self, opaque_id, reviewed_portability=False):
+        if type(reviewed_portability) is not bool:
+            raise BackendError("field_invalid")
         selected, profile = self._selected(opaque_id)
+        source_budget = self._source_budget(reviewed_portability)
         before = _witness(self.catalog_path)
         with Catalog.open_readonly_existing(self.catalog_path) as catalog:
-            session = read_session(
-                catalog,
-                profile,
-                selected.ref,
-                base_environ=self.base_environ,
-                max_source_bytes=8 * 1024 * 1024,
-            )
+            if reviewed_portability:
+                from session_migrate.discovery import normalized_source_id
+                from session_migrate.model import AgentFormat
+                from session_migrate.native_snapshots import (
+                    SourceCaptureContext,
+                    capture_source,
+                    check_source_identity,
+                )
+
+                source = resolve_source(catalog, profile, selected.ref)
+                if profile.format is not AgentFormat.CLAUDE or source.path is None:
+                    raise BackendError("reviewed_source_unsupported")
+                try:
+                    snapshot = capture_source(
+                        SourceCaptureContext(AgentFormat.CLAUDE, source.path),
+                        byte_limit=source_budget,
+                    )
+                except SessionMigrateError as error:
+                    if str(error) == "native capture exceeds the byte safety limit":
+                        raise BackendError(
+                            "source_read_limit_exceeded", read_limit_bytes=source_budget
+                        ) from None
+                    raise
+                session = snapshot.parse(reviewed_portability=True)
+                if (
+                    normalized_source_id(AgentFormat.CLAUDE, session.session_id)
+                    != selected.ref.native_id
+                ):
+                    raise BackendError("selected_source_changed")
+                check_source_identity(snapshot)
+            else:
+                session = read_session(
+                    catalog,
+                    profile,
+                    selected.ref,
+                    base_environ=self.base_environ,
+                    max_source_bytes=source_budget,
+                )
             preview = project_session(
                 session,
                 limits=PreviewLimits(max_bytes=60000, max_characters=60000, event_characters=4000),
@@ -400,12 +449,34 @@ class WorkspaceBackend:
                 for event in preview.events
             ),
             "truncated": bool(preview.notices),
+            **(
+                {
+                    "mode": "reviewed_portability",
+                    "reviewed_report": session.reviewed_report,
+                    "source_read_limit_bytes": source_budget,
+                }
+                if reviewed_portability
+                else {}
+            ),
         }
 
     def _prepare(self, parameters, *, service_action="transfer", **callbacks):
         if service_action != "transfer":
+            if "reviewed_portability" in parameters:
+                raise BackendError("field_invalid")
             return self._prepare_service(service_action, parameters, **callbacks)
-        if "target_server" in parameters or "target_client" in parameters:
+        if set(parameters) - {
+            "source_session_id",
+            "target_profile_id",
+            "project_id",
+            "target_title",
+            "title_policy",
+            "reviewed_portability",
+            "_run_id",
+        }:
+            raise BackendError("field_invalid")
+        reviewed = parameters.get("reviewed_portability", False)
+        if type(reviewed) is not bool:
             raise BackendError("field_invalid")
         selected, source_profile = self._selected(parameters.get("source_session_id"))
         target_profile = self._profile(parameters.get("target_profile_id"))
@@ -430,6 +501,7 @@ class WorkspaceBackend:
             cwd=cwd,
             target_title=title,
             title_policy=policy,
+            **({"reviewed_portability": True, "target_cli_version": "2.2.5"} if reviewed else {}),
         )
         before = _witness(self.catalog_path)
         external = callbacks.pop("prepublication_check", None)
@@ -447,19 +519,27 @@ class WorkspaceBackend:
         with Catalog.open_readonly_existing(self.catalog_path) as catalog:
             resolve_source(catalog, source_profile, selected.ref)
             guard()
-            prepared = prepare_profile_operation(
-                catalog,
-                source_profile,
-                selected.ref,
-                target_profile,
-                request,
-                base_environ=self.base_environ,
-                max_source_bytes=8 * 1024 * 1024,
-                catalog_opener=Catalog.open_readonly_existing,
-                migration_state_home=self.state_home,
-                prepublication_check=guard,
-                **callbacks,
-            )
+            try:
+                prepared = prepare_profile_operation(
+                    catalog,
+                    source_profile,
+                    selected.ref,
+                    target_profile,
+                    request,
+                    base_environ=self.base_environ,
+                    max_source_bytes=self._source_budget(reviewed),
+                    catalog_opener=Catalog.open_readonly_existing,
+                    migration_state_home=self.state_home,
+                    prepublication_check=guard,
+                    **callbacks,
+                )
+            except SourceReadLimitError:
+                if reviewed:
+                    raise BackendError(
+                        "source_read_limit_exceeded", read_limit_bytes=self._source_budget(True)
+                    ) from None
+                raise
+
         try:
             run_id = parameters.get("_run_id")
             state = prepared._state
@@ -789,6 +869,9 @@ class WorkspaceBackend:
     def _resolve_tree(self, parameters):
         from session_migrate.web.runtime_jobs import TreeRuntimeRequest
 
+        reviewed = parameters.get("reviewed_portability", False)
+        if type(reviewed) is not bool:
+            raise BackendError("field_invalid")
         publication_mode = parameters.get("publication_mode", "independent")
         if type(publication_mode) is not str or publication_mode not in {
             "independent",
@@ -843,6 +926,12 @@ class WorkspaceBackend:
             binding_check,
             project_name=project_selection[0],
             publication_mode=publication_mode,
+            **({"reviewed_portability": True} if reviewed else {}),
+            **(
+                {"max_source_bytes": self.max_source_bytes}
+                if self.max_source_bytes is not None
+                else {}
+            ),
         )
 
     async def dispatch(self, action, context, parameters, identifiers):
@@ -911,6 +1000,8 @@ class WorkspaceBackend:
                 "schema_version": 1,
                 "publish_enabled": "publish" in run.scopes,
                 "full_transfer": True,
+                "strict_source_read_limit_bytes": self._source_budget(False),
+                "reviewed_source_read_limit_bytes": self._source_budget(True),
                 "update_available": False,
                 "summary_available": "summary" in self._runtime_actions,
                 "return_new_available": "return_new_full" in self._runtime_actions,
@@ -926,7 +1017,14 @@ class WorkspaceBackend:
         if action == "sessions":
             return await self._read(context, self._list_sessions, context, parameters)
         if action == "preview":
-            return await self._read(context, self._preview, identifiers["session_id"])
+            if parameters.get("reviewed_portability", "false") not in {"true", "false"}:
+                raise BackendError("field_invalid")
+            return await self._read(
+                context,
+                self._preview,
+                identifiers["session_id"],
+                *([True] if parameters.get("reviewed_portability") == "true" else []),
+            )
         if action == "usage":
             return await self._read(
                 context, self._usage_report, context, identifiers["session_id"], parameters
@@ -986,6 +1084,15 @@ class WorkspaceBackend:
                 parameters.get("idempotency_key"),
                 context,
                 service_action=service_confirm.get(action, "transfer"),
+                **(
+                    {
+                        "acknowledge_reviewed_portability": parameters[
+                            "acknowledge_reviewed_portability"
+                        ]
+                    }
+                    if action == "confirm" and "acknowledge_reviewed_portability" in parameters
+                    else {}
+                ),
             ).to_dict()
         if action == "cancel":
             return self.jobs.cancel(identifiers["job_id"], context).to_dict()

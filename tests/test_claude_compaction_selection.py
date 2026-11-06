@@ -208,7 +208,7 @@ def test_native_checkpoint_candidate_remains_preferred_with_metadata_sibling_lea
     assert "native_leaf_pruned" in selection.diagnostics
 
 
-def test_native_batch_sensitive_checkpoint_pruning_is_refused():
+def test_native_batch_sensitive_checkpoint_pruning_recovers_preserved_result():
     rows = topology()
     rows[1]["message"]["id"] = "batch"
     rows[1]["message"]["content"] = [
@@ -230,8 +230,10 @@ def test_native_batch_sensitive_checkpoint_pruning_is_refused():
             ),
         ]
     )
-    with pytest.raises(SessionMigrateError, match="cross-chain tool recovery"):
-        select(rows)
+    selection = select(rows)
+    assert uuids(selection) == ["boundary", "interposed", "summary", "head", "tail", "B"]
+    assert selection.original_leaf_index == 8
+    assert selection.recovered_indices == (2,)
 
 
 def test_native_post_boundary_message_with_retired_parent_uses_kept_tail():
@@ -365,14 +367,16 @@ def test_unrelated_branch_tool_result_is_never_resurrected_by_id():
         select(rows)
 
 
-def test_cross_chain_assistant_batch_is_explicitly_unsupported():
+def test_cross_chain_assistant_batch_shares_native_relinked_parent():
     rows = topology()
     rows[6]["message"]["id"] = "batch"
     rows.append(desktop("assistant", "sibling", "summary", "sibling"))
     rows[-1]["message"]["id"] = "batch"
     rows.append({"type": "last-prompt", "leafUuid": "after"})
-    with pytest.raises(SessionMigrateError, match="cross-chain assistant batch"):
-        select(rows)
+    selection = select(rows)
+    assert uuids(selection)[-2:] == ["after", "sibling"]
+    assert selection.original_leaf_index == 6
+    assert selection.effective_parents[6] == selection.effective_parents[7] == 2
 
 
 def test_other_version_and_no_preservation_decline_without_changing_reader():

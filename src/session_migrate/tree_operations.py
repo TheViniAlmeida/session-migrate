@@ -100,6 +100,7 @@ class _TreeState:
     guard: Callable[[], None]
     resume: bool
     completed: list
+    reviewed_portability: bool = False
 
 
 _SEAL = object()
@@ -236,6 +237,7 @@ def _plan_fingerprint(
     max_source_bytes,
     max_total_bytes,
     publication_mode="native-subagent",
+    reviewed_portability=False,
 ) -> str:
     return _digest(
         {
@@ -250,6 +252,7 @@ def _plan_fingerprint(
             "max_total_bytes": max_total_bytes,
             # Preserve the historical native-parent fingerprint byte for byte.
             **({"publication_mode": publication_mode} if publication_mode == "independent" else {}),
+            **({"reviewed_portability": True} if reviewed_portability else {}),
         }
     )
 
@@ -272,7 +275,9 @@ def _observe(target: Profile, environment: Mapping[str, str], node: dict, *, cwd
     return observed.source_sha256
 
 
-def _node_request(plan, node, target, cwd, model_provider, model, publication_mode):
+def _node_request(
+    plan, node, target, cwd, model_provider, model, publication_mode, reviewed_portability=False
+):
     parent_key = plan.parent_map[node.key]
     return OperationRequest(
         command=OperationKind.IMPORT,
@@ -293,6 +298,7 @@ def _node_request(plan, node, target, cwd, model_provider, model, publication_mo
             else None
         ),
         reviewed_tree_projection=True,
+        reviewed_portability=reviewed_portability,
         target_client=target.client,
         target_server=target.server,
     )
@@ -332,6 +338,7 @@ def _live_source_binding(request, target_values, source_values, profile_context,
         source_values,
         byte_limit,
         on_capture=captures.append,
+        **({"reviewed_portability": True} if request.reviewed_portability else {}),
     )
     if len(captures) != 1 or not captures[0].integrity_valid():
         raise TreeOperationError("Completed tree source lacks a guarded native capture")
@@ -373,8 +380,12 @@ def _validate_journal_nodes(plan, nodes, source_hashes, publication_mode):
             raise TreeOperationError("Tree journal identity differs from the live source plan")
 
 
-def _verify_completed_ledgers(state_home, target, nodes, source_binding):
+def _verify_completed_ledgers(
+    state_home, target, nodes, source_binding, *, reviewed_portability=False
+):
     """A journal declaration alone cannot certify that a node completed."""
+    if type(reviewed_portability) is not bool:
+        raise TreeOperationError("Reviewed portability must be boolean")
     if not nodes:
         return
     from session_migrate.lineage import CompletionReceipt, LineageStore, OperationState
@@ -419,6 +430,54 @@ def _verify_completed_ledgers(state_home, target, nodes, source_binding):
             != (root.st_dev, root.st_ino)
         ):
             raise _CompletedTreeChanged((node["key"],))
+        if reviewed_portability:
+            try:
+                _verify_completed_reviewed_archive(state_home, item, expected)
+            except (SessionMigrateError, OSError, ValueError, TypeError, AttributeError):
+                raise _CompletedTreeChanged((node["key"],)) from None
+
+
+def _verify_completed_reviewed_archive(state_home, item, expected):
+    """Use durable ledger references, never a journal/proposal's retention claim."""
+    from session_migrate.projection_policies import (
+        REVIEWED_ARCHIVE_POLICY_ID,
+        REVIEWED_POLICY_ID,
+    )
+
+    record, receipt = item.record, item.receipt
+    archive_path = (
+        state_home.absolute() / "reviewed-portability" / "v1" / record.operation_id / "source.jsonl"
+    )
+    planned = [
+        ref for ref in record.references if ref.kind == "artifact" and ref.path == str(archive_path)
+    ]
+    observed = [
+        ref
+        for ref in receipt.references
+        if ref.kind == "artifact" and ref.path == str(archive_path)
+    ]
+    if (
+        record.versions.projection_policy not in {REVIEWED_POLICY_ID, REVIEWED_ARCHIVE_POLICY_ID}
+        or record.versions.source_client != "2.1.309"
+        or record.versions.target_client != "2.2.5"
+        or record.transformation is not None
+        or receipt.derivation is not None
+        or len(planned) != 1
+        or len(observed) != 1
+        or planned[0].stage != "planned"
+        or planned[0].availability != "unknown"
+        or observed[0].stage not in {"observed", "verified"}
+        or observed[0].availability != "available"
+        or planned[0].sha256 != expected["authority_sha256"]
+        or observed[0].sha256 != expected["authority_sha256"]
+    ):
+        raise TreeOperationError("Completed reviewed source archive evidence changed")
+    operations.verify_reviewed_source_archive(
+        archive_path,
+        state_home=state_home.absolute(),
+        operation_id=record.operation_id,
+        expected_sha256=expected["authority_sha256"],
+    )
 
 
 def prepare_tree(
@@ -435,6 +494,7 @@ def prepare_tree(
     source_profile: Profile | None = None,
     acknowledge_partial: bool = False,
     publication_mode: str | None = None,
+    reviewed_portability: bool | None = None,
     prepublication_check: Callable[[], None] | None = None,
     max_source_bytes: int = MAX_SOURCE_BYTES,
     max_total_source_bytes: int = MAX_TOTAL_SOURCE_BYTES,
@@ -504,6 +564,20 @@ def prepare_tree(
     if prior is not None and publication_mode is not None and publication_mode != persisted_mode:
         raise TreeOperationError("Tree resume publication mode differs from the original operation")
     publication_mode = persisted_mode or publication_mode or "independent"
+    if reviewed_portability is not None and type(reviewed_portability) is not bool:
+        raise TreeOperationError("Reviewed portability must be an explicit boolean")
+    persisted_reviewed = prior.get("reviewed_portability", False) if prior is not None else False
+    if (
+        prior is not None
+        and reviewed_portability is not None
+        and reviewed_portability != persisted_reviewed
+    ):
+        raise TreeOperationError("Tree resume portability mode differs from the original operation")
+    reviewed_portability = (
+        persisted_reviewed if reviewed_portability is None else reviewed_portability
+    )
+    if reviewed_portability and inventory.source_format != "claude":
+        raise TreeOperationError("Reviewed portability requires a Claude 2.1.309 source")
     source_hashes = _capture_plan(plan, max_source_bytes, max_total_source_bytes)
     fingerprint = _plan_fingerprint(
         plan,
@@ -515,6 +589,7 @@ def prepare_tree(
         max_source_bytes,
         max_total_source_bytes,
         publication_mode,
+        reviewed_portability,
     )
     original_target, original_source = (
         target.fingerprint,
@@ -531,7 +606,16 @@ def prepare_tree(
     def source_binding(key):
         node = planned_nodes[key]
         binding = _live_source_binding(
-            _node_request(plan, node, target, cwd, model_provider, model, publication_mode),
+            _node_request(
+                plan,
+                node,
+                target,
+                cwd,
+                model_provider,
+                model,
+                publication_mode,
+                reviewed_portability,
+            ),
             values,
             source_values,
             profile_context,
@@ -561,13 +645,20 @@ def prepare_tree(
                 max_source_bytes,
                 max_total_source_bytes,
                 publication_mode,
+                reviewed_portability,
             )
             != fingerprint
             or _target_environment(target, base) != values
             or _capture_plan(plan, max_source_bytes, max_total_source_bytes) != source_hashes
         ):
             raise TreeOperationError("Tree sources, profile or options changed; prepare again")
-        _verify_completed_ledgers(state_home, target, completed, source_binding)
+        _verify_completed_ledgers(
+            state_home,
+            target,
+            completed,
+            source_binding,
+            **({"reviewed_portability": True} if reviewed_portability else {}),
+        )
         for node in completed:
             node["title"] = planned_nodes[node["key"]].title
         for completed_node in completed:
@@ -607,7 +698,13 @@ def prepare_tree(
                     ],
                 )
                 completed.append(node)
-        _verify_completed_ledgers(state_home, target, completed, source_binding)
+        _verify_completed_ledgers(
+            state_home,
+            target,
+            completed,
+            source_binding,
+            **({"reviewed_portability": True} if reviewed_portability else {}),
+        )
     completed_keys = {node["key"] for node in completed}
     handles, nodes = [], []
     captured_bytes = 0
@@ -625,7 +722,14 @@ def prepare_tree(
                     "Tree retained source and target artifacts exceed the byte limit"
                 )
             request = _node_request(
-                plan, node, target, cwd, model_provider, model, publication_mode
+                plan,
+                node,
+                target,
+                cwd,
+                model_provider,
+                model,
+                publication_mode,
+                reviewed_portability,
             )
             handle = operations.prepare_operation(
                 request,
@@ -638,6 +742,11 @@ def prepare_tree(
             )
             handles.append((node.key, handle))
             proposal = operations.proposal_metadata(handle).to_dict()
+            if reviewed_portability and (
+                not isinstance(proposal.get("reviewed_portability"), dict)
+                or not isinstance(proposal.get("reviewed_archive"), dict)
+            ):
+                raise TreeOperationError("Reviewed tree node lacks its differences or archive plan")
             snapshot = handle._state.built.source_snapshot
             physical_sha = (
                 snapshot.storage_components[0].authority_sha256
@@ -679,6 +788,14 @@ def prepare_tree(
                     "target_sha256": proposal["target"]["sha256"],
                     "losses": proposal["losses"],
                     "warnings": proposal["warnings"],
+                    **(
+                        {
+                            "reviewed_report": proposal.get("reviewed_portability"),
+                            "reviewed_archive": proposal.get("reviewed_archive"),
+                        }
+                        if reviewed_portability
+                        else {}
+                    ),
                     "coverage": "partial"
                     if handle._state.projection is not None
                     and handle._state.projection.expectation_coverage.value != "unknown"
@@ -686,8 +803,13 @@ def prepare_tree(
                 }
             )
         guard()
-        needs_ack = inventory.completeness == "partial" or any(
-            item.get("losses") or item.get("coverage", "partial") != "verified" for item in nodes
+        needs_ack = (
+            reviewed_portability
+            or inventory.completeness == "partial"
+            or any(
+                item.get("losses") or item.get("coverage", "partial") != "verified"
+                for item in nodes
+            )
         )
         proposal = {
             "schema_version": 1,
@@ -699,6 +821,7 @@ def prepare_tree(
             if all(node.get("coverage", "partial") != "unknown" for node in nodes)
             else "unknown",
             "publication_mode": publication_mode,
+            "reviewed_portability": reviewed_portability,
             "hierarchy_semantics": _hierarchy_semantics(publication_mode),
             "warnings": _publication_warnings(publication_mode),
             "fork_boundary_proven": False,
@@ -745,6 +868,7 @@ def prepare_tree(
             guard,
             _resume,
             completed,
+            reviewed_portability=reviewed_portability,
         )
         return PreparedTree(state, proposal, _seal=_SEAL)
     except BaseException:
@@ -780,6 +904,7 @@ def _result(state, nodes, status) -> TreeResult:
                 else "partial",
                 "projection_scope": "portable_conversation",
                 "publication_mode": state.publication_mode,
+                "reviewed_portability": state.reviewed_portability,
                 "hierarchy_semantics": _hierarchy_semantics(state.publication_mode),
                 "fork_boundary_proven": False,
                 "warnings": _publication_warnings(state.publication_mode),
@@ -868,6 +993,7 @@ def commit_tree(prepared: PreparedTree, *, cancellation=None, progress=None) -> 
             }
             if (
                 current["publication_mode"] != state.publication_mode
+                or current.get("reviewed_portability", False) != state.reviewed_portability
                 or current["plan_sha256"] != state.plan_sha256
                 or current_completed != expected_completed
                 or any(
@@ -883,6 +1009,7 @@ def commit_tree(prepared: PreparedTree, *, cancellation=None, progress=None) -> 
                     "plan_sha256": state.plan_sha256,
                     "target_root": str(state.target.root),
                     "publication_mode": state.publication_mode,
+                    **({"reviewed_portability": True} if state.reviewed_portability else {}),
                     "nodes": [
                         {
                             key: node[key]
@@ -920,7 +1047,14 @@ def commit_tree(prepared: PreparedTree, *, cancellation=None, progress=None) -> 
             node["status"] = "attempting"
             try:
                 receipt = operations.commit_operation(
-                    handle, cancellation=_NodeCancellation(token), progress=progress
+                    handle,
+                    cancellation=_NodeCancellation(token),
+                    progress=progress,
+                    **(
+                        {"acknowledge_reviewed_portability": True}
+                        if state.reviewed_portability and state.acknowledged
+                        else {}
+                    ),
                 )
                 # Inner completion is an existing durable ledger record. Export again
                 # to bind explicit resume to exact bytes and the organizational parent.

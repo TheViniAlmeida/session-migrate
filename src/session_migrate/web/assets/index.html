@@ -58,12 +58,14 @@
             <label for="target-title">Session name <span class="subtle">optional</span></label><input id="target-title" maxlength="1024" autocomplete="off" placeholder="Name this session" disabled>
             <label for="title-policy">Name handling</label><select id="title-policy" disabled><option value="native">Native session title</option><option value="local_alias">Local alias</option></select>
             <p class="subtle">Title support and any conversion losses are checked in the review.</p>
+            <label><input id="reviewed-portability" type="checkbox" disabled> Reviewed conversation portability · Claude 2.1.309 → OpenCode 2.2.5</label>
+            <p class="subtle">Review runtime and order differences before confirming. Reviewed portability saves the original source in a private historical archive after confirmation and before publication.</p>
             <button id="prepare-transfer" class="primary-button" type="submit" disabled>Review transfer <span aria-hidden="true">→</span></button>
           </form>
           <section id="tree-controls" hidden aria-label="Persistent session tree">
             <h3>Persistent session tree</h3>
             <p class="subtle">Use the source profile and destination above. Each declared source is read again before publication. Review the exact selected nodes, titles, relationships and losses.</p>
-            <p class="subtle">Interactive trees support up to 16 nodes and 8 MiB of source transcripts in total, with 4 MiB per node. Use the CLI for larger inventories.</p>
+            <p class="subtle">Interactive trees support up to 16 nodes. Strict mode allows 8 MiB in total and 4 MiB per node; reviewed portability allows 64 MiB in total and per node, unless the launch sets a smaller limit.</p>
             <label for="tree-manifest">Manual inventory declaration</label><input id="tree-manifest" type="file" accept="application/json,.json">
             <p id="tree-file-name" class="subtle">Choose a session-tree-inventory JSON file.</p>
             <label for="tree-source-version">Source client version</label><input id="tree-source-version" maxlength="64" autocomplete="off">
@@ -73,7 +75,8 @@
             <label for="tree-anchor">Anchor node key (empty: root)</label><input id="tree-anchor" maxlength="96" autocomplete="off">
             <label for="tree-edges">Hierarchy edge keys (comma separated; empty: all declared)</label><input id="tree-edges" maxlength="4096" autocomplete="off">
             <label><input id="tree-detach" type="checkbox"> Explicitly detach anchor from omitted parent</label>
-            <label><input id="tree-partial" type="checkbox"> Acknowledge a partial inventory or omitted nodes</label>
+            <label><input id="tree-reviewed-portability" type="checkbox"> Reviewed conversation portability · Claude 2.1.309 → OpenCode 2.2.5</label>
+            <label><input id="tree-partial" type="checkbox"> Acknowledge partial coverage, omitted nodes and reviewed runtime/order differences</label>
             <label for="tree-provider">Model provider</label><input id="tree-provider" maxlength="256" autocomplete="off">
             <label for="tree-model">Model</label><input id="tree-model" maxlength="256" autocomplete="off">
             <button id="prepare-tree" type="button" class="quiet-button" disabled>Review selected tree</button>

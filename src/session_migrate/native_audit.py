@@ -64,7 +64,7 @@ class AuditSelection:
     policy_id: str = "native-active-v1"
 
     def __post_init__(self) -> None:
-        if self.policy_id != "native-active-v1":
+        if self.policy_id not in {"native-active-v1", "claude309-reviewed-conversation-v1"}:
             raise NativeAuditError()
 
 
@@ -186,6 +186,7 @@ def _session_binding(session: Session | None) -> str:
             session.raw_record_count,
             session.model_provider,
             [asdict(event) for event in session.events],
+            *([session.reviewed_report] if session.reviewed_report is not None else []),
         ]
     )
 
@@ -438,8 +439,16 @@ def audit_snapshot(
             raise NativeAuditError()
         from session_migrate.audit_adapters import claude, codex, opencode_v2
 
+        reviewed = selection.policy_id == "claude309-reviewed-conversation-v1"
+        if reviewed and snapshot.source_format is not AgentFormat.CLAUDE:
+            raise NativeAuditError()
         if snapshot.source_format == AgentFormat.CLAUDE:
-            result = claude.audit(_decode_records(snapshot), snapshot, audit_policy)
+            result = claude.audit(
+                _decode_records(snapshot),
+                snapshot,
+                audit_policy,
+                reviewed_portability=reviewed,
+            )
         elif snapshot.source_format == AgentFormat.CODEX:
             result = codex.audit(_decode_records(snapshot), snapshot, audit_policy)
         elif snapshot.source_format == AgentFormat.OPENCODE:

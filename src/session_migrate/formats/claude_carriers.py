@@ -15,7 +15,11 @@ from types import MappingProxyType
 from typing import Any, NoReturn
 
 from session_migrate.errors import SessionMigrateError
-from session_migrate.formats.claude_compaction import CompactionSelection
+from session_migrate.formats.claude_compaction import (
+    PERSISTED_CONTROL_TYPES,
+    CompactionSelection,
+    select_compaction,
+)
 from session_migrate.jsonl import JsonlRecord
 
 POLICY_ID = "claude-2.1.309-closed-historical-carriers-v1"
@@ -160,8 +164,51 @@ def _attachment_shape(attachment: Mapping[str, Any]) -> None:
         _fail("malformed carrier changed flag")
 
 
+def has_truncated_tool_result_context(record: JsonlRecord) -> bool:
+    """Detect SNs' persisted input to an unmodeled file truncation reminder."""
+    value = record.value
+    result = value.get("toolUseResult")
+    file = result.get("file") if isinstance(result, Mapping) else None
+    message = value.get("message")
+    content = message.get("content") if isinstance(message, Mapping) else None
+    return (
+        isinstance(file, Mapping)
+        and file.get("truncatedByTokenCap") is True
+        and type(file.get("filePath")) is str
+        and isinstance(content, list)
+        and any(
+            isinstance(block, Mapping) and block.get("type") == "tool_result" for block in content
+        )
+    )
+
+
+def _validate_assistant_block_order(records: Sequence[JsonlRecord]) -> None:
+    """Decline HZn-sensitive content without assuming echoApiBlockOrder.
+
+    Native xC can concatenate same-ID assistants across tool-result users and
+    metadata. Conservatively inspect every selected member of each batch; a
+    later non-tool block may otherwise move before an earlier tool call.
+    """
+    tools_seen: set[str | int] = set()
+    for record in records:
+        if record.value.get("type") != "assistant":
+            continue
+        message = record.value["message"]
+        batch = message.get("id")
+        key = batch if type(batch) is str and batch else record.index
+        content = message.get("content")
+        blocks = content if isinstance(content, list) else [content]
+        for block in blocks:
+            if isinstance(block, Mapping) and block.get("type") == "tool_use":
+                tools_seen.add(key)
+            elif key in tools_seen:
+                _fail("native assistant block order requires an unsupported runtime flag")
+
+
 def _carrier(record: JsonlRecord) -> tuple[str, ...] | None:
     value = record.value
+    if has_truncated_tool_result_context(record):
+        _fail("persisted tool result truncation context is unsupported")
     kind = value.get("type")
     if type(kind) is not str:
         _fail("malformed active carrier identity")
@@ -301,14 +348,23 @@ def plan_carriers(records: Sequence[JsonlRecord], selection: CompactionSelection
     # This is a transcript control record, not a keyword in arbitrary tool data.
     if any(record.value.get("type") == "content-replacement" for record in records):
         _fail("persisted content replacement is unsupported")
-    for record in records:
-        attachment = record.value.get("attachment")
+    controls = tuple(
+        record.index
+        for record in records
         if (
-            isinstance(attachment, Mapping)
+            isinstance(attachment := record.value.get("attachment"), Mapping)
             and type(attachment.get("type")) is str
-            and attachment["type"]
-            in {"prompt_snapshot", "prompt_render_point", "deferred_tools_record"}
-        ):
+            and attachment["type"] in PERSISTED_CONTROL_TYPES
+        )
+    )
+    if controls:
+        # Only upo's actual pre-boundary deletions are inert. Recompute the
+        # source contract so forged retired/live/preserved fields cannot hide
+        # controls which still reach snapshot, tool or fpo consumers.
+        expected = select_compaction(records)
+        if expected is None or selection != expected:
+            _fail("inconsistent compaction retirement selection")
+        if not set(controls) <= set(expected.retired_indices):
             _fail("persisted prompt or tool control is unsupported")
     if (
         not selection.selected_indices
@@ -327,7 +383,13 @@ def plan_carriers(records: Sequence[JsonlRecord], selection: CompactionSelection
     for child_list in children.values():
         child_list.sort()  # Native Map insertion order is physical source order.
     selected = set(selection.selected_indices)
-    leaf = selection.selected_indices[-1]
+    leaf = selection.original_leaf_index
+    if (
+        leaf not in selected
+        or not selection.parent_chain_indices
+        or leaf != selection.parent_chain_indices[-1]
+    ):
+        _fail("inconsistent original compaction leaf")
     queue = deque([leaf])
     bfs: list[int] = []
     seen = set(selected)
@@ -367,6 +429,7 @@ def plan_carriers(records: Sequence[JsonlRecord], selection: CompactionSelection
         if [index for index in dfs if index in texts] != [index for index in bfs if index in texts]:
             _fail("ambiguous native metadata material order")
     replay = _hoist((*selection.selected_records, *(by_index[index] for index in bfs)))
+    _validate_assistant_block_order(replay)
     diagnostics = ["runtime_hook_transformations_unproven"]
     if bfs:
         diagnostics.append("native_metadata_descendants_restored")

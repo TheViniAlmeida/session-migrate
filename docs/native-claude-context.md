@@ -2,6 +2,10 @@
 
 **Development version:** `0.12.0.dev18` · **Date:** 6 November 2026.
 
+The [unreleased cross-chain work](claude309-cross-chain-recovery.md) documents a
+subsequent bounded extension and the remaining source/destination limitations.
+It does not certify the five private cases or update an existing installation.
+
 This release adds a closed reconstruction contract for supported Claude Code /
 Desktop 2.1.309 compacted transcripts and a separate publication mode for
 human-editable OpenCode 2.2.5 conversations. It does not certify every Desktop

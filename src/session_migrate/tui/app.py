@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from shlex import join, quote
 
@@ -64,6 +65,8 @@ class MigrationApp(App):
         self.preview_offset = 0
         self.preview_history = [0]
         self.expand_tools = False
+        self.reviewed_mode = False
+        self.preview_needs_refresh = False
         self._form_loading = True
         self.completed = False
         self.needs_reconcile = False
@@ -95,6 +98,14 @@ class MigrationApp(App):
                 yield Input(placeholder="XDG_CONFIG_HOME (optional)", id="source-config")
                 yield Input(placeholder="XDG_DATA_HOME (optional)", id="source-data")
                 yield Input(placeholder="Private profiles JSON file (optional)", id="profile-file")
+                yield Checkbox(
+                    "Reviewed conversation portability: compacted Claude 2.1.309 → OpenCode 2.2.5",
+                    id="reviewed-portability",
+                )
+                yield Literal(
+                    "Opt-in before source preview. Runtime differences and the private archive "
+                    "are reviewed before a separate acceptance."
+                )
                 with Horizontal():
                     yield Button("Read profiles", id="read-profiles")
                     yield Button("Save new private file", id="save-profiles")
@@ -210,6 +221,12 @@ class MigrationApp(App):
                 f"Root: {self.source.root}\n"
                 f"HOME: {self.source.environ.get('HOME', '(runtime default)')}\n"
                 f"CLI: {self.source.cli or '(adapter default)'}"
+                + (
+                    f"\nReviewed portability read budget: "
+                    f"{self.controller.source_limit(reviewed_portability=True)} bytes"
+                    if self.reviewed_mode
+                    else ""
+                )
             )
 
     def show(self, stage: str) -> None:
@@ -315,6 +332,24 @@ class MigrationApp(App):
 
     def on_checkbox_changed(self, event: Checkbox.Changed):
         if not self._form_loading:
+            if event.checkbox.id == "reviewed-portability":
+                previous = self.reviewed_mode
+                if not self.invalidate():
+                    with self.prevent(Checkbox.Changed):
+                        event.checkbox.value = previous
+                    return
+                self.reviewed_mode = event.value
+                if self.preview_request:
+                    self.preview_request.cancel()
+                    self.preview_request = None
+                self.snapshot = None
+                self.preview_needs_refresh = True
+                self.query_one("#preview-text", TextArea).load_text("")
+                self.query_one("#confirm", Button).label = "Confirm transfer"
+                self.status(
+                    "Portability mode changed. Open a fresh source preview before preparing."
+                )
+                self.show_source_summary()
             self.on_edit()
             self.show_capabilities()
 
@@ -354,6 +389,8 @@ class MigrationApp(App):
         problem = None
         try:
             title = self.target_title()
+            if self.reviewed_mode and (format != "opencode" or self.value("schema") != "2.2.5"):
+                problem = "Reviewed portability requires an explicit OpenCode 2.2.5 destination."
             if openchamber:
                 from session_migrate.openchamber import validated_server
 
@@ -418,7 +455,10 @@ class MigrationApp(App):
         self.show("preview-step")
         source, ref = self.source, item.ref
         self.preview_request = self.controller.start_preview(
-            source, ref, expand_tools=self.expand_tools
+            source,
+            ref,
+            expand_tools=self.expand_tools,
+            **({"reviewed_portability": True} if self.reviewed_mode else {}),
         )
         self.status("Reading preview…")
 
@@ -430,7 +470,10 @@ class MigrationApp(App):
         self.query_one("#preview-text", TextArea).load_text(text)
         self.query_one("#preview-next", Button).disabled = page.next_offset is None
         self.query_one("#preview-previous", Button).disabled = len(self.preview_history) == 1
-        self.status(" ".join(page.notices) or "Preview ready.")
+        notice = " ".join(page.notices) or "Preview ready."
+        if self.reviewed_mode:
+            notice = "Reviewed historical conversation preview. " + notice
+        self.status(notice)
 
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "tree":
@@ -481,6 +524,8 @@ class MigrationApp(App):
                 self.show("target-step")
                 self.show_capabilities()
             elif id == "prepare" and self.selected and self.source:
+                if self.preview_needs_refresh or (self.reviewed_mode and self.snapshot is None):
+                    raise SessionMigrateError("Open a fresh source preview before preparing.")
                 if not self.value("cwd") or not Path(self.value("cwd")).is_absolute():
                     self.status("Choose an absolute project CWD before preparing.")
                     return
@@ -503,6 +548,15 @@ class MigrationApp(App):
                     if self.query_one("#local-title-alias", Checkbox).value
                     else None,
                     require_native_title=self.query_one("#require-native-title", Checkbox).value,
+                    **(
+                        {
+                            "reviewed_portability": True,
+                            "source_format": AgentFormat.CLAUDE,
+                            "target_format": AgentFormat.OPENCODE,
+                        }
+                        if self.reviewed_mode
+                        else {}
+                    ),
                 )
                 self.token = CancellationToken()
                 source, ref, token = self.source, self.selected.ref, self.token
@@ -521,6 +575,11 @@ class MigrationApp(App):
                         token,
                         lambda progress: self.call_from_thread(
                             self.status, progress_label(progress.stage.value)
+                        ),
+                        **(
+                            {"acknowledge_reviewed_portability": True}
+                            if draft.request.reviewed_portability
+                            else {}
                         ),
                     ),
                 )
@@ -638,6 +697,11 @@ class MigrationApp(App):
                 self.show("review")
                 draft = self.draft
                 self.query_one("#proposal", Literal).set_text(review_text(draft))
+                self.query_one("#confirm", Button).label = (
+                    "Accept displayed differences and transfer"
+                    if draft.request.reviewed_portability
+                    else "Confirm transfer"
+                )
                 self.query_one("#confirm", Button).disabled = False
                 self.status("Ready for confirmation. Back preserves your options.")
             elif result.kind == "commit":
@@ -674,6 +738,7 @@ class MigrationApp(App):
                 self.preview_request = None
                 if preview.status == PreviewStatus.READY:
                     self.snapshot = preview.snapshot
+                    self.preview_needs_refresh = False
                     self.render_preview()
                 else:
                     self.status(preview.error or "Preview cancelled.")
@@ -775,8 +840,26 @@ def review_text(draft: Draft) -> str:
     loss = "\n".join(f"{reason}: {count}" for reason, count in sorted(metadata["losses"].items()))
     warnings = ", ".join(item.get("code", "warning") for item in metadata["warnings"])
     effects = ", ".join(metadata["effects"]) or "No native probe effects reported."
+    reviewed = ""
+    if draft.request.reviewed_portability:
+        reviewed = (
+            "Reviewed conversation portability — runtime equivalence is not asserted.\n"
+            "Original source archive planned before publication:\n"
+            + json.dumps(
+                metadata.get("reviewed_archive"), ensure_ascii=False, sort_keys=True, indent=2
+            )
+            + "\nDisplayed reviewed differences:\n"
+            + json.dumps(
+                metadata.get("reviewed_portability"), ensure_ascii=False, sort_keys=True, indent=2
+            )
+            + "\nSource reviewed report:\n"
+            + json.dumps(
+                source.get("reviewed_report"), ensure_ascii=False, sort_keys=True, indent=2
+            )
+            + "\nAccept the displayed differences only after reviewing this proposal.\n"
+        )
     return (
-        f"Source: {draft.source.name} ({source['format']})\n"
+        reviewed + f"Source: {draft.source.name} ({source['format']})\n"
         f"Source root: {source['root']}\nSource native ID: {source['native_id']}\n"
         f"Source title (native): {source.get('title') or '(untitled)'}\n"
         f"Source counts: {source['events']} / {source['records']} records\n"

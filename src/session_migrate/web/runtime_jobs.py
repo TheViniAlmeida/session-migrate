@@ -100,6 +100,34 @@ class TreeRuntimeRequest:
     binding_check: object = field(default=None, repr=False)
     project_name: str = ""
     publication_mode: str = "independent"
+    reviewed_portability: bool = False
+    max_source_bytes: int | None = None
+
+
+def preparation_timeout(native_action, *, reviewed_portability=False):
+    _require(type(reviewed_portability) is bool, "request_invalid")
+    return 300 if native_action == "tree" and reviewed_portability else 30
+
+
+def _reviewed_tree_budget_policy(request):
+    return {
+        "policy_id": "reviewed-web-budgets-v1",
+        "source_read_limit_bytes": _tree_source_budget(request),
+        "total_source_read_limit_bytes": _tree_source_budget(request),
+        "preparation_timeout_seconds": preparation_timeout("tree", reviewed_portability=True),
+        "metadata_limit_bytes": 1024 * 1024 - 4096,
+    }
+
+
+def _tree_source_budget(request):
+    if request.max_source_bytes is not None:
+        _require(
+            type(request.max_source_bytes) is int
+            and 0 < request.max_source_bytes <= 256 * 1024 * 1024,
+            "request_invalid",
+        )
+        return request.max_source_bytes
+    return 64 * 1024 * 1024 if request.reviewed_portability else SOURCE_BYTES
 
 
 def _tree_binding(request):
@@ -116,6 +144,7 @@ def _tree_binding(request):
         "publication_mode_invalid",
     )
     _require(type(request.detach) is bool and type(request.acknowledge_partial) is bool)
+    _require(type(request.reviewed_portability) is bool)
     value = {
         "source": request.source_profile.fingerprint,
         "target": request.target_profile.fingerprint,
@@ -137,11 +166,31 @@ def _tree_binding(request):
         ).hexdigest(),
         "binding_check_identity": id(request.binding_check),
     }
+    _tree_source_budget(request)
+    if request.reviewed_portability:
+        value["reviewed_portability"] = True
+        value["reviewed_budget_policy"] = _reviewed_tree_budget_policy(request)
+    if request.max_source_bytes is not None:
+        value["max_source_bytes"] = request.max_source_bytes
     return hashlib.sha256(workflow_json(value).encode("utf-8")).hexdigest()
 
 
+def _tree_metadata_json(document, request):
+    if not request.reviewed_portability:
+        return workflow_json(document)
+    try:
+        encoded = json.dumps(
+            document, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        # Keep room for the public proposal wrapper within the existing 1 MiB response cap.
+        _require(len(encoded) <= 1024 * 1024 - 4096, "metadata_limit")
+        return encoded
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise RuntimeJobError("metadata_limit") from None
+
+
 def _tree_metadata(document, request):
-    """Project structure/losses/IDs; exclude paths, transcript bodies and native args."""
+    """Project reviewed metadata without native source paths, transcript bodies or arguments."""
     source, target = document["source"], document["target"]
     return {
         "schema_version": 1,
@@ -149,6 +198,17 @@ def _tree_metadata(document, request):
         "coverage": document.get("coverage", "unknown"),
         "projection_scope": document.get("projection_scope", "portable_conversation"),
         "publication_mode": document.get("publication_mode", request.publication_mode),
+        **(
+            {
+                "reviewed_portability": True,
+                "mode": "reviewed_portability",
+                "source_read_limit_bytes": _tree_source_budget(request),
+                "total_source_read_limit_bytes": _tree_source_budget(request),
+                "budget_policy": _reviewed_tree_budget_policy(request),
+            }
+            if request.reviewed_portability
+            else {}
+        ),
         "hierarchy_semantics": document.get("hierarchy_semantics", "external_organizational_map"),
         "warnings": document.get("warnings", []),
         "fork_boundary_proven": False,
@@ -182,6 +242,8 @@ def _tree_metadata(document, request):
                     "target_sha256",
                     "losses",
                     "warnings",
+                    "reviewed_report",
+                    "reviewed_archive",
                 )
                 if key in node
             }
@@ -411,8 +473,12 @@ def prepare_runtime(
             else (request.source_profile,),
             state_home=request.state_home,
             base_environ=request.base_environ,
-            max_source_bytes=SOURCE_BYTES,
-            max_total_source_bytes=2 * SOURCE_BYTES,
+            max_source_bytes=_tree_source_budget(request),
+            max_total_source_bytes=(
+                _tree_source_budget(request)
+                if request.reviewed_portability
+                else 2 * _tree_source_budget(request)
+            ),
         )
         state.core.load(
             source_profile_id=request.source_profile.id,
@@ -432,10 +498,13 @@ def prepare_runtime(
             model=request.model,
             acknowledge_partial=request.acknowledge_partial,
             publication_mode=request.publication_mode,
+            **({"reviewed_portability": True} if request.reviewed_portability else {}),
             prepublication_check=lambda: _guard(state, prepublication_check),
         )
         state.metadata = _tree_metadata(raw, request)
-        state.core_fingerprint = hashlib.sha256(workflow_json(state.metadata).encode()).hexdigest()
+        state.core_fingerprint = hashlib.sha256(
+            _tree_metadata_json(state.metadata, request).encode()
+        ).hexdigest()
         cancellation.check()
         _guard(state, prepublication_check)
         state.stage = "prepared"
@@ -500,13 +569,36 @@ def runtime_metadata(handle):
     state = _state(handle)
     if state.action == "tree":
         _require(state.stage == "prepared" and state.core is not None)
-        document = workflow_json(state.metadata)
+        document = _tree_metadata_json(state.metadata, state.request)
+        charge = RUNTIME_BUFFER_BYTES
+        if state.request.reviewed_portability:
+            tree = state.core.prepared
+            _require(tree is not None and tree._state is not None)
+            snapshots = {}
+            native_bytes = 0
+            for _, prepared in tree._state.handles:
+                core = prepared._state
+                _require(core is not None)
+                native_bytes += len(core.built.artifact.native_bytes)
+                for snapshot in (
+                    core.built.source_snapshot,
+                    *core.observed_captures,
+                    *core.last_source_capture,
+                ):
+                    if snapshot is not None:
+                        snapshots[id(snapshot)] = snapshot
+            charge = max(
+                charge,
+                len(document.encode("utf-8"))
+                + native_bytes
+                + sum(len(snapshot.raw_bytes) for snapshot in snapshots.values()),
+            )
         return (
             state.metadata["operation_id"],
             document,
             hashlib.sha256(document.encode()).hexdigest(),
             tuple(state.metadata["effects"]),
-            RUNTIME_BUFFER_BYTES,
+            charge,
         )
     _require(state.stage == "prepared" and type(state.core) is PreparedOperation)
     core = proposal_metadata(state.core)
@@ -540,7 +632,8 @@ def commit_runtime(handle, run_id, *, cancellation, progress=None):
         _guard(state, None)
         current = _tree_metadata(state.core.proposal(), state.request)
         _require(
-            hashlib.sha256(workflow_json(current).encode()).hexdigest() == state.core_fingerprint,
+            hashlib.sha256(_tree_metadata_json(current, state.request).encode()).hexdigest()
+            == state.core_fingerprint,
             "source_changed",
         )
         state.stage = "committing"

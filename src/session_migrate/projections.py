@@ -17,18 +17,23 @@ from weakref import WeakKeyDictionary
 
 from session_migrate.canonical import _json_bytes
 from session_migrate.conversion import ConversionArtifact, ConversionOptions
+from session_migrate.errors import SessionMigrateError
 from session_migrate.formats import claude, codex, opencode_v2
 from session_migrate.lineage import Coverage, PolicyVersions
-from session_migrate.model import AgentFormat, Session, TargetFormat
+from session_migrate.model import AgentFormat, EventKind, Session, TargetFormat
 from session_migrate.native_snapshots import NativeSnapshot, SourceCaptureContext
 from session_migrate.projection_policies import (
+    _REVIEWED_POLICIES,
     ExpectedProjection,
     ProjectionError,
     ProjectionPolicy,
+    _native_target_order,
     archived_tools_match,
     expected_from_source,
     native_context_carriers_match,
+    native_context_order_matches,
     require,
+    reviewed_context_order_matches,
     validate_policy_target,
 )
 
@@ -201,6 +206,11 @@ def _session_sha(session: Session) -> str:
             "provider": session.model_provider,
             "title": session.title,
             "records": session.raw_record_count,
+            **(
+                {"reviewed_report": session.reviewed_report}
+                if session.reviewed_report is not None
+                else {}
+            ),
             "events": [
                 {
                     "kind": e.kind.value,
@@ -230,6 +240,7 @@ def _options_dict(options: ConversionOptions) -> dict:
         "title": options.target_title,
         "title_policy": options.title_policy.value if options.title_policy else None,
         "target_parent_id": options.target_parent_id,
+        **({"reviewed_portability": True} if options.reviewed_portability else {}),
     }
 
 
@@ -245,6 +256,11 @@ def _artifact_dict(artifact: ConversionArtifact) -> dict:
         "body": hashlib.sha256(artifact.native_bytes).hexdigest(),
         "records": artifact.native_record_count,
         "title_plan": asdict(artifact.title_plan) if artifact.title_plan else None,
+        **(
+            {"reviewed_archive": artifact.reviewed_archive}
+            if artifact.reviewed_archive is not None
+            else {}
+        ),
     }
 
 
@@ -282,6 +298,14 @@ def _expectation_sha(expected: ExpectedProjection) -> str:
                     "native_context_only": expected.native_context_only,
                 }
                 if expected.native_context_hashes
+                else {}
+            ),
+            **(
+                {
+                    "reviewed_source_order": expected.reviewed_source_order,
+                    "reviewed_target_order": expected.reviewed_target_order,
+                }
+                if expected.policy.policy_id in _REVIEWED_POLICIES
                 else {}
             ),
             "losses": list(expected.loss_counts),
@@ -350,10 +374,30 @@ def _binding(
     )
 
 
-def _observe(snapshot: NativeSnapshot, client: str | None, policy: ProjectionPolicy):
-    from session_migrate.native_audit import AuditPolicy, audit_snapshot, canonicalize_snapshot
+def _observe(
+    snapshot: NativeSnapshot,
+    client: str | None,
+    policy: ProjectionPolicy,
+    *,
+    reviewed_portability: bool = False,
+):
+    from session_migrate.native_audit import (
+        AuditPolicy,
+        AuditSelection,
+        audit_snapshot,
+        canonicalize_snapshot,
+    )
 
-    audit = audit_snapshot(snapshot, audit_policy=AuditPolicy(client_version=client))
+    require(type(reviewed_portability) is bool, "unsupported_policy")
+    if reviewed_portability:
+        require(policy.policy_id in _REVIEWED_POLICIES, "unsupported_policy")
+    audit = audit_snapshot(
+        snapshot,
+        audit_policy=AuditPolicy(client_version=client),
+        selection=AuditSelection("claude309-reviewed-conversation-v1")
+        if reviewed_portability
+        else AuditSelection(),
+    )
     return canonicalize_snapshot(snapshot, audit, policy.canonical_policy)
 
 
@@ -476,7 +520,25 @@ def prepare_projection(
         "unsupported_policy",
     )
     require(versions.target_client == context.target_client, "unsupported_policy")
-    source_obs = _observe(source_snapshot, versions.source_client, policy)
+    reviewed = policy.policy_id in _REVIEWED_POLICIES
+    require(
+        type(options.reviewed_portability) is bool and options.reviewed_portability is reviewed,
+        "options_mismatch",
+    )
+    if reviewed:
+        require(
+            source_snapshot.source_format is AgentFormat.CLAUDE
+            and versions.source_client == "2.1.309"
+            and context.target_format is TargetFormat.OPENCODE
+            and context.target_client == "2.2.5",
+            "unsupported_policy",
+        )
+    source_obs = _observe(
+        source_snapshot,
+        versions.source_client,
+        policy,
+        reviewed_portability=reviewed,
+    )
     require(versions.source_adapter == source_obs.audit.audit_policy_id, "unsupported_policy")
     parsed_source = source_obs.session
     if source_context is not None:
@@ -519,6 +581,10 @@ def prepare_projection(
     artifact_obs = _observe(artifact_snapshot, context.target_client, policy)
     require(archived_tools_match(expected, artifact_snapshot), "semantic_mismatch")
     require(native_context_carriers_match(expected, artifact_snapshot), "semantic_mismatch")
+    require(reviewed_context_order_matches(expected, artifact_snapshot), "semantic_mismatch")
+    require(
+        native_context_order_matches(source_obs, expected, artifact_snapshot), "semantic_mismatch"
+    )
     require(versions.target_adapter == artifact_obs.audit.audit_policy_id, "unsupported_policy")
     require(
         _same_semantics(
@@ -704,7 +770,11 @@ def verify_projection(
     validate_policy_target(prepared._policy, context.target_format, context.target_client)
     semantic = (
         archived_tools_match(prepared.expected, observed_snapshot)
+        and reviewed_context_order_matches(prepared.expected, observed_snapshot)
         and native_context_carriers_match(prepared.expected, observed_snapshot)
+        and native_context_order_matches(
+            prepared._source_observation, prepared.expected, observed_snapshot
+        )
         and _same_semantics(
             prepared.expected.witness.prefix_witness,
             _target_conversation_witness(
@@ -712,6 +782,20 @@ def verify_projection(
             ),
         )
     )
+    if prepared._policy.policy_id in _REVIEWED_POLICIES:
+        from session_migrate.audit_adapters import strict_decode
+
+        archived = {
+            prepared.expected._events[m.call_target_index].tool_call_id
+            for m in prepared.expected.generated_members
+        }
+        try:
+            semantic = semantic and (
+                _native_target_order(strict_decode(observed_snapshot.raw_bytes), archived)
+                == _native_target_order(strict_decode(prepared._body), archived)
+            )
+        except (SessionMigrateError, ValueError, TypeError, KeyError, AttributeError):
+            semantic = False
     metadata = observed.session.session_id == prepared._artifact.session_id and (
         observed.session.cwd == prepared._artifact.cwd
     )
@@ -751,3 +835,77 @@ def verify_projection(
         prepared.expected.metadata_loss_counts,
         reason,
     )
+
+
+def reviewed_portability_report(prepared: PreparedProjection) -> dict | None:
+    """Return the bound, content-free review of these exact prepared bytes."""
+    import copy
+    from collections import defaultdict, deque
+
+    validate_prepared(prepared)
+    if prepared._policy.policy_id not in _REVIEWED_POLICIES:
+        return None
+    report = copy.deepcopy(prepared._source_observation.session.reviewed_report)
+    require(type(report) is dict, "source_mismatch")
+    source = prepared.expected.reviewed_source_order
+    target = prepared.expected.reviewed_target_order
+    positions = defaultdict(deque)
+    for index, unit in enumerate(target):
+        positions[unit].append(index)
+    mapping = [positions[unit].popleft() if positions[unit] else None for unit in source]
+    report["order"] = {
+        "policy": "reviewed-stock-225-effective-order-v1",
+        "source_displayed_sha256": _sha(source),
+        "target_effective_sha256": _sha(target),
+        "changed": source != target,
+        "source_units": len(source),
+        "target_units": len(target),
+        "source_to_target": mapping,
+        "grouped_source_units": sum(index is None for index in mapping),
+    }
+    losses = dict(prepared.expected.loss_counts)
+    for code in (
+        "reviewed_tool_reference_as_data",
+        "reviewed_context_order_changed",
+        "reviewed_tool_error_envelope",
+    ):
+        if losses.get(code):
+            indices = sorted(
+                {
+                    event.provenance.record_index
+                    for event in prepared._source_observation.events
+                    if (
+                        code == "reviewed_tool_reference_as_data"
+                        and any(
+                            type(block) is dict and block.get("type") == "tool_reference"
+                            for block in event.payload.get("content_blocks", [])
+                        )
+                    )
+                    or (
+                        code == "reviewed_tool_error_envelope"
+                        and event.kind is EventKind.TOOL_RESULT
+                        and event.payload.get("is_error") is True
+                    )
+                }
+            )
+            report.setdefault("differences", []).append(
+                {
+                    "code": code,
+                    "count": losses[code],
+                    "record_indices": indices,
+                    **(
+                        {
+                            "description": (
+                                "Stock OpenCode 2.2.5 serializes a failed tool result as JSON DATA "
+                                "containing its ToolError and content fields. The original error "
+                                "message and failure status remain preserved inside that envelope; "
+                                "the provider receives this JSON instead of bare error text."
+                            )
+                        }
+                        if code == "reviewed_tool_error_envelope"
+                        else {}
+                    ),
+                }
+            )
+    report["projection_policy"] = prepared._policy.policy_id
+    return report
