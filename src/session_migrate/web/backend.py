@@ -789,6 +789,12 @@ class WorkspaceBackend:
     def _resolve_tree(self, parameters):
         from session_migrate.web.runtime_jobs import TreeRuntimeRequest
 
+        publication_mode = parameters.get("publication_mode", "independent")
+        if type(publication_mode) is not str or publication_mode not in {
+            "independent",
+            "native-subagent",
+        }:
+            raise BackendError("publication_mode_invalid")
         run_id = parameters.get("_run_id")
         self.registry.check_run(run_id, scope="publish")
         source = self._profile(parameters.get("source_profile_id"))
@@ -836,6 +842,7 @@ class WorkspaceBackend:
             tuple(parameters["hierarchy_keys"]) if "hierarchy_keys" in parameters else None,
             binding_check,
             project_name=project_selection[0],
+            publication_mode=publication_mode,
         )
 
     async def dispatch(self, action, context, parameters, identifiers):

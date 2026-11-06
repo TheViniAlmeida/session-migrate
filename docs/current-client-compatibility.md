@@ -14,6 +14,11 @@ and an independently resumed persistent child with `parentID`. The importer
 requires the parent to exist first. Omitting `parentID` from the list API includes
 children; the ordinary CLI list returns roots only.
 
+Native `parentID` also makes the session a subagent in the stock UI, where the
+human composer is disabled. DEV18 defaults new tree publications to independent
+roots and retains the organization in the migration journal. Legacy resumes keep
+their recorded mode; see the [editable-tree contract](native-claude-context.md).
+
 Codex 0.166.0 has per-content `content_item_metadata.provenance` in addition to
 `content_item_kinds`. Typed provider context remains opaque rather than becoming
 a user message. Literal user text is not filtered by a text-prefix guess.
@@ -48,6 +53,13 @@ added, conflicting content/ancestry and missing active parents remain errors.
 Reviewed trees for OpenCode 2.2.5 can archive genuinely open tool calls through
 a versioned proof of `ImportedIncompleteTool`; explicit losses and typed native
 export verification are required, without granting full-history authority.
+
+DEV18 adds a separate [closed native-context contract](native-claude-context.md)
+for supported preserved compact checkpoints, material carriers and the original
+summary. It requires the exact OpenCode 2.2.5 destination. Unknown active carriers,
+unsupported controls and ambiguous ordering are refused. The five reported real
+compaction sources are not certified; their active-region shapes are still needed.
+This does not change the Codex or Claude writer version contracts above.
 
 ## October contracts retained
 

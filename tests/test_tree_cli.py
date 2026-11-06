@@ -127,7 +127,7 @@ def test_noninteractive_cli_requires_current_confirmation_and_never_publishes(
 
 def test_explicit_cli_yes_publishes_parent_first_and_inspection_never_reimports(workspace, capsys):
     _, options, native, imports, _, _, _, args = workspace
-    assert main([*args, "--yes"]) == 0
+    assert main([*args, "--publication-mode", "native-subagent", "--yes"]) == 0
     proposal, result = documents(capsys.readouterr().out)
     assert result["status"] == "completed" and len(imports) == 3
     assert native[imports[1]]["info"]["parentID"] == imports[0]
@@ -228,3 +228,48 @@ def test_cli_partial_receipt_requires_explicit_resume_and_only_remaining_nodes(
     assert main([*resume_args, "--operation-id", partial["operation_id"], "--yes"]) == 0
     _, resumed = documents(capsys.readouterr().out)
     assert resumed["status"] == "completed" and len(imports) == 3
+
+
+def test_cli_defaults_to_independent_roots_with_private_organizational_map(workspace, capsys):
+    _, options, native, imports, _, _, _, args = workspace
+    assert main([*args, "--yes"]) == 0
+    proposal, result = documents(capsys.readouterr().out)
+    assert proposal["publication_mode"] == result["publication_mode"] == "independent"
+    assert result["hierarchy_semantics"] == "external_organizational_map"
+    assert all(native[native_id]["info"].get("parentID") is None for native_id in imports)
+    assert [node["organizational_parent_target_id"] for node in result["nodes"]] == [
+        None,
+        imports[0],
+        imports[1],
+    ]
+    resume_args = ["resume" if value == "migrate" else value for value in args]
+    assert main([*resume_args, "--operation-id", result["operation_id"], "--yes"]) == 0
+    after, resumed = documents(capsys.readouterr().out)
+    assert after["publication_mode"] == resumed["publication_mode"] == "independent"
+    assert len(imports) == 3
+    assert options["target"].root.is_dir()
+
+
+def test_cli_native_subagent_opt_in_warns_and_resume_mode_switch_is_blocked(workspace, capsys):
+    _, _, native, imports, _, _, _, args = workspace
+    assert main([*args, "--publication-mode", "native-subagent", "--yes"]) == 0
+    proposal, result = documents(capsys.readouterr().out)
+    assert proposal["hierarchy_semantics"] == "native_subagent_parent"
+    assert proposal["warnings"][0]["code"] == "native_subagent_composer_disabled"
+    before = json.dumps(native, sort_keys=True)
+    resume_args = ["resume" if value == "migrate" else value for value in args]
+    assert (
+        main(
+            [
+                *resume_args,
+                "--operation-id",
+                result["operation_id"],
+                "--publication-mode",
+                "independent",
+                "--yes",
+            ]
+        )
+        == 2
+    )
+    assert json.loads(capsys.readouterr().err)["status"] == "blocked"
+    assert json.dumps(native, sort_keys=True) == before and len(imports) == 3

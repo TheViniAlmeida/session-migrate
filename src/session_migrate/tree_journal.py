@@ -84,11 +84,22 @@ def _safe_event(event: dict) -> None:
         "needs_reconcile": {"type", "node_key", "node_operation_id"},
         "finished": {"type"},
     }
-    optional = {"target_sha256"} if event["type"] == "attempting" else set()
+    optional = (
+        {"target_sha256"}
+        if event["type"] == "attempting"
+        else {"publication_mode"}
+        if event["type"] == "prepared"
+        else set()
+    )
     if not fields[event["type"]] <= event.keys() or event.keys() - fields[event["type"]] - optional:
         _fail()
     if event["type"] == "prepared":
         _uuid(event["operation_id"])
+        mode = event.get("publication_mode")
+        if "publication_mode" in event and (
+            type(mode) is not str or mode not in {"independent", "native-subagent"}
+        ):
+            _fail()
         if type(event["nodes"]) is not list or not 1 <= len(event["nodes"]) <= 1024:
             _fail()
         if type(event["target_root"]) is not str or not Path(event["target_root"]).is_absolute():
@@ -103,6 +114,8 @@ def _safe_event(event: dict) -> None:
                 "target_sha256",
                 "operation_id",
             }
+            if mode is not None:
+                required.add("organizational_parent_target_id")
             if (
                 type(node) is not dict
                 or not required <= node.keys()
@@ -133,6 +146,15 @@ def _safe_event(event: dict) -> None:
                 )
             ):
                 _fail()
+            if mode is not None:
+                organizational_parent = node["organizational_parent_target_id"]
+                if (
+                    organizational_parent is not None
+                    and (type(organizational_parent) is not str or organizational_parent not in ids)
+                ) or node["parent_target_id"] != (
+                    organizational_parent if mode == "native-subagent" else None
+                ):
+                    _fail()
             if (
                 type(node["operation_id"]) is not str
                 or not node["operation_id"]
@@ -344,7 +366,17 @@ def _inspect(journal: TreeJournal, operation_id: str) -> dict:
     if not journal.events:
         _fail()
     prepared = journal.events[0]
-    nodes = {node["key"]: {**node, "status": "unattempted"} for node in prepared["nodes"]}
+    publication_mode = prepared.get("publication_mode", "native-subagent")
+    nodes = {
+        node["key"]: {
+            **node,
+            "organizational_parent_target_id": node.get(
+                "organizational_parent_target_id", node["parent_target_id"]
+            ),
+            "status": "unattempted",
+        }
+        for node in prepared["nodes"]
+    }
     for event in journal.events[1:]:
         key = event.get("node_key")
         if key is None:
@@ -382,6 +414,13 @@ def _inspect(journal: TreeJournal, operation_id: str) -> dict:
         "schema_version": 1,
         "operation_id": operation_id,
         "status": status,
+        "publication_mode": publication_mode,
+        "hierarchy_semantics": (
+            "external_organizational_map"
+            if publication_mode == "independent"
+            else "native_subagent_parent"
+        ),
+        "fork_boundary_proven": False,
         "plan_sha256": prepared["plan_sha256"],
         "target_root": prepared["target_root"],
         "nodes": list(nodes.values()),

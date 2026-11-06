@@ -4,6 +4,11 @@
 **source-reader contract**, not certification of Claude Desktop's native replay,
 writer, session nesting metadata, token accounting or complete internal context.
 
+This page records the DEV17 contract. DEV18 adds a separately validated
+[native-context reader and independent tree publication](native-claude-context.md).
+Its closed carrier checks supersede the topology-only limitation below for supported
+inputs; the original anonymized fixture and five real cases remain uncertified.
+
 ## What changed
 
 The tree inventory recognizes a transcript whose exact source version is

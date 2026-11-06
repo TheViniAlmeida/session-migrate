@@ -99,6 +99,7 @@ class TreeRuntimeRequest:
     hierarchy_keys: tuple[str, ...] | None = None
     binding_check: object = field(default=None, repr=False)
     project_name: str = ""
+    publication_mode: str = "independent"
 
 
 def _tree_binding(request):
@@ -109,6 +110,11 @@ def _tree_binding(request):
     _require(request.cwd.is_dir(), "request_invalid")
     _require(type(request.manifest) is dict, "request_invalid")
     _require(request.mode in {"single", "subtree", "full_tree"}, "request_invalid")
+    _require(
+        type(request.publication_mode) is str
+        and request.publication_mode in {"independent", "native-subagent"},
+        "publication_mode_invalid",
+    )
     _require(type(request.detach) is bool and type(request.acknowledge_partial) is bool)
     value = {
         "source": request.source_profile.fingerprint,
@@ -118,6 +124,7 @@ def _tree_binding(request):
         "version": request.source_client_version,
         "manifest": request.manifest,
         "mode": request.mode,
+        "publication_mode": request.publication_mode,
         "anchor": request.anchor,
         "detach": request.detach,
         "partial": request.acknowledge_partial,
@@ -141,7 +148,9 @@ def _tree_metadata(document, request):
         "native_action": "tree",
         "coverage": document.get("coverage", "unknown"),
         "projection_scope": document.get("projection_scope", "portable_conversation"),
-        "hierarchy_semantics": document.get("hierarchy_semantics", "organizational_parent"),
+        "publication_mode": document.get("publication_mode", request.publication_mode),
+        "hierarchy_semantics": document.get("hierarchy_semantics", "external_organizational_map"),
+        "warnings": document.get("warnings", []),
         "fork_boundary_proven": False,
         "operation_id": document["operation_id"],
         "status": document["status"],
@@ -167,6 +176,7 @@ def _tree_metadata(document, request):
                     "loss_details_available",
                     "target_id",
                     "parent_target_id",
+                    "organizational_parent_target_id",
                     "operation_id",
                     "source_sha256",
                     "target_sha256",
@@ -421,6 +431,7 @@ def prepare_runtime(
             model_provider=request.model_provider,
             model=request.model,
             acknowledge_partial=request.acknowledge_partial,
+            publication_mode=request.publication_mode,
             prepublication_check=lambda: _guard(state, prepublication_check),
         )
         state.metadata = _tree_metadata(raw, request)
@@ -540,6 +551,9 @@ def commit_runtime(handle, run_id, *, cancellation, progress=None):
             "native_action": "tree",
             "operation_id": result["operation_id"],
             "status": result["status"],
+            "publication_mode": result["publication_mode"],
+            "hierarchy_semantics": result["hierarchy_semantics"],
+            "fork_boundary_proven": False,
             "nodes": [
                 {
                     key: node[key]
@@ -547,6 +561,7 @@ def commit_runtime(handle, run_id, *, cancellation, progress=None):
                         "key",
                         "target_id",
                         "parent_target_id",
+                        "organizational_parent_target_id",
                         "operation_id",
                         "status",
                     )

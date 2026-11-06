@@ -139,6 +139,7 @@ class TreeWorkflow:
         model_provider,
         model,
         acknowledge_partial=False,
+        publication_mode=None,
         operation_id=None,
         resume=False,
         prepublication_check=None,
@@ -162,6 +163,7 @@ class TreeWorkflow:
             base_environ=self.environ,
             source_profile=self.source,
             acknowledge_partial=acknowledge_partial,
+            publication_mode=publication_mode,
             prepublication_check=prepublication_check,
             **self.limits,
         )
@@ -267,6 +269,14 @@ def add_tree_commands(subparsers):
         command.add_argument(
             "--detach", action="store_true", help="explicitly detach the selected anchor"
         )
+        command.add_argument(
+            "--publication-mode",
+            choices=("independent", "native-subagent"),
+            help=(
+                "independent roots by default; resume recovers the saved mode. "
+                "native-subagent sets parentID and disables the child composer in OpenCode 2.2.5"
+            ),
+        )
         command.add_argument("--acknowledge-partial", action="store_true")
         command.add_argument("--operation-id", required=name == "resume")
         if name != "review":
@@ -327,6 +337,7 @@ def run_tree_command(args, parser):
             model=args.model,
             operation_id=args.operation_id,
             acknowledge_partial=args.acknowledge_partial,
+            publication_mode=args.publication_mode,
             resume=args.tree_command == "resume",
         )
         print(json.dumps(result, indent=2, sort_keys=True))

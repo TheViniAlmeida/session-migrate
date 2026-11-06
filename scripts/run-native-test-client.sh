@@ -41,6 +41,9 @@ case "$client" in
     isolate_network=1
     tests=(tests/test_claude_nov_native.py)
     ;;
+  claude-context)
+    tests=(tests/test_claude_compaction_native.py)
+    ;;
   codex)
     tests=(
       tests/test_claude_codex_corpus_native.py::test_exact_codex_cold_reloads_sanitized_corpus_source
@@ -145,6 +148,7 @@ case "$client" in
       tests+=(
         tests/test_opencode_v22_native.py
         tests/test_tree_operations.py::test_stock_225_three_levels_cold_export_and_child_collision
+        tests/test_tree_publication_mode.py::test_stock_225_default_independent_publishes_three_visible_roots
       )
     fi
     ;;

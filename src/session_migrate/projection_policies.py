@@ -23,6 +23,10 @@ from session_migrate.canonical import (
     iter_canonical_units,
 )
 from session_migrate.errors import SessionMigrateError
+from session_migrate.formats.context_text import (
+    SYNTHETIC_TEXT_BLOCK_TYPE,
+    is_synthetic_text_context,
+)
 from session_migrate.lineage import Coverage
 from session_migrate.model import Event, EventKind, Role, TargetFormat
 from session_migrate.witnesses import SequenceWitness
@@ -32,6 +36,10 @@ if TYPE_CHECKING:
 
 PORTABLE_POLICY_ID = "portable-projection-v1"
 OPENCODE_ARCHIVE_POLICY_ID = "portable-opencode-225-archive-v1"
+NATIVE_CONTEXT_POLICY_ID = "portable-native-context-225-v1"
+NATIVE_CONTEXT_ARCHIVE_POLICY_ID = "portable-native-context-225-archive-v1"
+_NATIVE_CONTEXT_POLICIES = {NATIVE_CONTEXT_POLICY_ID, NATIVE_CONTEXT_ARCHIVE_POLICY_ID}
+_ARCHIVE_POLICIES = {OPENCODE_ARCHIVE_POLICY_ID, NATIVE_CONTEXT_ARCHIVE_POLICY_ID}
 INCOMPLETE_TOOL_MESSAGE = "Imported call had no completed result"
 INCOMPLETE_TOOL_RULE = "opencode-225-incomplete-tool-error-v1"
 
@@ -69,7 +77,8 @@ class ProjectionPolicy:
 
     def __post_init__(self) -> None:
         require(
-            self.policy_id in {PORTABLE_POLICY_ID, OPENCODE_ARCHIVE_POLICY_ID},
+            self.policy_id
+            in {PORTABLE_POLICY_ID, OPENCODE_ARCHIVE_POLICY_ID, *_NATIVE_CONTEXT_POLICIES},
             "unsupported_policy",
         )
         require(type(self.canonical_policy) is CanonicalPolicy, "unsupported_policy")
@@ -95,7 +104,7 @@ def policy_from_id(policy_id: str) -> ProjectionPolicy:
 
 def validate_policy_target(policy: ProjectionPolicy, target: TargetFormat, client: str) -> None:
     policy.__post_init__()
-    if policy.policy_id == OPENCODE_ARCHIVE_POLICY_ID:
+    if policy.policy_id in {OPENCODE_ARCHIVE_POLICY_ID, *_NATIVE_CONTEXT_POLICIES}:
         require(target is TargetFormat.OPENCODE and client == "2.2.5", "unsupported_policy")
 
 
@@ -134,10 +143,32 @@ class ExpectedProjection:
     relation_complete: bool
     preserves_content: bool
     _events: tuple[Event, ...]
+    native_context_hashes: tuple[str, ...] = ()
+    native_context_only: bool = False
 
     @property
     def events(self) -> tuple[Event, ...]:
         return copy.deepcopy(self._events)
+
+
+def native_context_carriers_match(expected: ExpectedProjection, snapshot) -> bool:
+    """Bind typed context verbatim and prohibit a new replay cut in active-only output."""
+    if not expected.native_context_hashes:
+        return True
+    from session_migrate.formats.context_text import is_marked_synthetic_text
+
+    try:
+        bundle = strict_decode(snapshot.raw_bytes)
+        messages = bundle["messages"]
+        if expected.native_context_only and any(m.get("type") == "compaction" for m in messages):
+            return False
+        contexts = [m for m in messages if is_marked_synthetic_text(m)]
+        return (
+            tuple(hashlib.sha256(_json_bytes(m["text"])).hexdigest() for m in contexts)
+            == expected.native_context_hashes
+        )
+    except (SessionMigrateError, ValueError, TypeError, KeyError, AttributeError):
+        return False
 
 
 def archived_tools_match(expected: ExpectedProjection, snapshot) -> bool:
@@ -146,7 +177,7 @@ def archived_tools_match(expected: ExpectedProjection, snapshot) -> bool:
     The expected calls come only from independently derived generated bindings.
     A same-text ordinary error, or a marker moved to another call, is not proof.
     """
-    if expected.policy.policy_id != OPENCODE_ARCHIVE_POLICY_ID:
+    if expected.policy.policy_id not in {OPENCODE_ARCHIVE_POLICY_ID, *_NATIVE_CONTEXT_POLICIES}:
         return True
     try:
         bundle = strict_decode(snapshot.raw_bytes)
@@ -237,8 +268,12 @@ def expected_from_source(
     policy = policy if policy is not None else ProjectionPolicy()
     require(type(policy) is ProjectionPolicy, "unsupported_policy")
     policy.__post_init__()
-    archive = policy.policy_id == OPENCODE_ARCHIVE_POLICY_ID
-    require(not archive or target_format is TargetFormat.OPENCODE, "unsupported_policy")
+    archive = policy.policy_id in _ARCHIVE_POLICIES
+    native_context = policy.policy_id in _NATIVE_CONTEXT_POLICIES
+    require(
+        not (archive or native_context) or target_format is TargetFormat.OPENCODE,
+        "unsupported_policy",
+    )
     require(
         type(target_format) is TargetFormat
         and target_format
@@ -250,6 +285,19 @@ def expected_from_source(
         "unsupported_target",
     )
     events = source.events
+    native_context_hashes = ()
+    native_context_only = False
+    if native_context:
+        from session_migrate.formats.claude_compaction import POLICY_ID as source_context_policy
+
+        native_context_hashes = tuple(
+            hashlib.sha256(_json_bytes(event.text)).hexdigest()
+            for event in events
+            if is_synthetic_text_context(event)
+        )
+        native_context_only = any(
+            event.payload.get("native_context_policy") == source_context_policy for event in events
+        )
     original = tuple(iter_canonical_units(events, policy.canonical_policy))
     tool_issues = {
         "missing_tool_name",
@@ -371,6 +419,22 @@ def expected_from_source(
         elif e.kind is EventKind.TOOL_RESULT:
             if target_format is not TargetFormat.OPENCODE:
                 emit(result_event(e, index, calls[e.tool_call_id][1]), index)
+        elif native_context and is_synthetic_text_context(e):
+            if (
+                set(e.payload) - {"block_type"}
+                or e.tool_name is not None
+                or e.tool_call_id is not None
+            ):
+                losses.add("context_payload_omitted")
+            emit(
+                replace(
+                    e,
+                    tool_name=None,
+                    tool_call_id=None,
+                    payload={"block_type": SYNTHETIC_TEXT_BLOCK_TYPE},
+                ),
+                index,
+            )
         elif (
             e.kind is EventKind.CONTEXT
             and e.role is Role.USER
@@ -416,10 +480,15 @@ def expected_from_source(
         while cursor < len(projected):
             first = projected[cursor]
             end = cursor + 1
-            if first.role is Role.USER and first.kind in (EventKind.MESSAGE, EventKind.CONTEXT):
+            if (
+                first.role is Role.USER
+                and first.kind in (EventKind.MESSAGE, EventKind.CONTEXT)
+                and not (native_context and is_synthetic_text_context(first))
+            ):
                 while (
                     end < len(projected)
                     and projected[end].role is Role.USER
+                    and not (native_context and is_synthetic_text_context(projected[end]))
                     and (
                         projected[end].kind in (EventKind.MESSAGE, EventKind.CONTEXT)
                         and projected[end].provenance.record_index == first.provenance.record_index
@@ -572,4 +641,6 @@ def expected_from_source(
         source.coverage is Coverage.VERIFIED,
         not loss_counts and source.fidelity is Coverage.VERIFIED,
         tuple(copy.deepcopy(projected)),
+        native_context_hashes=native_context_hashes,
+        native_context_only=native_context_only,
     )

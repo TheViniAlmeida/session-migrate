@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from session_migrate.errors import SessionMigrateError
+from session_migrate.formats.context_text import is_marked_synthetic_text, synthetic_text_metadata
 
 _VERSION = re.compile(r"(?:opencode v)?(2\.[012]\.\d+(?:[-+][0-9A-Za-z.-]+)?)")
 VALIDATED_VERSION = "2.0.23"
@@ -47,6 +48,7 @@ def from_legacy(
     dropped: Any,
     *,
     tool_content: dict[str, list[dict[str, Any]]] | None = None,
+    context_text: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     old = bundle["info"]
     release = version(old.get("version", ""))
@@ -55,8 +57,24 @@ def from_legacy(
     messages: list[dict[str, Any]] = []
     compact: set[str] = set()
     for message in bundle["messages"]:
-        info, parts = message["info"], message["parts"]
+        info = message["info"]
         common = {"id": info["id"], "time": info["time"]}
+        if context_text is not None and info["id"] in context_text:
+            if release != "2.2.5":
+                raise SessionMigrateError(
+                    "Synthetic context requires the exact OpenCode 2.2.5 target"
+                )
+            ref = {"id": info["model"]["modelID"], "providerID": info["model"]["providerID"]}
+            messages.append(
+                {
+                    **common,
+                    "type": "synthetic",
+                    "text": context_text[info["id"]],
+                    "metadata": synthetic_text_metadata(),
+                }
+            )
+            continue
+        parts = message["parts"]
         if info["role"] == "user":
             ref = {"id": info["model"]["modelID"], "providerID": info["model"]["providerID"]}
             if any(part["type"] == "compaction" for part in parts):
@@ -288,6 +306,23 @@ def _to_legacy(bundle: dict[str, Any]) -> dict[str, Any]:
             raise SessionMigrateError("OpenCode v2 message is missing time")
         opencode._iso_from_ms(clock.get("created"))
         kind = message.get("type")
+        if is_marked_synthetic_text(message):
+            # A validation-only legacy carrier; parse_import_bytes consults the
+            # original native envelope before creating any portable event.
+            output.append(
+                {
+                    "info": {
+                        "id": mid,
+                        "sessionID": info["id"],
+                        "role": "user",
+                        "time": clock,
+                        "agent": "build",
+                        "model": {"modelID": model["id"], "providerID": model["providerID"]},
+                    },
+                    "parts": [part({"type": "text", "text": message["text"]}, mid)],
+                }
+            )
+            continue
         if kind == "model-switched":
             model = message["model"]
             continue
@@ -552,7 +587,8 @@ def loss_events(bundle: dict[str, Any]) -> list[Any]:
     for index, message in enumerate(bundle["messages"]):
         reasons = []
         kind = message.get("type")
-        if kind not in {"user", "assistant", "compaction"}:
+        marked_context = is_marked_synthetic_text(message)
+        if kind not in {"user", "assistant", "compaction"} and not marked_context:
             reasons.append(f"opencode_v2_{kind}_record")
         elif kind == "compaction" and message.get("status") != "completed":
             reasons.append(f"opencode_v2_compaction_{message.get('status')}")
@@ -575,8 +611,12 @@ def loss_events(bundle: dict[str, Any]) -> list[Any]:
             "retry",
             "error",
         ):
+            if name == "metadata" and marked_context:
+                continue
             if message.get(name):
                 reasons.append(f"opencode_v2_{name}")
+        if marked_context and "description" in message:
+            reasons.append("opencode_v2_synthetic_description")
         for name in ("agents", "skills"):
             if message.get(name):
                 reasons.append(f"opencode_v2_user_{name}")

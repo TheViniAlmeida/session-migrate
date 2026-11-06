@@ -47,7 +47,12 @@ def topology():
             "parentUuid": "boundary",
             "sessionId": "fixture-session",
             "version": "2.1.309",
-            "attachment": {"type": "synthetic"},
+            "attachment": {
+                "type": "hook_system_message",
+                "content": "UI note",
+                "hookName": "Fixture",
+                "hookEvent": "SessionStart",
+            },
         },
         desktop("user", "summary", "interposed", "source summary", isCompactSummary=True),
         desktop("assistant", "after", "summary", "after compaction"),
@@ -55,13 +60,14 @@ def topology():
     return rows
 
 
-@pytest.mark.parametrize("explicit_leaf", [False, True])
-def test_all_uuids_only_parent_does_not_authorize_skipping_or_relinking(explicit_leaf, tmp_path):
+@pytest.mark.parametrize("checkpoint_present", [False, True])
+def test_all_uuids_membership_cannot_supply_a_missing_persisted_node(checkpoint_present, tmp_path):
     rows = topology()
-    if explicit_leaf:
+    rows[3]["compactMetadata"]["preservedMessages"]["uuids"] = ["head", "unpersisted"]
+    if checkpoint_present:
         rows.append({"type": "last-prompt", "leafUuid": "after"})
     original = copy.deepcopy(rows)
-    with pytest.raises(SessionMigrateError, match="missing parent UUID"):
+    with pytest.raises(SessionMigrateError, match="missing preservation UUID"):
         _parse(rows)
     audit = audit_rows(rows, tmp_path)
     assert audit.coverage is Coverage.UNKNOWN

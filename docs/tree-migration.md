@@ -133,3 +133,12 @@ call's ID/name/input and verifies the raw marker after import. Review the
 `tool_call:v2_incomplete_archived` counts before acknowledgement. This does not
 repair missing source parents or permit ambiguous tool identities; source
 UNKNOWN coverage and recovery limits remain in force.
+
+## Publication mode (DEV18)
+
+New operations default to `--publication-mode independent`: targets have no
+native parentID and retain organizational relations in the external migration map.
+`native-subagent` is explicit and disables direct human composing in stock UI.
+Resume follows the persisted mode, including old native-subagent journals.
+See [editable trees and native context](native-claude-context.md) for the UI,
+public fork, peer-messaging limits and closed source contract.

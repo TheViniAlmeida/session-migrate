@@ -172,12 +172,18 @@ def audit(records, snapshot, policy) -> AdapterResult:
     ):
         taxonomy.issue("unsupported_client_version", 0)
     duplicate_indices = set()
+    context_selection = None
+    carriers = None
     try:
         logical_records, duplicate_indices, _ambiguous_cwd = parser._collapse_desktop_envelopes(
             records
         )
+        context_selection = parser.select_compaction(logical_records)
+        if context_selection is not None:
+            carriers = parser.plan_carriers(logical_records, context_selection)
     except (SessionMigrateError, TypeError, ValueError, RecursionError):
         taxonomy.issue("invalid_graph", 0)
+        context_selection = carriers = None
         logical_records = records
     for index in sorted(duplicate_indices):
         taxonomy.issue("duplicate_envelope_unproven", index)
@@ -191,46 +197,68 @@ def audit(records, snapshot, policy) -> AdapterResult:
                 taxonomy.issue("invalid_graph", record.index)
             else:
                 by_uuid[uid] = record
-    # Check all physical nodes, including inactive branches, independently of selection.
-    finished = set()
-    for uid, record in by_uuid.items():
-        parent = record.value.get("parentUuid")
-        logical = record.value.get("logicalParentUuid")
-        if any(
-            p is not None and (type(p) is not str or p not in by_uuid) for p in (parent, logical)
-        ):
-            taxonomy.issue("invalid_graph", record.index)
-        seen = set()
-        cursor = uid
-        while type(cursor) is str and cursor in by_uuid and cursor not in finished:
-            if cursor in seen:
-                declared_loop = any(
-                    node.value.get("subtype") == "compact_boundary"
-                    and type(node.value.get("logicalParentUuid")) is str
-                    and parser._valid_preserved_compaction_back_edge(
-                        node, node.value["logicalParentUuid"], seen, by_uuid
+    if context_selection is None:
+        # Check all physical nodes, including inactive branches, independently of selection.
+        finished = set()
+        for uid, record in by_uuid.items():
+            parent = record.value.get("parentUuid")
+            logical = record.value.get("logicalParentUuid")
+            if any(
+                p is not None and (type(p) is not str or p not in by_uuid)
+                for p in (parent, logical)
+            ):
+                taxonomy.issue("invalid_graph", record.index)
+            seen = set()
+            cursor = uid
+            while type(cursor) is str and cursor in by_uuid and cursor not in finished:
+                if cursor in seen:
+                    declared_loop = any(
+                        node.value.get("subtype") == "compact_boundary"
+                        and type(node.value.get("logicalParentUuid")) is str
+                        and parser._valid_preserved_compaction_back_edge(
+                            node, node.value["logicalParentUuid"], seen, by_uuid
+                        )
+                        for node in (by_uuid[item] for item in seen)
                     )
-                    for node in (by_uuid[item] for item in seen)
+                    if not declared_loop:
+                        taxonomy.issue("invalid_graph", record.index)
+                    break
+                seen.add(cursor)
+                current = by_uuid[cursor].value
+                cursor = current.get("parentUuid") or (
+                    current.get("logicalParentUuid")
+                    if current.get("type") == "system"
+                    and current.get("subtype") == "compact_boundary"
+                    else None
                 )
-                if not declared_loop:
-                    taxonomy.issue("invalid_graph", record.index)
-                break
-            seen.add(cursor)
-            current = by_uuid[cursor].value
-            cursor = current.get("parentUuid") or (
-                current.get("logicalParentUuid")
-                if current.get("type") == "system" and current.get("subtype") == "compact_boundary"
-                else None
-            )
-            if type(cursor) is not str:
-                break
-        finished.update(seen)
-    try:
-        active = parser._active_conversation_records(list(records))
-        selected = tuple(record.index for record in active)
-    except (SessionMigrateError, TypeError):
-        taxonomy.issue("invalid_graph", 0)
-        selected = ()
+                if type(cursor) is not str:
+                    break
+            finished.update(seen)
+        try:
+            active = parser._active_conversation_records(list(records))
+            selected = tuple(record.index for record in active)
+        except (SessionMigrateError, TypeError):
+            taxonomy.issue("invalid_graph", 0)
+            selected = ()
+    else:
+        # The native selection validated identity, cycles and all effective links.
+        # Bind that separate graph; the physical rows and grammar accounting below
+        # stay intact, including the original logical-parent/memory metadata.
+        selected = carriers.replay_indices
+        taxonomy.structure.add(
+            {
+                "context_policy": context_selection.policy_id,
+                "carrier_policy": carriers.policy_id,
+                "carrier_indices": tuple(carriers.context_text),
+                "carrier_diagnostics": carriers.diagnostics,
+                "boundary": context_selection.boundary_index,
+                "summary": context_selection.summary_index,
+                "preserved": context_selection.preserved_indices,
+                "retired": context_selection.retired_indices,
+                "effective_parents": sorted(context_selection.effective_parents.items()),
+                "diagnostics": context_selection.diagnostics,
+            }
+        )
     selected_set = set(selected)
     selected_ordinals = {index: ordinal for ordinal, index in enumerate(selected)}
     selected_session_ids = {
@@ -250,7 +278,7 @@ def audit(records, snapshot, policy) -> AdapterResult:
             taxonomy.issue("compaction_unproven", record.index)
             taxonomy.loss_records.add(record.index)
         metadata = value.get("compactMetadata")
-        if type(metadata) is dict and "preservedSegment" in metadata:
+        if context_selection is None and type(metadata) is dict and "preservedSegment" in metadata:
             segment = metadata.get("preservedSegment")
             messages = metadata.get("preservedMessages")
             declared = (
@@ -301,6 +329,11 @@ def audit(records, snapshot, policy) -> AdapterResult:
                 "parent": by_uuid[parent].index
                 if type(parent) is str and parent in by_uuid
                 else None,
+                **(
+                    {"effective_parent": context_selection.effective_parents.get(record.index)}
+                    if context_selection is not None
+                    else {}
+                ),
                 "selected_ordinal": selected_ordinals.get(record.index),
                 "kind": value.get("type"),
                 "compacted": value.get("isCompactSummary") is True,
@@ -320,7 +353,7 @@ def audit(records, snapshot, policy) -> AdapterResult:
     return AdapterResult(
         taxonomy,
         selected,
-        "claude-jsonl-v1",
+        "claude-309-native-context-v1" if context_selection is not None else "claude-jsonl-v1",
         client if client in parser.VALIDATED_CLAUDE_VERSIONS else None,
         session,
     )

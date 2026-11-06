@@ -68,6 +68,8 @@
             <p id="tree-file-name" class="subtle">Choose a session-tree-inventory JSON file.</p>
             <label for="tree-source-version">Source client version</label><input id="tree-source-version" maxlength="64" autocomplete="off">
             <label for="tree-mode">Selection</label><select id="tree-mode"><option value="single">Single persistent node</option><option value="subtree" selected>Subtree</option><option value="full_tree">Complete tree</option></select>
+            <label for="tree-publication-mode">Publication mode</label><select id="tree-publication-mode"><option value="independent" selected>Independent sessions — editable</option><option value="native-subagent">Native subagents — child composers disabled in stock UI</option></select>
+            <p class="subtle">Independent sessions keep their hierarchy in an external organizational map. Neither mode proves a native fork boundary or provisions peer communication.</p>
             <label for="tree-anchor">Anchor node key (empty: root)</label><input id="tree-anchor" maxlength="96" autocomplete="off">
             <label for="tree-edges">Hierarchy edge keys (comma separated; empty: all declared)</label><input id="tree-edges" maxlength="4096" autocomplete="off">
             <label><input id="tree-detach" type="checkbox"> Explicitly detach anchor from omitted parent</label>

@@ -8,6 +8,25 @@ O histórico do projeto original está em [CHANGELOG.md](CHANGELOG.md).
 Versões `.dev` são pré-releases do fork: integração na `next` não significa
 publicação no PyPI nem atualização automática das instalações existentes.
 
+## 06/11/2026 — DEV18
+
+- Acrescentado contrato fechado de contexto nativo Claude 2.1.309, com seleção
+  imutável, carriers tipados e recusa de controles/autoridade sem prova.
+- A summary original e os contextos suportados são transportados como mensagens
+  sintéticas históricas, sem criar resumo ou checkpoint que corte contexto anterior.
+- Árvores novas usam sessões independentes/editáveis por padrão; mapa organizacional
+  fica separado de parentID. Modo native-subagent é opt-in; resume legado não muda modo.
+- TUI/web validam e vinculam publication_mode. Provas de UI stock, fork público e
+  recusa de comunicação entre peers são separadas das provas de API e histórico.
+- As cinco fontes privadas de compactação não estão certificadas; faltam shapes
+  do recorte ativo. Falha do runtime real de schema continua não reproduzida no stock.
+- Entrega do contrato validado autorizada com o diagnóstico real registrado como
+  pendência; essa decisão preserva as recusas de entradas não comprovadas.
+- Validação local final: 1.372 testes selecionados passaram com pytest 9.1.1 do lock,
+  sem falhas/erros/skips; gates nativos e browser executados separadamente.
+  Revisões independentes aprovadas no contrato fechado; instalação segue separada.
+- [Contrato, comandos, provas e limites](docs/native-claude-context.md).
+
 ## 05/11/2026 — DEV17
 
 - Adicionado [contrato limitado de leitura Claude Desktop 2.1.309](docs/claude-desktop-309.md)

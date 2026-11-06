@@ -812,6 +812,17 @@ def convert_session(
     session: Session, options: ConversionOptions, *, environ: Mapping[str, str] | None = None
 ) -> ConversionArtifact:
     target_format = TargetFormat(options.target_format.value)
+    from session_migrate.formats.claude_compaction import POLICY_ID as native_context_policy
+
+    if (
+        target_format is not TargetFormat.OPENCODE or options.target_cli_version != "2.2.5"
+    ) and any(
+        event.payload.get("native_context_policy") == native_context_policy
+        for event in session.events
+    ):
+        raise SessionMigrateError(
+            "Native Claude compaction context requires the exact OpenCode 2.2.5 target"
+        )
     if options.cwd is None and any(
         event.kind is EventKind.OPAQUE
         and event.payload.get("reason") == "duplicate_envelope_cwd_conflict"

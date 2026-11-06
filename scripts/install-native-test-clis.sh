@@ -122,12 +122,20 @@ if want opencode-v21; then
   npm_cli opencode-v21 '@opencode/cli@2.1.1' \
     SESSION_MIGRATE_TEST_OPENCODE_V2 node_modules/@opencode/cli-linux-x64/bin/opencode
 fi
-if want opencode-v22; then
+if want opencode-v22 || want claude-context; then
   npm_cli opencode-v22 '@opencode/cli@2.2.5' \
     SESSION_MIGRATE_TEST_OPENCODE_V2 node_modules/@opencode/cli-linux-x64/bin/opencode
   opencode_v22_binary="$native_root/npm/opencode-v22/node_modules/@opencode/cli-linux-x64/bin/opencode"
   verify 8d060e1d2fbb9bb44cf09ae6ed1f3f6a7cff070b5227e2f90970132b23a92050 "$opencode_v22_binary"
   record SESSION_MIGRATE_TEST_OPENCODE_V22 "$opencode_v22_binary"
+fi
+if want claude-context; then
+  claude_context_binary="$native_root/claude-309/claude"
+  download \
+    'https://unpkg.com/@anthropic-ai/claude-code-linux-x64@2.1.309/claude' \
+    4d704a8aecbe038affa3000f498ae17c1b4f753add8facb8764120affc99b658 \
+    "$claude_context_binary"
+  record SESSION_MIGRATE_TEST_CLAUDE_309_BIN "$claude_context_binary"
 fi
 if want pi; then
   npm_cli pi '@earendil-works/pi-coding-agent@0.80.6' \

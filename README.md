@@ -76,6 +76,9 @@ shared history are read through bounded storage captures.
 See the [DEV16 release reference](docs/dev16-release.md) for the update summary,
 compatibility, new commands and HTTP endpoints.
 
+See the [native-context and editable-tree contract](docs/native-claude-context.md)
+for the closed DEV18 reader, independent publication, validation and unresolved limits.
+
 See [current client compatibility](docs/current-client-compatibility.md) for
 exact tested releases and native replay limits.
 DEV17 adds a Claude Desktop 2.1.309 [bounded source-reader contract](docs/claude-desktop-309.md)
